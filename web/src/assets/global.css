@@ -1,0 +1,39 @@
+* { box-sizing: border-box; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', Roboto, sans-serif;
+  background: linear-gradient(160deg, #eef1fb 0%, #f4f5fb 40%, #eef0fa 100%);
+  background-attachment: fixed;
+  color: #1f2937;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  background: #c7cbe6;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover { background: #aab0d8; }
+::-webkit-scrollbar-track { background: transparent; }
+
+::selection { background: rgba(99, 102, 241, 0.22); }
+
+.page-card {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(20, 24, 80, 0.06);
+}
+
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mono { font-family: 'SFMono-Regular', Consolas, monospace; }

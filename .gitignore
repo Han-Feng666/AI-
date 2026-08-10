@@ -47,6 +47,17 @@
 **/.pnpm-store/
 **/*.tsbuild*
 
+# 本地数据库（用户数据）
+server/src/data/
+server/data/
+server/*.db
+server/*.db-wal
+server/*.db-shm
+
+# Electron 打包产物
+desktop/release/
+desktop/.build/
+
 # Python
 **/__pycache__/
 *.py[cod]

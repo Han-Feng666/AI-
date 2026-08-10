@@ -1,0 +1,145 @@
+/* 深色模式适配：覆盖自定义组件的固定浅色背景与文字色 */
+
+html.dark body { background: #13141f; color: #e5e7eb; }
+html.dark #app { background: #13141f; }
+html.dark ::-webkit-scrollbar-thumb { background: #3b3f54; }
+
+html.dark .page-card { background: #1e2130; box-shadow: none; }
+
+/* Home */
+html.dark .page-title, html.dark .card-title { color: #e5e7eb; }
+html.dark .page-sub, html.dark .update-time, html.dark .tip-text, html.dark .stat-label { color: #8b91a7; }
+html.dark .novel-card {
+  background: #1e2130;
+  box-shadow: none;
+  border: 1px solid #2a2e40;
+}
+html.dark .novel-card:hover { border-color: #6366f1; }
+html.dark .cover { background: #262a3a; }
+html.dark .cover-title { color: #e5e7eb; }
+html.dark .stat-num { color: #e5e7eb; }
+
+/* StyleLibrary */
+html.dark .style-card {
+  background: #1e2130;
+  box-shadow: none;
+  border: 1px solid #2a2e40;
+}
+html.dark .style-name { color: #e5e7eb; }
+html.dark .style-overview, html.dark .style-time, html.dark .field-text, html.dark .text-hint, html.dark .upload-tip { color: #9ca3af; }
+html.dark .field { background: #262a3a; border-color: #33384a; }
+html.dark .field-label { color: #a5b4fc; }
+html.dark .example { background: #1a1d2a; color: #d1d5db; }
+html.dark .detail-body { background: #1e2130; }
+html.dark .analyze-status { color: #9ca3af; }
+
+/* Editor */
+html.dark .editor-toolbar { background: #1e2130; box-shadow: none; }
+html.dark .stat-chip { background: #262a3a; color: #9ca3af; }
+html.dark .stat-chip.ctx-compressed { background: #0f2f25; color: #34d399; }
+html.dark .ask-body .ask-title { color: #e5e7eb; }
+html.dark .ask-desc { color: #9ca3af; }
+html.dark .baseline-tip { background: #1d2440; color: #b9c2e8; }
+html.dark .tool-title :deep(.el-input__inner) { color: #e5e7eb; }
+
+/* LeftPanel */
+html.dark .left-panel { background: #1e2130; }
+html.dark .chapter-item { background: #262a3a; border-color: #2a2e40; }
+html.dark .chapter-item:hover { background: #2d3245; }
+html.dark .chapter-item.active { background: #312e81; }
+html.dark .chapter-title { color: #e5e7eb; }
+html.dark .chapter-no { color: #8b91a7; }
+html.dark .chapter-sub, html.dark .outline-label, html.dark .section-title { color: #9ca3af; }
+html.dark .outline-text { color: #cbd5e1; }
+html.dark .setup-tip, html.dark .style-tab-tip, html.dark .style-empty-tip { color: #8b91a7; }
+html.dark .selected-item { background: #262a3a; border-color: #33384a; }
+html.dark .selected-name { color: #e5e7eb; }
+html.dark .selected-desc { color: #9ca3af; }
+
+/* ChapterArea */
+html.dark .chapter-area { background: #1e2130; box-shadow: none; }
+html.dark .gen-head { background: #171a26; border-color: #2a2e40; }
+html.dark .gen-status { color: #a5b4fc; }
+html.dark .gen-content, html.dark .chapter-content { color: #d1d5db; }
+html.dark .chapter-title { color: #e5e7eb; }
+html.dark .detect-box { background: #171a26; border-color: #2a2e40; }
+html.dark .detect-label { color: #e5e7eb; }
+html.dark .issue-item { background: #1a1d2a; border-color: #3a3d12; }
+html.dark .issue-quote { color: #e5e7eb; }
+html.dark .issue-problem { color: #fbbf24; }
+html.dark .issue-suggestion { color: #9ca3af; }
+html.dark .backup-item { background: #262a3a; border-color: #33384a; }
+html.dark .backup-reason { color: #e5e7eb; }
+html.dark .backup-sub { color: #8b91a7; }
+html.dark .backup-empty { color: #8b91a7; }
+html.dark .detect-pass { background: #0d3b2e; color: #34d399; }
+html.dark .detect-rounds { color: #8b91a7; }
+html.dark .issue-head .issue-problem { color: #fbbf24; }
+html.dark .trend-ch { color: #9ca3af; }
+html.dark .trend-bar-wrap { background: #262a3a; }
+html.dark .trend-tip, html.dark .trend-empty { color: #8b91a7; }
+
+/* ChatPanel */
+html.dark .chat-panel { background: #1e2130; box-shadow: none; }
+html.dark .chat-head { background: #171a26; border-color: #2a2e40; }
+html.dark .chat-title { color: #e5e7eb; }
+html.dark .chat-sub { color: #8b91a7; }
+html.dark .msg .bubble { color: #d1d5db; }
+html.dark .ai-bubble { background: #262a3a; border-color: #33384a; }
+html.dark .user-bubble { background: #312e81; color: #e5e7eb; }
+html.dark .quick-tag { background: #262a3a; border-color: #33384a; color: #a5b4fc; }
+html.dark .quick-tag:hover { background: #2d3245; }
+html.dark .chat-input { background: #171a26; border-color: #2a2e40; }
+
+/* 面板组件 */
+html.dark .char-panel, html.dark .rel-panel, html.dark .foreshadow-panel, html.dark .world-settings-panel { background: transparent; }
+html.dark .char-card, html.dark .rel-item, html.dark .foreshadow-item, html.dark .ws-item, html.dark .sug-item {
+  background: #262a3a;
+  border-color: #33384a;
+}
+html.dark .char-name, html.dark .rel-name, html.dark .foreshadow-content, html.dark .ws-name { color: #e5e7eb; }
+html.dark .char-desc, html.dark .rel-desc, html.dark .foreshadow-meta, html.dark .ws-content,
+html.dark .rel-names, html.dark .foreshadow-stats, html.dark .sug-desc { color: #9ca3af; }
+html.dark .char-panel :deep(.el-card), html.dark .rel-panel :deep(.el-card) { background: #1e2130; border-color: #2a2e40; }
+html.dark .sug-group { color: #8b91a7; }
+html.dark .foreshadow-actions, html.dark .rel-actions { border-color: #2a2e40; }
+
+/* Element 弹层与表格在 dark 下的统一背景 */
+html.dark .el-dialog { background: #1e2130; }
+html.dark .el-dialog__title { color: #e5e7eb; }
+html.dark .el-drawer { background: #1e2130; }
+html.dark .el-popper { background: #262a3a; }
+html.dark .el-input__inner, html.dark .el-textarea__inner { color: #e5e7eb; }
+html.dark .el-empty__description { color: #8b91a7; }
+html.dark .el-message-box { background: #1e2130; }
+html.dark .card-title { color: #e5e7eb; }
+html.dark .storage-tip { background: #0f2f25; border-color: #174a3a; color: #a7f3d0; }
+html.dark .tips-card { background: #1e2130; box-shadow: none; }
+html.dark .tips-card h4 { color: #e5e7eb; }
+html.dark .tips-card ul { color: #9ca3af; }
+html.dark .test-result.ok { background: #0f2f25; color: #34d399; }
+html.dark .test-result.fail { background: #3a1517; color: #fca5a5; }
+
+/* 新版三栏工作区：左导航 / 章节列 / 工作面板 */
+html.dark .nav-bar { background: #1e2130; box-shadow: none; }
+html.dark .nav-item { color: #8b91a7; }
+html.dark .nav-item:hover { background: #262a3a; color: #a5b4fc; }
+html.dark .nav-item.active { background: #312e81; color: #e0e7ff; border-color: #4338ca; }
+html.dark .chapter-list { background: #1e2130; box-shadow: none; }
+html.dark .workspace-panel { background: #1e2130; box-shadow: none; }
+html.dark .setup-title, html.dark .panel-title, html.dark .outline-label { color: #e5e7eb; }
+html.dark .style-tip { background: #171a26; border-color: #2a2e40; color: #9ca3af; }
+html.dark .setup-tip, html.dark .style-empty-tip { color: #8b91a7; }
+html.dark .outline-text { background: #171a26; border-color: #2a2e40; color: #cbd5e1; }
+html.dark .selected-item { background: #262a3a; }
+html.dark .selected-name { color: #e5e7eb; }
+html.dark .selected-desc { color: #9ca3af; }
+
+/* 阅读器排版细节 */
+html.dark .chapter-content .para { color: #d1d5db; }
+html.dark .nav-hint { color: #565b74; }
+html.dark .edit-count { color: #9ca3af; }
+html.dark .edit-shortcut { color: #565b74; }
+html.dark .progress-bar { background: linear-gradient(90deg, #6366f1, #8b5cf6); }
+html.dark .progress-wrap { background: #2a2e40; }
+html.dark .progress-text { color: #8b91a7; }

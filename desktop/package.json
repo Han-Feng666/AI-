@@ -1,0 +1,63 @@
+{
+  "name": "ai-novel-studio-desktop",
+  "version": "1.0.0",
+  "description": "AI 小说工坊 - 本地桌面版",
+  "main": "electron/main.cjs",
+  "author": "Novel Studio",
+  "license": "MIT",
+  "desktopName": "ai-novel-studio",
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "prep:win": "node scripts/prepare-deps.cjs && electron-builder --win nsis",
+    "prep:mac": "node scripts/prepare-deps.cjs && electron-builder --mac",
+    "prep:linux": "node scripts/prepare-deps.cjs && electron-builder --linux AppImage",
+    "dist:win": "electron-builder --win nsis",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux AppImage"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.novelstudio.ai",
+    "productName": "AI小说工坊",
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "../server", "to": "server", "filter": ["**/*", "!**/node_modules/**", "!src/data/**", "!data/**"] },
+      { "from": ".build/server-deps", "to": "server/node_modules" },
+      { "from": "../web/dist", "to": "web/dist" }
+    ],
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI小说工坊",
+      "installerLanguages": ["zh_CN"]
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }]
+    },
+    "linux": {
+      "category": "Utility",
+      "target": ["AppImage"],
+      "syncDesktopName": true
+    }
+  }
+}

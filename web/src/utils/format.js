@@ -1,0 +1,198 @@
+export function formatNumber(n) {
+  return Number(n || 0).toLocaleString('zh-CN');
+}
+
+// 从流式 JSON 文本中提取可读的中文内容，供生成方案时预览。
+// 模型返回的是带英文键名的 JSON 结构，直接透传给用户会看到一堆键名与乱码，
+// 这里提取其中的字符串值（优先含中文的），拼成易读预览。
+export function planStreamPreview(raw) {
+  if (!raw) return '';
+  let t = String(raw);
+  // 处理 \uXXXX 转义：中转站/模型可能把中文序列化为转义形式，
+  // 直接展示就是乱码；先还原成真实字符再提取（不影响 JSON 结构判断）。
+  if (t.includes('\\u')) {
+    try {
+      t = t.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)));
+    } catch { /* 还原失败保留原文 */ }
+  }
+  const out = [];
+  // 正则匹配 JSON 字符串值："key": "value"
+  const re = /"((?:\\.|[^"\\])*)"\s*:\s*"((?:\\.|[^"\\])*)"/g;
+  let m;
+  while ((m = re.exec(t))) {
+    const key = m[1];
+    const val = m[2].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+    if (!val) continue;
+    // 跳过显然是结构占位的值（纯英文键名、markdown 围栏等）
+    if (/^```/.test(val)) continue;
+    if (/^\{.*\}$/.test(val) || /^\[.*\]$/.test(val)) continue;
+    // 只保留含中文的值，避免把英文键名/英文说明刷给用户
+    if (!/[\u4e00-\u9fff]/.test(val)) continue;
+    const label = { title: '书名', genre: '类型', world_view: '世界观', outline: '大纲', name: '名称', summary: '概要', description: '简介', personality: '性格', background: '身世', goal: '目标', ability: '能力', role_type: '定位', faction: '所属势力', relation_type: '关系', arc: '弧线', chapter_range: '章节范围' }[key];
+    out.push(label ? `【${label}】${val}` : val);
+  }
+  if (out.length) return out.slice(0, 40).join('\n');
+  // 无法按键提取时，兜底只保留中文片段
+  const zh = t.replace(/"((?:\\.|[^"\\])*)"/g, (s, inner) => inner).split(/\n|[,{}[\]]/).map((s) => s.trim()).filter((s) => s && /[\u4e00-\u9fff]/.test(s));
+  return zh.slice(0, 40).join('\n');
+}
+
+export function formatDate(s) {
+  if (!s) return '';
+  return String(s).replace('T', ' ').slice(0, 16);
+}
+
+export function formatWords(n) {
+  const v = Number(n || 0);
+  if (v >= 100000000) return (v / 100000000).toFixed(1) + ' 亿字';
+  if (v >= 10000) return (v / 10000).toFixed(1) + ' 万字';
+  return formatNumber(v) + ' 字';
+}
+
+export function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).then(
+      () => true,
+      () => fallbackCopy(text)
+    );
+  }
+  return Promise.resolve(fallbackCopy(text));
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { /* ignore */ }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+export function saveGenDraft(novelId, text, idx = null) {
+  try {
+    localStorage.setItem(`novel_gen_draft_${novelId}`, JSON.stringify({ idx, text }));
+  } catch { /* 空间不足时静默 */ }
+}
+
+export function getGenDraftMeta(novelId) {
+  try {
+    const raw = localStorage.getItem(`novel_gen_draft_${novelId}`) || '';
+    if (!raw) return null;
+    try {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj.text === 'string') return obj;
+    } catch { /* 旧版纯文本草稿 */ }
+    return { idx: null, text: raw };
+  } catch { return null; }
+}
+
+export function clearGenDraft(novelId) {
+  try { localStorage.removeItem(`novel_gen_draft_${novelId}`); } catch { /* ignore */ }
+}
+
+export function getGenDraft(novelId) {
+  return getGenDraftMeta(novelId)?.text || '';
+}
+
+export function downloadText(filename, text) {
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export const GENRES = [
+  '玄幻', '仙侠', '奇幻', '科幻', '都市', '言情', '悬疑', '推理',
+  '惊悚', '恐怖', '历史', '架空', '军事', '战争', '武侠', '游戏',
+  '体育', '青春', '校园', '职场', '商战', '宫廷', '宅斗', '权谋',
+  '重生', '穿越', '系统流', '无限流', '克苏鲁', '蒸汽朋克', '赛博朋克',
+  '末世', '废土', '种田', '美食', '直播', '娱乐', '轻小说', '侦探',
+  '同人', '影视化', '黑科技', '修真', '巫师流', '洪荒流',
+  '神话', '童话', '魔幻', '基建', '电竞', '星际',
+  '机甲', '二次元', '盗墓', '探险', 'ASMR'
+];
+
+export const PRESET_STYLES = [
+  '热血燃向', '轻松日常', '幽默风趣', '冷峻写实', '深沉黑暗',
+  '治愈温暖', '古风典雅', '华丽辞藻', '简洁利落', '文青诗意',
+  '悬疑紧张', '铁血硬汉', '温情细腻', '快节奏爽文', '慢热厚积',
+  '群像史诗', '第一人称沉浸', '恐怖压抑', '浪漫甜蜜', '荒诞讽刺',
+  '冷幽默', '段子流', '诗意抒情', '官场写法', '意识流', '极简白描',
+  '二次元中二味', '魔幻现实', '电影分镜感', '纪录片旁白',
+  '方言口语化', '老白文', '毒草', '种田团的温度', '日式治愈'
+];
+
+// Phase 9：篇幅分级（决定模型默认 chapterWordCount / targetChapters 推荐值）
+export const LENGTH_CLASSES = [
+  {
+    key: 'short',
+    label: '短篇',
+    desc: '1-10 章，每章约 2-3 千字',
+    chapterWordCount: 2500,
+    targetChapters: 5
+  },
+  {
+    key: 'medium',
+    label: '中篇',
+    desc: '10-50 章，每章约 3-5 千字',
+    chapterWordCount: 3500,
+    targetChapters: 20
+  },
+  {
+    key: 'long',
+    label: '长篇连载',
+    desc: '50 章以上，每章约 3-5 千字',
+    chapterWordCount: 4000,
+    targetChapters: 80
+  }
+];
+
+export function splitGenres(genre) {
+  return String(genre || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export const ROLE_TYPES = ['主角', '主角团', '大反派', '反派', '导师', '红颜', '重要配角', '配角'];
+
+export const FACTION_TYPES = ['宗门', '王朝', '商会', '暗组织', '家族', '学院', '军方', '异族', '联盟', '帮派'];
+
+export const FACTION_STANCES = ['正派', '中立', '邪派'];
+
+export const RELATION_TYPES = [
+  '朋友', '恋人', '夫妻', '师徒', '兄妹', '父子', '母女', '祖孙',
+  '仇敌', '对手', '盟友', '上下级', '同事', '同学', '同门', '主仆', '其他'
+];
+
+export const AVATAR_COLORS = [
+  '#6366f1', '#ec4899', '#f59e0b', '#10b981', '#06b6d4',
+  '#8b5cf6', '#ef4444', '#f97316', '#14b8a6', '#eab308'
+];
+
+export const ROLE_COLORS = {
+  '主角': '#ef4444',
+  '主角团': '#f97316',
+  '大反派': '#8b5cf6',
+  '反派': '#8b5cf6',
+  '导师': '#06b6d4',
+  '红颜': '#ec4899',
+  '重要配角': '#f59e0b',
+  '配角': '#6366f1'
+};
+
+export const STATUS_MAP = {
+  draft: { text: '草稿', type: 'info' },
+  planned: { text: '已规划', type: 'warning' },
+  writing: { text: '创作中', type: 'primary' },
+  finished: { text: '已完成', type: 'success' }
+};
