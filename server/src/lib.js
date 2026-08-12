@@ -332,3 +332,64 @@ export function estimateTokens(text) {
   const other = text.length - cjk;
   return Math.round(cjk * 0.7 + other / 4);
 }
+
+// ===== TXT 导入解析 =====
+const CHAPTER_HEAD_RE = /^\s*(第\s*[0-9零一二三四五六七八九十百千万两〇壹贰叁肆伍陆柒捌玖拾佰仟]+\s*[章回节卷部篇]|【?\s*[0-9零一二三四五六七八九十百千万两〇壹贰叁肆伍陆柒捌玖拾佰仟]+\s*[章回节卷部篇]|前言|序言|楔子|序章|终章|尾声|番外(?:\s*[0-9零一二三四五六七八九十百千万两〇壹贰叁肆伍陆柒捌玖拾佰仟]*)?)\s*[：:、\-—\s]*/;
+
+// 解析 TXT 小说为章节数组。返回 { chapters: [{title, content}], splitted: boolean }
+// 优先按「第X章」行首标题切分；无标题识别时按每 DEFAULT_CHUNK 字切分。
+export function parseTxtChapters(text) {
+  const raw = String(text || '');
+  const DEFAULT_CHUNK = 2000;
+  const lines = raw.split(/\r?\n/);
+  const chapters = [];
+  let cur = null;
+  let splitted = false;
+
+  const flush = () => {
+    if (!cur) return;
+    const content = cur.lines.join('\n').replace(/^\s+|\s+$/g, '');
+    if (content) chapters.push({ title: cur.title, content });
+    cur = null;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const m = trimmed.match(CHAPTER_HEAD_RE);
+    if (m && trimmed.length <= 60) {
+      flush();
+      const head = m[0].replace(/[：:、\-—\s]+$/g, '');
+      cur = { title: head, lines: [] };
+    } else if (cur) {
+      cur.lines.push(line);
+    } else if (trimmed) {
+      // 标题识别之前出现的正文行，并入第一个章节
+      cur = { title: '第1章', lines: [line] };
+    }
+  }
+  flush();
+
+  if (!chapters.length) {
+    // 完全没有标题：按字数切分
+    splitted = true;
+    const total = raw.length;
+    for (let start = 0; start < total; start += DEFAULT_CHUNK) {
+      const slice = raw.slice(start, start + DEFAULT_CHUNK).replace(/^\s+|\s+$/g, '');
+      if (slice) chapters.push({ title: `第${Math.floor(start / DEFAULT_CHUNK) + 1}章`, content: slice });
+    }
+  }
+
+  // 识别出的章节极少且单章超大（无换行大文本或标题几乎不出现）：按字数重新切分
+  if (!splitted && chapters.length === 1 && chapters[0].content.length > DEFAULT_CHUNK * 3) {
+    splitted = true;
+    const big = chapters[0].content;
+    const re = [];
+    for (let start = 0; start < big.length; start += DEFAULT_CHUNK) {
+      const slice = big.slice(start, start + DEFAULT_CHUNK).replace(/^\s+|\s+$/g, '');
+      if (slice) re.push({ title: `第${Math.floor(start / DEFAULT_CHUNK) + 1}章`, content: slice });
+    }
+    return { chapters: re, splitted };
+  }
+
+  return { chapters, splitted };
+}

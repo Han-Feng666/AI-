@@ -448,6 +448,42 @@ ensureColumn('characters', 'ability', "ability TEXT DEFAULT ''");
 ensureColumn('novels', 'story_arcs', "story_arcs TEXT DEFAULT ''");
 ensureColumn('novels', 'expanded_world', "expanded_world TEXT DEFAULT ''");
 
+// ===== 整本改编（TXT 导入底稿 + 逐章候选） =====
+db.exec(`
+CREATE TABLE IF NOT EXISTS adaptation_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  novel_id INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+  intent TEXT DEFAULT '',
+  plan TEXT DEFAULT '',
+  status TEXT DEFAULT 'drafting_plan',
+  current_index INTEGER DEFAULT 0,
+  total_chapters INTEGER DEFAULT 0,
+  accepted_count INTEGER DEFAULT 0,
+  skipped_count INTEGER DEFAULT 0,
+  failed_count INTEGER DEFAULT 0,
+  error TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_adapt_jobs_novel ON adaptation_jobs(novel_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS adaptation_candidates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  novel_id INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+  job_id INTEGER NOT NULL REFERENCES adaptation_jobs(id) ON DELETE CASCADE,
+  chapter_index INTEGER NOT NULL,
+  original_title TEXT DEFAULT '',
+  original_content TEXT DEFAULT '',
+  candidate_title TEXT DEFAULT '',
+  candidate_content TEXT DEFAULT '',
+  status TEXT DEFAULT 'pending',
+  error TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_adapt_cand_job ON adaptation_candidates(job_id, chapter_index);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_adapt_cand_unique ON adaptation_candidates(job_id, chapter_index);
+`);
+
 function getSetting(key, fallback = '') {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
   return row ? row.value : fallback;

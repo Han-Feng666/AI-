@@ -10,7 +10,9 @@ const _defaultSliceState = {
   busy: false, busyLabel: '', genStream: '', genProgress: 0,
   chatMessages: [], chatStream: '', chatBusy: false,
   activeChapter: null, chapterLoading: false, chapterEdit: false, editContent: '',
-  workspace: 'setup', generationAsk: null
+  workspace: 'setup', generationAsk: null,
+  adaptJob: null, adaptCandidates: [], adaptDialog: false, adaptPlanStream: '',
+  adaptBusy: false, adaptTargetChapter: null, adaptCompare: null
 };
 
 export const useEditorStore = defineStore('editor', {
@@ -56,6 +58,14 @@ export const useEditorStore = defineStore('editor', {
     worldSettings: [],
     worldSettingsLoading: false,
 
+    adaptJob: null,
+    adaptCandidates: [],
+    adaptDialog: false,
+    adaptPlanStream: '',
+    adaptBusy: false,
+    adaptTargetChapter: null,
+    adaptCompare: null,
+
     _slices: new Map()
   }),
 
@@ -70,7 +80,7 @@ export const useEditorStore = defineStore('editor', {
 
   actions: {
     // === 多书并行：slice 切换骨架（REQ-03） ===
-    _persistentFields: ['novel','chapters','characters','relationships','factions','foreshadowings','worldSettings','busy','busyLabel','genStream','chatMessages','chatStream','chatBusy','activeChapter','chapterLoading','chapterEdit','editContent','workspace','generationAsk'],
+    _persistentFields: ['novel','chapters','characters','relationships','factions','foreshadowings','worldSettings','busy','busyLabel','genStream','chatMessages','chatStream','chatBusy','activeChapter','chapterLoading','chapterEdit','editContent','workspace','generationAsk','adaptJob','adaptCandidates','adaptDialog','adaptPlanStream','adaptBusy','adaptTargetChapter','adaptCompare'],
 
     _saveSlice(novelId) {
       if (!novelId) return;
@@ -714,6 +724,127 @@ export const useEditorStore = defineStore('editor', {
     async removeWorldSetting(sid) {
       await api.deleteWorldSetting(this.novelId, sid);
       this.worldSettings = this.worldSettings.filter((x) => x.id !== sid);
+    },
+
+    // ================= 整本改编（TXT 导入 + 逐章候选） =================
+    async importTxt(title, content) {
+      const data = await api.importTxt({ title, content });
+      if (data?.novel) {
+        await this.switchTo(data.novel.id);
+      }
+      return data;
+    },
+
+    // 打开改编对话框并生成改编方案（SSE 流式）
+    async startAdaptation(intent) {
+      const originId = this.novelId;
+      this.adaptBusy = true;
+      this.adaptPlanStream = '';
+      this.adaptDialog = true;
+      try {
+        const p = api.adaptationPlan(this.novelId, intent, {
+          onStatus: (m) => { this._commit(originId, { adaptBusy: true }); },
+          onProgress: (pct, msg) => { /* 方案阶段进度不细粒度展示 */ },
+          onDelta: (d) => {
+            const cur = String(this.novelId) === String(originId) ? (this.$state.adaptPlanStream || '') : ((this._slices.get(String(originId)) || {}).adaptPlanStream || '');
+            this._commit(originId, { adaptPlanStream: cur + d });
+          },
+          onError: (m) => { throw new Error(m); }
+        });
+        this._genAbort = p.abort;
+        const data = await p;
+        this._commit(originId, {
+          adaptJob: { ...(this.adaptJob || {}), id: data.jobId, status: 'plan_ready', plan: data.plan },
+          adaptBusy: false, adaptPlanStream: '', _genAbort: null
+        });
+        return data;
+      } catch (e) {
+        if (e.message === '已停止') return null;
+        throw e;
+      } finally {
+        this._commit(originId, { adaptBusy: false, _genAbort: null });
+      }
+    },
+
+    // 开始逐章改编（方案确认后）
+    async beginAdaptation() {
+      await api.adaptationStart(this.novelId);
+      await this.loadAdaptation();
+      return true;
+    },
+
+    // 生成当前章的候选（SSE），返回候选数据
+    async adaptationNext() {
+      if (this.adaptBusy) return null;
+      const originId = this.novelId;
+      this.adaptBusy = true;
+      this.adaptTargetChapter = null;
+      try {
+        const p = api.adaptationNext(this.novelId, {
+          onStatus: (m) => { this._commit(originId, { busyLabel: m }); },
+          onProgress: (pct, msg) => {
+            const v = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+            this._commit(originId, { genProgress: v, busyLabel: msg || '正在改编…' });
+          },
+          onDelta: (d) => {
+            const cur = String(this.novelId) === String(originId) ? (this.$state.genStream || '') : ((this._slices.get(String(originId)) || {}).genStream || '');
+            this._commit(originId, { genStream: cur + d });
+          },
+          onError: (m) => { throw new Error(m); }
+        });
+        this._genAbort = p.abort;
+        const data = await p;
+        await this.loadAdaptation();
+        this._commit(originId, {
+          adaptTargetChapter: data?.candidate?.chapter_index ?? null,
+          adaptCompare: data?.candidate ?? null,
+          adaptBusy: false, genStream: '', genProgress: 100, _genAbort: null
+        });
+        return data;
+      } catch (e) {
+        if (e.message === '已停止') return null;
+        throw e;
+      } finally {
+        this._commit(originId, { adaptBusy: false, genStream: '', genProgress: 0, _genAbort: null });
+      }
+    },
+
+    // 采纳候选：写入正式章节
+    async acceptCandidate(cid) {
+      const originId = this.novelId;
+      const data = await api.acceptCandidate(cid);
+      await this.loadAdaptation();
+      if (String(this.novelId) === String(originId)) await this.refresh();
+      this._commit(originId, { adaptCompare: null, adaptTargetChapter: null });
+      return data;
+    },
+
+    // 跳过候选：保留原文
+    async skipCandidate(cid) {
+      await api.skipCandidate(cid);
+      await this.loadAdaptation();
+      this._commit(this.novelId, { adaptCompare: null, adaptTargetChapter: null });
+    },
+
+    // 重试候选：重新生成该章
+    async retryCandidate(cid) {
+      await api.retryCandidate(cid);
+      await this.loadAdaptation();
+      return this.adaptationNext();
+    },
+
+    // 加载/恢复改编任务进度
+    async loadAdaptation() {
+      const data = await api.getAdaptation(this.novelId);
+      this._commit(this.novelId, {
+        adaptJob: data.job,
+        adaptCandidates: data.candidates || []
+      });
+      return data;
+    },
+
+    closeAdaptDialog() {
+      this._commit(this.novelId, { adaptDialog: false, adaptPlanStream: '' });
     }
   }
 });

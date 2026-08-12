@@ -323,6 +323,16 @@ export const api = {
   search: (query, opts = {}) => http.post('/search', { query, ...opts }),
   getSearchSettings: () => http.get('/search/settings'),
   saveSearchSettings: (data) => http.put('/search/settings', data),
+
+  // TXT 导入 + 整本改编
+  importTxt: (data) => http.post('/novels/import-txt', data),
+  adaptationPlan: (id, intent, handlers) => streamRequest(`/novels/${id}/adaptation/plan`, { intent }, handlers),
+  getAdaptation: (id) => http.get(`/novels/${id}/adaptation`),
+  adaptationStart: (id) => http.post(`/novels/${id}/adaptation/start`, {}),
+  adaptationNext: (id, handlers) => streamRequest(`/novels/${id}/adaptation/next`, {}, handlers),
+  acceptCandidate: (cid) => http.post(`/adaptation-candidates/${cid}/accept`, {}),
+  skipCandidate: (cid) => http.post(`/adaptation-candidates/${cid}/skip`, {}),
+  retryCandidate: (cid) => http.post(`/adaptation-candidates/${cid}/retry`, {}),
 };
 
 export default api;

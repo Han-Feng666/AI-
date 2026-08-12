@@ -64,6 +64,45 @@ function jobLabel(nid) {
 }
 const dialogOpen = ref(false);
 const saving = ref(false);
+const importOpen = ref(false);
+const importing = ref(false);
+const importTitle = ref('');
+const importFile = ref(null);
+const importResult = ref(null);
+
+function onImportPick(file) {
+  importFile.value = file.raw || file;
+  if (!importTitle.value && importFile.value) {
+    importTitle.value = (importFile.value.name || '').replace(/\.txt$/i, '');
+  }
+}
+
+async function doImport() {
+  if (!importFile.value) { ElMessage.warning('请选择 TXT 文件'); return; }
+  if (!importTitle.value.trim()) { ElMessage.warning('请填写作品标题'); return; }
+  if (importFile.value.size > 5 * 1024 * 1024) { ElMessage.warning('文件过大，请控制在 5MB 以内'); return; }
+  importing.value = true;
+  try {
+    const text = await importFile.value.text();
+    const data = await api.importTxt({ title: importTitle.value.trim(), content: text });
+    importResult.value = data;
+  } catch (e) {
+    ElMessage.error(e.message || '导入失败');
+  } finally {
+    importing.value = false;
+  }
+}
+
+function finishImport() {
+  const novel = importResult.value?.novel;
+  if (novel) {
+    importOpen.value = false;
+    importResult.value = null;
+    importFile.value = null;
+    importTitle.value = '';
+    router.push(`/novel/${novel.id}`);
+  }
+}
 
 const form = ref({
   title: '',
@@ -182,6 +221,9 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
       <div class="head-actions">
         <el-button size="large" plain @click="router.push('/shared-characters')">
           <el-icon style="margin-right:6px"><UserFilled /></el-icon>共享角色池
+        </el-button>
+        <el-button size="large" plain @click="importOpen = true">
+          <el-icon style="margin-right:6px"><Upload /></el-icon>导入 TXT
         </el-button>
         <el-button type="primary" size="large" @click="dialogOpen = true">
           <el-icon style="margin-right:6px"><Plus /></el-icon>新建小说
@@ -336,6 +378,48 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
         <el-button type="primary" :loading="saving" @click="createNovel">创建并开始创作</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="importOpen" title="导入 TXT 开始改编" width="560px" :close-on-click-modal="false">
+      <div v-if="!importResult" class="import-body">
+        <el-form label-width="80px" @submit.prevent>
+          <el-form-item label="作品标题">
+            <el-input v-model="importTitle" placeholder="输入书名，例如：异界求生录" maxlength="80" show-word-limit />
+          </el-form-item>
+          <el-form-item label="选择文件">
+            <el-upload
+              drag
+              :auto-upload="false"
+              :limit="1"
+              accept=".txt,text/plain"
+              :on-change="onImportPick"
+              :on-remove="() => (importFile.value = null)"
+              :file-list="importFile ? [{ name: importFile.name, raw: importFile }] : []"
+            >
+              <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+              <div class="el-upload__text">拖拽 TXT 文件到此处，或<em>点击选择</em></div>
+              <template #tip>
+                <div class="el-upload__tip">支持 UTF-8 编码的 .txt 全文小说，单文件 ≤ 5MB。导入后将按「章/回/节」自动拆分章节。</div>
+              </template>
+            </el-upload>
+          </el-form-item>
+        </el-form>
+      </div>
+      <div v-else class="import-result">
+        <el-result
+          icon="success"
+          :title="`已导入《${importResult.novel?.title || ''}》`"
+          :sub-title="`成功拆分 ${importResult.imported || 0} 个章节${importResult.splitted ? '（含无标题段落自动分段）' : ''}，可在详情页对该书进行整本改编`"
+        >
+          <template #extra>
+            <el-button type="primary" @click="finishImport">进入改编</el-button>
+          </template>
+        </el-result>
+      </div>
+      <template #footer v-if="!importResult">
+        <el-button @click="importOpen = false">取消</el-button>
+        <el-button type="primary" :loading="importing" @click="doImport">导入</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -347,6 +431,9 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
   margin-bottom: 20px;
 }
 .head-actions { display: flex; gap: 8px; align-items: center; }
+.import-body { padding: 4px 8px; }
+.import-result :deep(.el-result__title) { font-size: 18px; }
+.import-result :deep(.el-result__subtitle) { line-height: 1.7; padding: 0 12px; }
 .page-title { margin: 0; font-size: 24px; font-weight: 700; }
 .page-sub { margin: 6px 0 0; color: #6b7280; font-size: 13px; }
 .novel-grid {

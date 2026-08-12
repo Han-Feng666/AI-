@@ -356,6 +356,7 @@ watch(
           <el-button size="small" type="success" plain @click="copyChapter"><el-icon style="margin-right:4px"><CopyDocument /></el-icon>一键复制</el-button>
           <el-button size="small" type="info" plain :loading="detectLoading" @click="runDetect"><el-icon style="margin-right:4px"><Aim /></el-icon>AI味检测</el-button>
           <el-button size="small" type="warning" plain @click="polish"><el-icon style="margin-right:4px"><Brush /></el-icon>去AI味</el-button>
+          <el-button size="small" type="primary" plain @click="store.adaptDialog = true"><el-icon style="margin-right:4px"><MagicStick /></el-icon>整本改编</el-button>
           <el-button size="small" @click="openBackups"><el-icon style="margin-right:4px"><Clock /></el-icon>历史版本</el-button>
           <el-button size="small" type="warning" plain @click="regenerate"><el-icon style="margin-right:4px"><Refresh /></el-icon>重新生成</el-button>
           <el-button size="small" type="primary" plain @click="localGenerate" :loading="localGenLoading"><el-icon style="margin-right:4px"><Cpu /></el-icon>本地生成</el-button>

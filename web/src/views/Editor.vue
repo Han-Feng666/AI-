@@ -18,6 +18,7 @@ import RelationshipPanel from '../components/RelationshipPanel.vue';
 import StylePanel from '../components/StylePanel.vue';
 import OutlinePanel from '../components/OutlinePanel.vue';
 import StatsPanel from '../components/StatsPanel.vue';
+import AdaptDialog from '../components/AdaptDialog.vue';
 import api from '../api';
 import { copyText, downloadText, formatWords, splitGenres } from '../utils/format';
 
@@ -556,6 +557,8 @@ async function deleteNovel() {
           </div>
         </div>
       </el-dialog>
+
+      <AdaptDialog />
     </template>
   </div>
 </template>

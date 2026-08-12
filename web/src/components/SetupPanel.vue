@@ -110,6 +110,39 @@ const searchLoading = ref(false);
 const searchOpen = ref(false);
 const searchResults = ref([]);
 
+const importOpen = ref(false);
+const importing = ref(false);
+const importTitle = ref('');
+const importFile = ref(null);
+
+function onImportPick(file) {
+  importFile.value = file.raw || file;
+  if (!importTitle.value && importFile.value) {
+    importTitle.value = (importFile.value.name || '').replace(/\.txt$/i, '');
+  }
+}
+
+async function doImport() {
+  if (!importFile.value) { ElMessage.warning('请选择 TXT 文件'); return; }
+  if (!importTitle.value.trim()) { ElMessage.warning('请填写作品标题'); return; }
+  if (importFile.value.size > 5 * 1024 * 1024) { ElMessage.warning('文件过大，请控制在 5MB 以内'); return; }
+  importing.value = true;
+  try {
+    const text = await importFile.value.text();
+    const data = await store.importTxt(importTitle.value.trim(), text);
+    if (data?.novel) {
+      importOpen.value = false;
+      importFile.value = null;
+      importTitle.value = '';
+      ElMessage.success(`已导入《${data.novel.title}》，共 ${data.imported || 0} 章`);
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '导入失败');
+  } finally {
+    importing.value = false;
+  }
+}
+
 async function searchRef() {
   const kw = planForm.value.concept.trim().slice(0, 50);
   if (!kw) {
@@ -413,6 +446,15 @@ function closePlanDialog() {
         </div>
       </div>
 
+      <div class="import-txt-entry">
+        <div class="import-txt-head">
+          <el-icon color="#4f46e5"><UploadFilled /></el-icon>
+          <span>已有整本小说？</span>
+        </div>
+        <div class="import-txt-desc">导入 TXT 全文，自动拆分章节，作为新书开始创作或进行整本改编。</div>
+        <el-button size="small" plain type="primary" @click="importOpen = true">导入 TXT</el-button>
+      </div>
+
       <div class="history-entry">
         <el-link type="primary" :underline="false" @click="openVersions">
           <el-icon><Clock /></el-icon>
@@ -579,6 +621,35 @@ function closePlanDialog() {
         <el-empty v-if="!versions.length && !versionsLoading" description="暂无历史版本" />
       </div>
     </el-drawer>
+
+    <el-dialog v-model="importOpen" title="导入 TXT 开始改编" width="560px" :close-on-click-modal="false" append-to-body>
+      <el-form label-width="80px" @submit.prevent>
+        <el-form-item label="作品标题">
+          <el-input v-model="importTitle" placeholder="输入书名，例如：异界求生录" maxlength="80" show-word-limit />
+        </el-form-item>
+        <el-form-item label="选择文件">
+          <el-upload
+            drag
+            :auto-upload="false"
+            :limit="1"
+            accept=".txt,text/plain"
+            :on-change="onImportPick"
+            :on-remove="() => (importFile.value = null)"
+            :file-list="importFile ? [{ name: importFile.name, raw: importFile }] : []"
+          >
+            <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+            <div class="el-upload__text">拖拽 TXT 文件到此处，或<em>点击选择</em></div>
+            <template #tip>
+              <div class="el-upload__tip">支持 UTF-8 编码的 .txt 全文小说，单文件 ≤ 5MB。导入后将按「章/回/节」自动拆分章节，作为一本新书。</div>
+            </template>
+          </el-upload>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="importOpen = false">取消</el-button>
+        <el-button type="primary" :loading="importing" @click="doImport">导入</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -603,9 +674,33 @@ function closePlanDialog() {
 }
 .check-item { margin-right: 0; }
 .setup-tip {
-  margin-top: 12px;
   font-size: 12px;
   color: #9ca3af;
+  margin-top: 2px;
+  text-align: center;
+}
+.import-txt-entry {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px dashed #c7d2fe;
+  border-radius: 10px;
+  background: #f5f7ff;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+.import-txt-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 14px;
+  color: #1e1b4b;
+}
+.import-txt-desc {
+  font-size: 12px;
+  color: #6b7280;
   line-height: 1.6;
 }
 .setup-actions {

@@ -10,7 +10,8 @@ import {
   getKeyMoments, formatKeyMoments, addKeyMomentUnique,
   getStageMemories, formatStageMemories, upsertStageMemory,
   getCharacterProfiles, upsertCharacterProfile, formatCharacterProfiles,
-  scanAiPatterns, blacklistPenalty, blacklistFlagWords
+  scanAiPatterns, blacklistPenalty, blacklistFlagWords,
+  parseTxtChapters
 } from './lib.js';
 import {
   getNovelsRoot, ensureRoot, setNovelsRoot, ensureNovelFolder, novelFolderPath,
@@ -31,6 +32,7 @@ import {
   CHARACTER_VOICE_EXTRACT_SYSTEM, PLOT_CONSISTENCY_CHECK_SYSTEM, NOVEL_CONSTITUTION_BUILD_SYSTEM,
   CHAPTER_BEAT_SYSTEM, AUTO_SUMMARY_SYSTEM, STYLE_LEARN_APPLY_SYSTEM, NAMEGEN_SYSTEM,
   ARC_PLAN_SYSTEM, WORLD_EXPAND_SYSTEM, EMOTION_CURVE_SYSTEM,
+  ADAPTATION_PLAN_SYSTEM, ADAPTATION_CHAPTER_SYSTEM,
   buildNovelContext, buildChapterSystem, buildPolishSystem,
   buildPolishWithIssues, extractJson
 } from './prompts.js';
@@ -364,6 +366,52 @@ router.post('/novels', async (req, res) => {
     await ensureNovelFolder(novel);
   } catch { /* 目录创建失败不阻塞 */ }
   res.json(novel);
+});
+
+// TXT 导入：把一本已有小说解析为章节，作为全新小说落库（改编底稿）
+router.post('/novels/import-txt', async (req, res) => {
+  const { title = '', content = '', genre = '' } = req.body || {};
+  const rawTitle = String(title).trim();
+  const rawContent = String(content || '');
+  if (!rawTitle) return res.status(400).json({ error: '缺少书名' });
+  if (!rawContent.trim()) return res.status(400).json({ error: '导入内容为空' });
+
+  const { chapters, splitted } = parseTxtChapters(rawContent);
+  if (!chapters.length) return res.status(400).json({ error: '未能从 TXT 中解析出任何章节内容' });
+
+  try {
+    // 事务：建 novel + 章节；任何一步失败整体回滚，不残留半成品
+    const info = db.prepare(
+      'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters) VALUES (?,?,?,?,?)'
+    ).run(rawTitle, genre || '', `从 TXT 导入：${chapters.length} 章`, 2000, chapters.length);
+    const novelId = Number(info.lastInsertRowid);
+    const insertChapter = db.prepare(
+      'INSERT INTO chapters (novel_id, chapter_index, title, content, summary, word_count) VALUES (?,?,?,?,?,?)'
+    );
+    const insertAll = db.prepare('BEGIN');
+    insertAll.run();
+    try {
+      chapters.forEach((ch, i) => {
+        insertChapter.run(novelId, i + 1, ch.title, ch.content, '', countWords(ch.content));
+      });
+      db.prepare('COMMIT').run();
+    } catch (e) {
+      db.prepare('ROLLBACK').run();
+      throw e;
+    }
+    const novel = getNovel(novelId);
+    try { await ensureNovelFolder(novel); } catch { /* 目录失败不阻塞 */ }
+    const chs = getChapters(novelId);
+    for (const ch of chs) {
+      try {
+        const full = getChapter(novelId, ch.chapter_index);
+        if (full && full.content) await writeChapterTxt(novel, full);
+      } catch { /* TXT 副本失败不阻塞 */ }
+    }
+    return res.json({ novel, splitted, imported: chs.length });
+  } catch (e) {
+    return res.status(500).json({ error: `TXT 导入失败：${e.message}` });
+  }
 });
 
 router.get('/novels/:id', async (req, res) => {
@@ -951,6 +999,258 @@ ${feedback}
     updateJob(job.id, { status: 'failed', error: e.message });
     return end({ type: 'error', message: e.message });
   }
+});
+
+// ===== 整本改编：生成改编方案（SSE） =====
+router.post('/novels/:id/adaptation/plan', async (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const intent = String((req.body || {}).intent || '').trim();
+  if (!intent) return res.status(400).json({ error: '请先描述改编意图' });
+  const { config, error } = requireLLM();
+  if (error) return res.status(400).json({ error: error.message });
+
+  // 检查是否有进行中的改编任务（plan 生成中 或 adapting 中）
+  const activeJob = db.prepare(
+    "SELECT id FROM adaptation_jobs WHERE novel_id = ? AND status IN ('drafting_plan','adapting') ORDER BY id DESC LIMIT 1"
+  ).get(novel.id);
+  if (activeJob) {
+    return res.status(409).json({ error: '该小说已有进行中的改编任务', jobId: activeJob.id });
+  }
+
+  const info = db.prepare(
+    "INSERT INTO adaptation_jobs (novel_id, intent, status, total_chapters) VALUES (?,?,?,?)"
+  ).run(novel.id, intent, 'drafting_plan', getChapters(novel.id).length);
+  const jobId = Number(info.lastInsertRowid);
+
+  const { ctrl, send, end } = startSSE(req, res);
+  send({ type: 'job', jobId, stage: 'adaptation_plan' });
+  send({ type: 'progress', progress: 10, message: '正在根据你的改编意图生成改编方案…' });
+  send({ type: 'status', message: '正在根据你的改编意图生成改编方案…' });
+  db.prepare('UPDATE adaptation_jobs SET updated_at = datetime(\'now\',\'localtime\') WHERE id = ?').run(jobId);
+
+  const chs = db.prepare("SELECT chapter_index, title FROM chapters WHERE novel_id = ? AND content != '' ORDER BY chapter_index").all(novel.id);
+  const chapterList = chs.map((c) => `第${c.chapter_index}章 ${c.title}`).join('\n');
+
+  const userPrompt = `以下是待改编的小说章节清单：\n\n${chapterList || '（无章节）'}\n\n用户的改编意图：\n${intent}\n\n请输出完整的改编方案 JSON。`;
+
+  try {
+    let full = '';
+    await runLLMStream(config, [
+      { role: 'system', content: ADAPTATION_PLAN_SYSTEM },
+      { role: 'user', content: userPrompt }
+    ], {
+      ctrl,
+      task: 'planning',
+      maxTokens: Math.max(4096, Number(config.maxTokens) || 8192),
+      onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
+    });
+
+    const plan = extractJson(full);
+    if (!plan) {
+      db.prepare("UPDATE adaptation_jobs SET status = 'failed', error = ?, updated_at = datetime('now','localtime') WHERE id = ?").run('AI 返回内容无法解析为改编方案', jobId);
+      return end({ type: 'error', message: 'AI 返回的内容无法解析为改编方案，请重试。原始输出已附在 raw 字段。', raw: full });
+    }
+    db.prepare("UPDATE adaptation_jobs SET plan = ?, status = 'plan_ready', updated_at = datetime('now','localtime') WHERE id = ?").run(JSON.stringify(plan), jobId);
+    send({ type: 'progress', progress: 100, message: '改编方案已生成' });
+    return end({ type: 'done', data: { jobId, plan } });
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      db.prepare("UPDATE adaptation_jobs SET status = 'aborted', updated_at = datetime('now','localtime') WHERE id = ?").run(jobId);
+      return end({ type: 'aborted', message: '已停止生成' });
+    }
+    db.prepare("UPDATE adaptation_jobs SET status = 'failed', error = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(e.message, jobId);
+    return end({ type: 'error', message: e.message });
+  }
+});
+
+// 获取当前改编任务状态（含全部候选），供刷新/切书后恢复进度
+router.get('/novels/:id/adaptation', (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const job = db.prepare(
+    "SELECT * FROM adaptation_jobs WHERE novel_id = ? ORDER BY id DESC LIMIT 1"
+  ).get(novel.id);
+  if (!job) return res.json({ job: null, candidates: [] });
+  let plan = null;
+  try { plan = job.plan ? JSON.parse(job.plan) : null; } catch { plan = null; }
+  const candidates = db.prepare(
+    'SELECT * FROM adaptation_candidates WHERE job_id = ? ORDER BY chapter_index'
+  ).all(job.id);
+  return res.json({ job: { ...job, plan }, candidates });
+});
+
+// 开始逐章改编（用户在方案确认后调用）
+router.post('/novels/:id/adaptation/start', async (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const job = db.prepare(
+    "SELECT * FROM adaptation_jobs WHERE novel_id = ? AND status = 'plan_ready' ORDER BY id DESC LIMIT 1"
+  ).get(novel.id);
+  if (!job) return res.status(409).json({ error: '没有待开始的改编方案' });
+  db.prepare("UPDATE adaptation_jobs SET status = 'adapting', current_index = 0, updated_at = datetime('now','localtime') WHERE id = ?").run(job.id);
+  res.json({ ok: true, jobId: job.id });
+});
+
+// 生成当前章的候选内容（SSE）：取该章原文 + 意图 + 方案要点 + 前 N 章已采纳摘要
+router.post('/novels/:id/adaptation/next', async (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const { config, error } = requireLLM();
+  if (error) return res.status(400).json({ error: error.message });
+
+  const job = db.prepare(
+    "SELECT * FROM adaptation_jobs WHERE novel_id = ? AND status = 'adapting' ORDER BY id DESC LIMIT 1"
+  ).get(novel.id);
+  if (!job) return res.status(409).json({ error: '当前没有进行中的改编任务' });
+
+  const allChs = db.prepare("SELECT chapter_index, title, content FROM chapters WHERE novel_id = ? AND content != '' ORDER BY chapter_index").all(novel.id);
+  if (!allChs.length) return res.status(400).json({ error: '小说没有可改编的章节' });
+  const total = allChs.length;
+  let currentIndex = Number(job.current_index) || 0;
+
+  // 找到下一个待改编章节：优先处理 retrying/failed 状态的候选，否则选未生成候选的章
+  const existing = db.prepare('SELECT chapter_index, status FROM adaptation_candidates WHERE job_id = ?').all(job.id);
+  const existingMap = new Map(existing.map((c) => [c.chapter_index, c.status]));
+  let target = null;
+  // 1) 优先 retrying / failed 的章
+  for (const [idx, status] of existingMap) {
+    if (status === 'retrying' || status === 'failed') {
+      const ch = allChs.find((c) => c.chapter_index === idx);
+      if (ch) { target = ch; break; }
+    }
+  }
+  // 2) 否则找未生成候选的章
+  if (!target) {
+    for (const ch of allChs) {
+      if (!existingMap.has(ch.chapter_index)) { target = ch; break; }
+    }
+  }
+  if (!target) {
+    db.prepare("UPDATE adaptation_jobs SET status = 'done', updated_at = datetime('now','localtime') WHERE id = ?").run(job.id);
+    return res.status(400).json({ error: '所有章节均已生成候选，请采纳/跳过处理' });
+  }
+
+  let plan = null;
+  try { plan = job.plan ? JSON.parse(job.plan) : null; } catch { plan = null; }
+  const chapterAction = (plan?.chapters || []).find((c) => c.chapter_index === target.chapter_index);
+  const globalNotes = plan?.global_notes || '';
+
+  // 前 N 章已采纳摘要（滚动上下文保证连贯性）
+  const acceptedChs = db.prepare(
+    "SELECT chapter_index, candidate_content FROM adaptation_candidates WHERE job_id = ? AND status = 'accepted' ORDER BY chapter_index"
+  ).all(job.id).slice(-5);
+  const adoptedSummaries = acceptedChs.map((c) => `第${c.chapter_index}章：${String(c.candidate_content).slice(0, 400)}`).join('\n\n');
+
+  const { ctrl, send, end } = startSSE(req, res);
+  send({ type: 'job', jobId: job.id, stage: 'adaptation_chapter', chapterIndex: target.chapter_index });
+  send({ type: 'progress', progress: Math.round((currentIndex / total) * 100), message: `正在改编第 ${target.chapter_index}/${total} 章…` });
+  send({ type: 'status', message: `正在改编第 ${target.chapter_index}/${total} 章…` });
+
+  const userPrompt = `【本章原文】\n第${target.chapter_index}章 ${target.title}\n\n${target.content}
+
+【改编意图】${job.intent}
+
+【全局改编说明】${globalNotes || '（无）'}
+
+【本章改造要点】${chapterAction ? chapterAction.actions.map((a) => `- ${a}`).join('\n') : '（无，按意图自然改编）'}
+
+【已采纳前情摘要】${adoptedSummaries || '（无）'}
+
+请按改编方案改写本章。`;
+
+  try {
+    let full = '';
+    await runLLMStream(config, [
+      { role: 'system', content: ADAPTATION_CHAPTER_SYSTEM },
+      { role: 'user', content: userPrompt }
+    ], {
+      ctrl,
+      task: 'writing',
+      maxTokens: Math.max(6000, Math.min(32000, (target.content.length + 4000) * 2)),
+      onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
+    });
+
+    const candidateContent = full.trim();
+    if (!candidateContent) {
+      db.prepare("UPDATE adaptation_jobs SET failed_count = failed_count + 1, updated_at = datetime('now','localtime') WHERE id = ?").run(job.id);
+      return end({ type: 'error', message: 'AI 未返回内容，请重试该章。' });
+    }
+
+    // 写入候选（唯一索引 (job_id, chapter_index)，重复则更新）
+    db.prepare(
+      `INSERT INTO adaptation_candidates (novel_id, job_id, chapter_index, original_title, original_content, candidate_title, candidate_content, status)
+       VALUES (?,?,?,?,?,?,?,?)
+       ON CONFLICT(job_id, chapter_index) DO UPDATE SET candidate_title = excluded.candidate_title, candidate_content = excluded.candidate_content, status = 'pending', error = ''`
+    ).run(
+      novel.id, job.id, target.chapter_index, target.title, target.content,
+      target.title, candidateContent, 'pending'
+    );
+    db.prepare("UPDATE adaptation_jobs SET current_index = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(target.chapter_index, job.id);
+    send({ type: 'progress', progress: Math.round(((target.chapter_index) / total) * 100), message: `第 ${target.chapter_index} 章候选已生成` });
+
+    const cand = db.prepare("SELECT * FROM adaptation_candidates WHERE job_id = ? AND chapter_index = ?").get(job.id, target.chapter_index);
+    return end({ type: 'done', data: { jobId: job.id, candidate: cand, total, current: target.chapter_index } });
+  } catch (e) {
+    if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止' });
+    db.prepare("UPDATE adaptation_jobs SET failed_count = failed_count + 1, updated_at = datetime('now','localtime') WHERE id = ?").run(job.id);
+    return end({ type: 'error', message: e.message });
+  }
+});
+
+// 候选：采纳（写入正式章节）
+router.post('/adaptation-candidates/:cid/accept', async (req, res) => {
+  const cand = db.prepare('SELECT * FROM adaptation_candidates WHERE id = ?').get(Number(req.params.cid));
+  if (!cand) return res.status(404).json({ error: '候选不存在' });
+  const novel = getNovel(cand.novel_id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+
+  backupChapter(novel.id, cand.chapter_index, '整本改编');
+  db.prepare('UPDATE chapters SET title = ?, content = ?, word_count = ?, updated_at = datetime(\'now\',\'localtime\') WHERE novel_id = ? AND chapter_index = ?')
+    .run(cand.candidate_title || cand.original_title, cand.candidate_content, countWords(cand.candidate_content), novel.id, cand.chapter_index);
+  touchNovel(novel.id);
+  db.prepare("UPDATE adaptation_candidates SET status = 'accepted' WHERE id = ?").run(cand.id);
+  db.prepare("UPDATE adaptation_jobs SET accepted_count = accepted_count + 1, current_index = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(cand.chapter_index, cand.job_id);
+
+  // 同步 TXT 副本 + 生成章节摘要（尽力而为）
+  try {
+    const full = getChapter(novel.id, cand.chapter_index);
+    if (full) await writeChapterTxt(novel, full);
+  } catch { /* 不阻塞 */ }
+  try {
+    const c = cand.candidate_content || '';
+    const sentences = String(c).split(/[。！？\n]/).filter((s) => s.trim().length > 10);
+    const picks = [];
+    if (sentences.length > 0) picks.push(sentences[0].trim());
+    if (sentences.length > 4) picks.push(sentences[Math.floor(sentences.length * 0.3)].trim());
+    if (sentences.length > 8) picks.push(sentences[Math.floor(sentences.length * 0.6)].trim());
+    if (sentences.length > 2) picks.push(sentences[sentences.length - 1].trim());
+    const summary = picks.join('。') + '。';
+    if (summary) {
+      db.prepare('UPDATE chapters SET summary = ? WHERE id = ?').run(summary, getChapter(novel.id, cand.chapter_index).id);
+    }
+  } catch { /* 不阻塞 */ }
+
+  return res.json({ ok: true, chapter: getChapter(novel.id, cand.chapter_index) });
+});
+
+// 候选：跳过（保留原文）
+router.post('/adaptation-candidates/:cid/skip', async (req, res) => {
+  const cand = db.prepare('SELECT * FROM adaptation_candidates WHERE id = ?').get(Number(req.params.cid));
+  if (!cand) return res.status(404).json({ error: '候选不存在' });
+  db.prepare("UPDATE adaptation_candidates SET status = 'skipped' WHERE id = ?").run(cand.id);
+  db.prepare("UPDATE adaptation_jobs SET skipped_count = skipped_count + 1, updated_at = datetime('now','localtime') WHERE id = ?").run(cand.job_id);
+  return res.json({ ok: true });
+});
+
+// 候选：重试（重新生成该章候选）
+router.post('/adaptation-candidates/:cid/retry', async (req, res) => {
+  const cand = db.prepare('SELECT * FROM adaptation_candidates WHERE id = ?').get(Number(req.params.cid));
+  if (!cand) return res.status(404).json({ error: '候选不存在' });
+  db.prepare("UPDATE adaptation_candidates SET status = 'retrying', error = '' WHERE id = ?").run(cand.id);
+  // 重试 = 回到该章重新生成；前端随后调用 /adaptation/next 时用 job.current_index 回退该章
+  db.prepare("UPDATE adaptation_jobs SET current_index = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(Math.max(0, cand.chapter_index - 1), cand.job_id);
+  return res.json({ ok: true, candidateId: cand.id });
 });
 
 // 导出全书（Markdown 文本）
