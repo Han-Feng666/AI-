@@ -191,8 +191,8 @@ export async function chat(opts) {
 
   let resp;
   const isStream = typeof onDelta === 'function';
-  // 流式调用加无数据超时（默认 120s），非流式加整体超时（默认 120s）
-  const streamIdleTimeout = isStream ? (Number(opts.streamIdleTimeout) || 120000) : 0;
+  // 流式调用加无数据超时（默认 180s，长任务如方案生成不容易被超时打断），非流式加整体超时（默认 120s）
+  const streamIdleTimeout = isStream ? (Number(opts.streamIdleTimeout) || 180000) : 0;
   const timeoutMs = isStream ? 0 : Number(opts.timeout) || 120000;
   let timeoutCtrl = null;
   let timer = null;
@@ -248,9 +248,12 @@ export async function chat(opts) {
   }
 
   if (isStream) {
-    const r = await consumeStream(resp, onDelta, combined, streamIdleTimeout);
-    cleanup();
-    return { ...r, content: unescapeUnicode(r.content) };
+    try {
+      const r = await consumeStream(resp, onDelta, combined, streamIdleTimeout);
+      return { ...r, content: unescapeUnicode(r.content) };
+    } finally {
+      cleanup();
+    }
   }
 
   try {

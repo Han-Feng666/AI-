@@ -788,16 +788,37 @@ router.post('/novels/:id/plan', async (req, res) => {
       try {
         lastText = await streamCollect(useMessages, attempt === 1 ? label : `${label}（重试 ${attempt}，已强化格式要求）`);
       } catch (e) {
-        if (e.name === 'AbortError') throw e;
-        // 流式失败，尝试非流式
-        send({ type: 'status', message: `流式请求失败，正在用非流式重试（第 ${attempt} 次）…` });
-        try {
-          const retry = await chat({ config, messages: useMessages, maxTokens: maxOut });
-          lastText = retry?.content || '';
-        } catch (e2) {
-          if (e2.name === 'AbortError') throw e2;
-          send({ type: 'status', message: `第 ${attempt} 次重试失败：${e2.message}，继续重试…` });
-          lastText = '';
+        if (e.name === 'AbortError') {
+          // 超时 AbortError 可能来自流式空闲超时（非用户主动中止），尝试非流式降级
+          if (!ctrl.signal.aborted) {
+            send({ type: 'status', message: `流式响应超时，正在用非流式重试（第 ${attempt} 次）…` });
+            try {
+              const retry = await chat({ config, messages: useMessages, maxTokens: maxOut, timeout: 180000 });
+              lastText = retry?.content || '';
+            } catch (e2) {
+              if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
+                send({ type: 'status', message: `第 ${attempt} 次重试也超时，继续重试…` });
+                lastText = '';
+              } else {
+                throw e2;
+              }
+            }
+          } else {
+            throw e; // 用户主动中止，直接终止
+          }
+        } else {
+          send({ type: 'status', message: `流式请求失败，正在用非流式重试（第 ${attempt} 次）…` });
+          try {
+            const retry = await chat({ config, messages: useMessages, maxTokens: maxOut, timeout: 180000 });
+            lastText = retry?.content || '';
+          } catch (e2) {
+            if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
+              send({ type: 'status', message: `第 ${attempt} 次重试也超时，继续重试…` });
+              lastText = '';
+            } else {
+              throw e2;
+            }
+          }
         }
       }
       const obj = extractJson(lastText);
