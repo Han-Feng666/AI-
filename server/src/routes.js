@@ -752,16 +752,18 @@ router.post('/novels/:id/plan', async (req, res) => {
   }
 
   const maxOut = Math.max(4096, Number(config.maxTokens) || 8192);
+  const skeletonMaxOut = Math.min(maxOut, 4096); // 骨架输出量小，4k 足够
+  const chapterMaxOut = Math.min(maxOut, 2048);  // 每批章节输出，2k 足够
 
   // 流式生成并把内容透传给前端（进度可见），返回完整文本
-  // 单批次 idle 超时：5 分钟无数据则判定超时
-  const streamCollect = async (messages, label) => {
+  // 单批次 idle 超时：3 分钟无数据则判定超时
+  const streamCollect = async (messages, label, mt = maxOut) => {
     let full = '';
     send({ type: 'status', message: label });
     await runLLMStream(config, messages, {
       ctrl,
       task: 'planning',
-      maxTokens: maxOut,
+      maxTokens: mt,
       onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
     });
     return full;
@@ -773,11 +775,11 @@ router.post('/novels/:id/plan', async (req, res) => {
   // 流式生成 + 解析 JSON，最多重试 5 次（流式 + 非流式交替 + 指数退避）
   // 重试时追加格式强化提示，降低格式出错率
   const FORMAT_REMINDER = '\n\n【重要提醒】你之前的输出无法被解析为 JSON。请严格只输出一个 JSON 对象/数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。';
-  const jsonFrom = async (messages, label) => {
+const jsonFrom = async (messages, label, mt = maxOut) => {
     let lastText = '';
-    for (let attempt = 1; attempt <= 5; attempt++) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
       if (attempt > 1) {
-        const waitSec = Math.pow(2, attempt - 1); // 2s, 4s, 8s, 16s
+        const waitSec = Math.pow(2, attempt - 1);
         send({ type: 'status', message: `AI 返回格式异常，第 ${attempt} 次重试（等待 ${waitSec}s 后重试）…` });
         await sleep(waitSec * 1000);
       }
@@ -786,14 +788,14 @@ router.post('/novels/:id/plan', async (req, res) => {
         ? messages.map((m) => m.role === 'user' ? { ...m, content: m.content + FORMAT_REMINDER } : m)
         : messages;
       try {
-        lastText = await streamCollect(useMessages, attempt === 1 ? label : `${label}（重试 ${attempt}，已强化格式要求）`);
+        lastText = await streamCollect(useMessages, attempt === 1 ? label : `${label}（重试 ${attempt}，已强化格式要求）`, mt);
       } catch (e) {
         if (e.name === 'AbortError') {
           // 超时 AbortError 可能来自流式空闲超时（非用户主动中止），尝试非流式降级
           if (!ctrl.signal.aborted) {
             send({ type: 'status', message: `流式响应超时，正在用非流式重试（第 ${attempt} 次）…` });
             try {
-              const retry = await chat({ config, messages: useMessages, maxTokens: maxOut, timeout: 180000 });
+              const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 180000 });
               lastText = retry?.content || '';
             } catch (e2) {
               if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
@@ -809,7 +811,7 @@ router.post('/novels/:id/plan', async (req, res) => {
         } else {
           send({ type: 'status', message: `流式请求失败，正在用非流式重试（第 ${attempt} 次）…` });
           try {
-            const retry = await chat({ config, messages: useMessages, maxTokens: maxOut, timeout: 180000 });
+            const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 180000 });
             lastText = retry?.content || '';
           } catch (e2) {
             if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
@@ -823,8 +825,7 @@ router.post('/novels/:id/plan', async (req, res) => {
       }
       const obj = extractJson(lastText);
       if (obj) return obj;
-      // 记录解析失败的原始内容片段，便于排查
-      if (attempt < 5) {
+      if (attempt < 3) {
         const preview = lastText.slice(0, 120).replace(/\n/g, ' ');
         send({ type: 'status', message: `解析失败（返回内容开头：${preview}…），将重试…` });
       }
@@ -864,7 +865,8 @@ router.post('/novels/:id/plan', async (req, res) => {
         { role: 'system', content: PLAN_SKELETON_SYSTEM + knowledgeBlock },
         { role: 'user', content: userPrompt }
       ],
-      '正在构思世界观、角色与剧情大纲…'
+      '正在构思世界观、角色与剧情大纲…',
+      skeletonMaxOut
     );
     if (!skeleton) {
       // 骨架降级：基于用户输入生成基础骨架
@@ -883,7 +885,7 @@ router.post('/novels/:id/plan', async (req, res) => {
     send({ type: 'progress', progress: 30, message: '骨架已生成，正在规划章节…' });
     updateJob(job.id, { progress: 30, stream_cursor: '骨架已生成，正在规划章节…' });
 
-    // 阶段 2：章节规划（分批，每批 30 章，失败自动降级不中断）
+    // 阶段 2：章节规划（分批，每批 20 章，失败自动降级不中断）
     const skeletonChapters = Array.isArray(skeleton.chapters)
       ? skeleton.chapters.filter((c) => c && c.title).map((c) => ({ title: String(c.title), summary: String(c.summary || '') }))
       : [];
@@ -896,7 +898,7 @@ router.post('/novels/:id/plan', async (req, res) => {
       const MAX_CONSECUTIVE_FALLBACKS = 3;
 
       while (start <= target) {
-        const batchEnd = Math.min(target, start + 29);
+        const batchEnd = Math.min(target, start + 19);
         const batchSize = batchEnd - start + 1;
 
         const batch = await jsonFrom(
@@ -904,7 +906,8 @@ router.post('/novels/:id/plan', async (req, res) => {
             { role: 'system', content: PLAN_CHAPTERS_SYSTEM },
             { role: 'user', content: `作品骨架：\n${brief}\n\n计划章节数：${target} 章。\n请规划第 ${start} 至第 ${batchEnd} 章的标题与剧情概要（共 ${batchSize} 章），必须完整覆盖此编号范围。` }
           ],
-          `正在规划章节 ${start}-${batchEnd}（已完成 ${allChapters.length}/${target}）…`
+          `正在规划章节 ${start}-${batchEnd}（已完成 ${allChapters.length}/${target}）…`,
+          chapterMaxOut
         );
 
         const list = Array.isArray(batch) ? batch : (Array.isArray(batch?.chapters) ? batch.chapters : []);
