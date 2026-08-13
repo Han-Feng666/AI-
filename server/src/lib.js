@@ -311,7 +311,27 @@ export function scanAiPatterns(text) {
     }
     if (count > 0) hits.push({ word: w, count });
   }
+  hits.push(...scanAiPunctuation(text));
   return hits.sort((a, b) => b.count - a.count);
+}
+
+// AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
+export function scanAiPunctuation(text) {
+  const s = String(text || '');
+  const hits = [];
+  // 连续省略号堆叠：同一处出现 ≥2 个 …… 或 4 个以上连续点
+  const ellipsis = s.match(/(?:……){2,}/g) || s.match(/(?:\.\.\.){2,}/g) || [];
+  if (ellipsis.length) hits.push({ word: '省略号堆叠(……) ', count: ellipsis.length });
+  // 感叹号连用（含半角）
+  const exclaim = s.match(/[!！]{2,}/g) || [];
+  if (exclaim.length) hits.push({ word: '感叹号连用(!!)', count: exclaim.length });
+  // 波浪号冒充标点
+  const wave = s.match(/[~～]{1,}/g) || [];
+  if (wave.length) hits.push({ word: '波浪号(～)', count: wave.length });
+  // 全角文本中夹杂半角句末标点（如句号用. 逗号用, 未被 .net 误判）
+  const half = s.match(/[\u4e00-\u9fff][,.!?][\u4e00-\u9fff]/g) || [];
+  if (half.length) hits.push({ word: '半角标点混入', count: half.length });
+  return hits;
 }
 
 // 质量门判定：黑名单词命中达到阈值即判"AI 味超标"，需要再润色
@@ -334,7 +354,43 @@ export function estimateTokens(text) {
 }
 
 // ===== TXT 导入解析 =====
-const CHAPTER_HEAD_RE = /^\s*(第\s*[0-9零一二三四五六七八九十百千万两〇壹贰叁肆伍陆柒捌玖拾佰仟]+\s*[章回节卷部篇]|【?\s*[0-9零一二三四五六七八九十百千万两〇壹贰叁肆伍陆柒捌玖拾佰仟]+\s*[章回节卷部篇]|前言|序言|楔子|序章|终章|尾声|番外(?:\s*[0-9零一二三四五六七八九十百千万两〇壹贰叁肆伍陆柒捌玖拾佰仟]*)?)\s*[：:、\-—\s]*/;
+const CHAPTER_HEAD_RE = /^\s*(第\s*[0-9零一二三四五六七八九十百千万两〇壹贰叁肆伍陆柒捌玖拾佰仟]+\s*[章回节卷部篇]|【?\s*[0-9零一二三四五六七八九十百千万两〇壹贰叁肆伍陆柒捌玖拾佰仟]+\s*[章回节卷部篇]|前言|序言|序章|楔子|引子|终章|尾声|后记|番外(?:\s*[0-9零一二三四五六七八九十百千万两〇壹贰叁肆伍陆柒捌玖拾佰仟]*)?)\s*[：:、\-—\s—]*/;
+
+// 清洗常见爬虫下载 TXT 的噪音行：页眉页脚、广告、纯数字页码、URL、站点标记
+const NOISE_LINE_RES = [
+  /^[\s]*(第?\d+页|page\s*\d+)[\s]*[页\s]*$/i,
+  /^[\s]*[\d－-]{2,}[\s]*$/,
+  /^(www\.|https?:\/\/)/i,
+  /^[【\[（(]?最新章节[】\])]?/,
+  /^(阅读|载)?全文(免费|无弹窗)?阅读/,
+  /^正文(开始)?/,
+  /^手机端阅读/,
+  /^(本章完|全书完|本章完结)$/,
+  /^记住?(本书|本站|首发)?(站点|网址|地址|书库)/,
+  /^天才一秒记住本站地址/,
+  /^最新章节请记住本站/,
+  /^(如果您觉得|如遇|若觉得).*(请收藏|收藏本站|投推荐票)/,
+  /^(请大家记住|求收藏|求推荐|求订阅|求月票)/,
+  /^作者[:：]/,
+  /^笔名[:：]/,
+  /^\s*$/
+];
+
+function cleanTxtLine(line) {
+  const s = String(line || '').trim();
+  if (!s) return '';
+  for (const re of NOISE_LINE_RES) {
+    if (re.test(s)) return '';
+  }
+  // 行首/行尾的广告符号簇（如 ★★★ 分隔、→→→、※※※）
+  let stripped = s
+    .replace(/^[★☆※＊≈＊†×=·.~～_\-]+/, '')
+    .replace(/[★☆※＊≈＊†×~～=_\-]{2,}$/, '')
+    .trim();
+  // 行内含"网址:xx"“www.xx.com"等下载站点痕迹，整行删除
+  if (/:\s*(www\.|https?:\/\/)/i.test(stripped) || /^\s*(www\.|https?:\/\/)/i.test(stripped)) return '';
+  return stripped;
+}
 
 // 解析 TXT 小说为章节数组。返回 { chapters: [{title, content}], splitted: boolean }
 // 优先按「第X章」行首标题切分；无标题识别时按每 DEFAULT_CHUNK 字切分。
@@ -345,6 +401,8 @@ export function parseTxtChapters(text) {
   const chapters = [];
   let cur = null;
   let splitted = false;
+  let headCount = 0;
+  let leadLines = [];
 
   const flush = () => {
     if (!cur) return;
@@ -354,20 +412,42 @@ export function parseTxtChapters(text) {
   };
 
   for (const line of lines) {
-    const trimmed = line.trim();
+    const cleaned = cleanTxtLine(line);
+    if (!cleaned && !line.trim()) continue;
+    const trimmed = cleaned || line.trim();
+    if (!trimmed) continue;
     const m = trimmed.match(CHAPTER_HEAD_RE);
     if (m && trimmed.length <= 60) {
       flush();
+      // 首个标题前若只有极短的行（书名/作者/简介），视为前言噪音丢弃
+      if (!cur && leadLines.length && leadLines.join('').length <= 40 && headCount === 0) {
+        leadLines = [];
+      }
       const head = m[0].replace(/[：:、\-—\s]+$/g, '');
       cur = { title: head, lines: [] };
+      headCount++;
     } else if (cur) {
-      cur.lines.push(line);
-    } else if (trimmed) {
-      // 标题识别之前出现的正文行，并入第一个章节
-      cur = { title: '第1章', lines: [line] };
+      if (cleaned) cur.lines.push(cleaned);
+    } else {
+      // 标题识别之前出现的行，先缓冲；若全文书都没标题则用作正文
+      leadLines.push(cleaned || trimmed);
     }
   }
   flush();
+
+  // 全程没有识别到任何标题：按字数切分（leadLines 缓冲的前言行即全部正文）
+  if (!headCount && leadLines.length) {
+    const big = leadLines.join('\n');
+    splitted = true;
+    const total = big.length;
+    for (let start = 0; start < total; start += DEFAULT_CHUNK) {
+      const slice = big.slice(start, start + DEFAULT_CHUNK).replace(/^\s+|\s+$/g, '');
+      if (slice) chapters.push({ title: `第${Math.floor(start / DEFAULT_CHUNK) + 1}章`, content: slice });
+    }
+  }
+
+  // 只有零散几个标题且正文占比异常大（如只有"第一章"不到），仍视为有标题结构
+  const hasHeads = headCount >= 1;
 
   if (!chapters.length) {
     // 完全没有标题：按字数切分
@@ -380,7 +460,7 @@ export function parseTxtChapters(text) {
   }
 
   // 识别出的章节极少且单章超大（无换行大文本或标题几乎不出现）：按字数重新切分
-  if (!splitted && chapters.length === 1 && chapters[0].content.length > DEFAULT_CHUNK * 3) {
+  if (!splitted && hasHeads && chapters.length === 1 && chapters[0].content.length > DEFAULT_CHUNK * 3) {
     splitted = true;
     const big = chapters[0].content;
     const re = [];
@@ -389,6 +469,23 @@ export function parseTxtChapters(text) {
       if (slice) re.push({ title: `第${Math.floor(start / DEFAULT_CHUNK) + 1}章`, content: slice });
     }
     return { chapters: re, splitted };
+  }
+
+  // 标题数量异常少（比如 100 章的大书只识别出 2-3 个标题但每章都很大）：
+  // 若平均章节长度远超 DEFAULT_CHUNK 的 4 倍，判定标题覆盖不足，按字数重切
+  if (!splitted && chapters.length >= 2 && chapters.length <= 5 && chapters.some((c) => c.content.length > DEFAULT_CHUNK * 5)) {
+    let totalLen = chapters.reduce((s, c) => s + c.content.length, 0);
+    const avg = totalLen / chapters.length;
+    if (avg > DEFAULT_CHUNK * 4) {
+      splitted = true;
+      const big = chapters.map((c) => c.content).join('\n');
+      const re = [];
+      for (let start = 0; start < big.length; start += DEFAULT_CHUNK) {
+        const slice = big.slice(start, start + DEFAULT_CHUNK).replace(/^\s+|\s+$/g, '');
+        if (slice) re.push({ title: `第${Math.floor(start / DEFAULT_CHUNK) + 1}章`, content: slice });
+      }
+      return { chapters: re, splitted };
+    }
   }
 
   return { chapters, splitted };

@@ -114,6 +114,15 @@ const importOpen = ref(false);
 const importing = ref(false);
 const importTitle = ref('');
 const importFile = ref(null);
+const importPreview = ref(null);
+const importTxtContent = ref('');
+
+function openImport() {
+  importOpen.value = true;
+  importPreview.value = null;
+  importTxtContent.value = '';
+  importFile.value = null;
+}
 
 function onImportPick(file) {
   const raw = file && (file.raw || file);
@@ -126,6 +135,8 @@ function onImportPick(file) {
 
 function onImportRemove() {
   importFile.value = null;
+  importPreview.value = null;
+  importTxtContent.value = '';
 }
 
 async function doImport() {
@@ -135,11 +146,27 @@ async function doImport() {
   importing.value = true;
   try {
     const text = await readTxtFile(importFile.value);
-    const data = await store.importTxt(importTitle.value.trim(), text);
+    importTxtContent.value = text;
+    const data = await api.importTxtPreview({ content: text });
+    importPreview.value = data;
+  } catch (e) {
+    importPreview.value = null;
+    ElMessage.error(e.message || '解析失败');
+  } finally {
+    importing.value = false;
+  }
+}
+
+async function confirmImport() {
+  if (!importTxtContent.value) return;
+  importing.value = true;
+  try {
+    const data = await store.importTxt(importTitle.value.trim(), importTxtContent.value);
     if (data?.novel) {
       importOpen.value = false;
       importFile.value = null;
       importTitle.value = '';
+      importPreview.value = null;
       ElMessage.success(`已导入《${data.novel.title}》，共 ${data.imported || 0} 章`);
     }
   } catch (e) {
@@ -147,6 +174,11 @@ async function doImport() {
   } finally {
     importing.value = false;
   }
+}
+
+function backToPreview() {
+  importPreview.value = null;
+  importTxtContent.value = '';
 }
 
 async function searchRef() {
@@ -458,7 +490,7 @@ function closePlanDialog() {
           <span>已有整本小说？</span>
         </div>
         <div class="import-txt-desc">导入 TXT 全文，自动拆分章节，作为新书开始创作或进行整本改编。</div>
-        <el-button size="small" plain type="primary" @click="importOpen = true">导入 TXT</el-button>
+        <el-button size="small" plain type="primary" @click="openImport">导入 TXT</el-button>
       </div>
 
       <div class="history-entry">
@@ -628,8 +660,8 @@ function closePlanDialog() {
       </div>
     </el-drawer>
 
-    <el-dialog v-model="importOpen" title="导入 TXT 开始改编" width="560px" :close-on-click-modal="false" append-to-body>
-      <el-form label-width="80px" @submit.prevent>
+    <el-dialog v-model="importOpen" title="导入 TXT 开始改编" width="620px" :close-on-click-modal="false" append-to-body>
+      <el-form v-if="!importPreview" label-width="80px" @submit.prevent>
         <el-form-item label="作品标题">
           <el-input v-model="importTitle" placeholder="输入书名，例如：异界求生录" maxlength="80" show-word-limit />
         </el-form-item>
@@ -646,14 +678,39 @@ function closePlanDialog() {
             <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
             <div class="el-upload__text">拖拽 TXT 文件到此处，或<em>点击选择</em></div>
             <template #tip>
-              <div class="el-upload__tip">支持 UTF-8 / GBK 等常见编码的 .txt 全文小说，单文件 ≤ 5MB。导入后将按「章/回/节」自动拆分章节，作为一本新书。</div>
+              <div class="el-upload__tip">支持 UTF-8 / GBK 等常见编码的 .txt 全文小说，单文件 ≤ 5MB。选好文件后先预览拆分结果，确认后再正式导入。</div>
             </template>
           </el-upload>
         </el-form-item>
       </el-form>
+
+      <div v-else class="import-preview">
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          :title="`解析到 ${importPreview.total || 0} 个章节，共约 ${(importPreview.total_words / 10000).toFixed(1)} 万字${importPreview.splitted ? '（部分无标题段落已自动分段）' : ''}`"
+        />
+        <div class="import-preview-list" v-loading="importing">
+          <div v-for="c in importPreview.chapters" :key="c.index" class="import-preview-item">
+            <span class="ip-idx">#{{ c.index }}</span>
+            <span class="ip-title">{{ c.title }}</span>
+            <span class="ip-words">{{ c.word_count }} 字</span>
+            <span class="ip-head">{{ c.content_head }}</span>
+          </div>
+        </div>
+        <div class="import-preview-hint">确认拆分无误后点击「开始导入」，将创建一本新书并写入全部章节，之后可在详情页进行整本改编。</div>
+      </div>
+
       <template #footer>
-        <el-button @click="importOpen = false">取消</el-button>
-        <el-button type="primary" :loading="importing" @click="doImport">导入</el-button>
+        <template v-if="!importPreview">
+          <el-button @click="importOpen = false">取消</el-button>
+          <el-button type="primary" :loading="importing" :disabled="!importFile || !importTitle.trim()" @click="doImport">解析预览</el-button>
+        </template>
+        <template v-else>
+          <el-button @click="backToPreview">重新选择</el-button>
+          <el-button type="primary" :loading="importing" @click="confirmImport">开始导入</el-button>
+        </template>
       </template>
     </el-dialog>
   </div>
@@ -678,7 +735,13 @@ function closePlanDialog() {
   gap: 4px 10px;
   width: 100%;
 }
-.check-item { margin-right: 0; }
+.check-item { margin-right: 0; min-width: 0; }
+.check-item :deep(.el-checkbox__label) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .setup-tip {
   font-size: 12px;
   color: #9ca3af;
@@ -708,6 +771,37 @@ function closePlanDialog() {
   font-size: 12px;
   color: #6b7280;
   line-height: 1.6;
+}
+.import-preview { padding: 4px 4px; }
+.import-preview-list {
+  margin-top: 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid #e5e7f0;
+  border-radius: 8px;
+}
+.import-preview-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #f1f3f9;
+  font-size: 12.5px;
+}
+.import-preview-item:last-child { border-bottom: none; }
+.ip-idx { color: #4f46e5; font-weight: 600; flex-shrink: 0; min-width: 34px; }
+.ip-title { font-weight: 600; color: #1e1b4b; flex-shrink: 0; }
+.ip-words { color: #9ca3af; flex-shrink: 0; }
+.ip-head { color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.import-preview-hint {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.7;
+  background: #fafbff;
+  border: 1px dashed #c7d2fe;
+  border-radius: 8px;
+  padding: 10px 12px;
 }
 .setup-actions {
   display: flex;
@@ -888,8 +982,10 @@ function closePlanDialog() {
   gap: 5px;
   max-height: 120px;
   overflow-y: auto;
+  align-content: flex-start;
 }
 .style-tag {
+  flex-shrink: 0;
   font-size: 11.5px;
   color: #6b7280;
   background: #f3f4f6;

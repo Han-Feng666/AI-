@@ -326,6 +326,7 @@ export const api = {
 
   // TXT 导入 + 整本改编
   importTxt: (data) => http.post('/novels/import-txt', data),
+  importTxtPreview: (data) => http.post('/novels/import-txt/preview', data),
   adaptationPlan: (id, intent, handlers) => streamRequest(`/novels/${id}/adaptation/plan`, { intent }, handlers),
   getAdaptation: (id) => http.get(`/novels/${id}/adaptation`),
   adaptationStart: (id) => http.post(`/novels/${id}/adaptation/start`, {}),
@@ -333,6 +334,7 @@ export const api = {
   acceptCandidate: (cid) => http.post(`/adaptation-candidates/${cid}/accept`, {}),
   skipCandidate: (cid) => http.post(`/adaptation-candidates/${cid}/skip`, {}),
   retryCandidate: (cid) => http.post(`/adaptation-candidates/${cid}/retry`, {}),
+  batchAdaptationCandidates: (body) => http.post('/adaptation-candidates/batch', body),
 };
 
 export default api;

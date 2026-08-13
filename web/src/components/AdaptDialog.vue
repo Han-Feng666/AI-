@@ -23,6 +23,7 @@ const planChapters = computed(() => (plan.value?.chapters || []).sort((a, b) => 
 const candidates = computed(() => store.adaptCandidates || []);
 const acceptedCount = computed(() => candidates.value.filter((c) => c.status === 'accepted').length);
 const skippedCount = computed(() => candidates.value.filter((c) => c.status === 'skipped').length);
+const pendingCount = computed(() => candidates.value.filter((c) => c.status === 'pending').length);
 
 const dialogVisible = computed({
   get: () => store.adaptDialog,
@@ -84,6 +85,7 @@ async function acceptCurrent(c) {
   try {
     await store.acceptCandidate(c.id);
     ElMessage.success('已采纳，写入正式章节');
+    if (hasMorePending()) await nextCandidate();
   } catch (e) {
     ElMessage.error(e.message || '采纳失败');
   }
@@ -93,16 +95,40 @@ async function skipCurrent(c) {
   try {
     await store.skipCandidate(c.id);
     ElMessage.info('已跳过，保留原文');
+    if (hasMorePending()) await nextCandidate();
   } catch (e) {
     ElMessage.error(e.message || '跳过失败');
   }
 }
 
+function hasMorePending() {
+  return (store.adaptCandidates || []).some((x) => x.status === 'pending');
+}
+
 async function retryCurrent(c) {
   try {
     await store.retryCandidate(c.id);
+    ElMessage.success('已重新生成该章候选');
   } catch (e) {
     ElMessage.error(e.message || '重试失败');
+  }
+}
+
+async function acceptAll() {
+  try {
+    await store.batchAdaptation('accepted');
+    ElMessage.success('已采纳全部待处理候选');
+  } catch (e) {
+    ElMessage.error(e.message || '批量采纳失败');
+  }
+}
+
+async function skipAll() {
+  try {
+    await store.batchAdaptation('skipped');
+    ElMessage.info('已跳过全部待处理候选');
+  } catch (e) {
+    ElMessage.error(e.message || '批量跳过失败');
   }
 }
 
@@ -183,9 +209,15 @@ onMounted(() => {
       <div class="adapt-progress">
         <el-progress :percentage="progressPct" :stroke-width="10" striped striped-flow :duration="20" />
         <div class="adapt-progress-meta">
-          <span>已采纳 {{ acceptedCount }} · 已跳过 {{ skippedCount }}</span>
+          <span>已采纳 {{ acceptedCount }} · 已跳过 {{ skippedCount }} · 剩余 {{ Math.max(0, totalChapters - acceptedCount - skippedCount) }}</span>
           <span v-if="store.adaptBusy" class="adapt-running"><el-icon class="is-loading"><Loading /></el-icon>正在生成第 {{ store.genProgress }} 章候选…</span>
         </div>
+      </div>
+
+      <div v-if="pendingCount && !store.adaptBusy" class="adapt-batch-bar">
+        <span class="adapt-batch-hint">还有 {{ pendingCount }} 章待处理候选，可快速批量操作：</span>
+        <el-button size="small" type="success" plain @click="acceptAll">全部采纳</el-button>
+        <el-button size="small" plain @click="skipAll">全部跳过</el-button>
       </div>
 
       <!-- 候选列表 -->
@@ -221,10 +253,13 @@ onMounted(() => {
           </div>
         </div>
         <div v-if="store.adaptCompare.status === 'pending'" class="adapt-compare-actions">
-          <el-button type="success" @click="acceptCurrent(store.adaptCompare)">采纳</el-button>
-          <el-button @click="skipCurrent(store.adaptCompare)">跳过</el-button>
+          <el-button type="success" @click="acceptCurrent(store.adaptCompare)">采纳并下一章</el-button>
+          <el-button @click="skipCurrent(store.adaptCompare)">跳过并下一章</el-button>
           <el-button type="warning" plain @click="retryCurrent(store.adaptCompare)">重试</el-button>
-          <el-button type="primary" @click="nextCandidate">处理下一章</el-button>
+          <el-button v-if="pendingCount > 1" type="primary" plain @click="nextCandidate">仅换下一章</el-button>
+        </div>
+        <div v-else class="adapt-compare-actions">
+          <el-button v-if="!store.adaptBusy" type="primary" @click="nextCandidate">生/看下一章</el-button>
         </div>
       </div>
       <div v-else class="adapt-compare-empty">
@@ -261,6 +296,18 @@ onMounted(() => {
 .adapt-progress { margin-bottom: 12px; }
 .adapt-progress-meta { display: flex; justify-content: space-between; margin-top: 6px; color: #6b7280; font-size: 13px; }
 .adapt-running { display: inline-flex; align-items: center; gap: 4px; color: #4f46e5; }
+.adapt-batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.adapt-batch-hint { font-size: 12px; color: #4f46e5; }
 .adapt-cand-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
 .adapt-cand-tag { cursor: pointer; }
 

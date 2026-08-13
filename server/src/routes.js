@@ -414,6 +414,21 @@ router.post('/novels/import-txt', async (req, res) => {
   }
 });
 
+// TXT 解析预览：仅解析不落库，返回章节清单（供前端拆分预览/校对）
+router.post('/novels/import-txt/preview', (req, res) => {
+  const rawContent = String((req.body || {}).content || '');
+  if (!rawContent.trim()) return res.status(400).json({ error: '导入内容为空' });
+  const { chapters, splitted } = parseTxtChapters(rawContent);
+  if (!chapters.length) return res.status(400).json({ error: '未能从 TXT 中解析出任何章节内容' });
+  const preview = chapters.map((c, i) => ({
+    index: i + 1,
+    title: c.title,
+    word_count: countWords(c.content),
+    content_head: String(c.content).slice(0, 60)
+  }));
+  return res.json({ total: preview.length, splitted, chapters: preview, total_words: countWords(rawContent) });
+});
+
 router.get('/novels/:id', async (req, res) => {
   const novel = getNovel(req.params.id);
   if (!novel) return res.status(404).json({ error: '小说不存在' });
@@ -1241,6 +1256,54 @@ router.post('/adaptation-candidates/:cid/skip', async (req, res) => {
   db.prepare("UPDATE adaptation_candidates SET status = 'skipped' WHERE id = ?").run(cand.id);
   db.prepare("UPDATE adaptation_jobs SET skipped_count = skipped_count + 1, updated_at = datetime('now','localtime') WHERE id = ?").run(cand.job_id);
   return res.json({ ok: true });
+});
+
+// 候选：批量处理（accepted|skipped）。body: { status, ids? | novelId? } 
+// ids 缺省时对该小说当前 job 的全部 pending 候选生效
+router.post('/adaptation-candidates/batch', async (req, res) => {
+  const { status, ids, jobId } = req.body || {};
+  const target = String(status) === 'accepted' ? 'accepted' : 'skipped';
+  let rows;
+  if (Array.isArray(ids) && ids.length) {
+    const placeholders = ids.map(() => '?').join(',');
+    rows = db.prepare(`SELECT * FROM adaptation_candidates WHERE id IN (${placeholders})`).all(...ids);
+  } else if (jobId != null) {
+    rows = db.prepare("SELECT * FROM adaptation_candidates WHERE job_id = ? AND status = 'pending'").all(Number(jobId));
+  } else {
+    return res.status(400).json({ error: '缺少 ids 或 jobId' });
+  }
+  let accepted = 0;
+  let done = 0;
+  for (const cand of rows) {
+    if (target === 'accepted') {
+      const novel = getNovel(cand.novel_id);
+      if (!novel) continue;
+      backupChapter(novel.id, cand.chapter_index, '整本改编');
+      db.prepare('UPDATE chapters SET title = ?, content = ?, word_count = ?, updated_at = datetime(\'now\',\'localtime\') WHERE novel_id = ? AND chapter_index = ?')
+        .run(cand.candidate_title || cand.original_title, cand.candidate_content, countWords(cand.candidate_content), novel.id, cand.chapter_index);
+      touchNovel(novel.id);
+      db.prepare("UPDATE adaptation_candidates SET status = 'accepted' WHERE id = ?").run(cand.id);
+      db.prepare("UPDATE adaptation_jobs SET accepted_count = accepted_count + 1, current_index = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(cand.chapter_index, cand.job_id);
+      try {
+        const full = getChapter(novel.id, cand.chapter_index);
+        if (full) await writeChapterTxt(novel, full);
+      } catch { /* 不阻塞 */ }
+      accepted++;
+      done++;
+    } else {
+      db.prepare("UPDATE adaptation_candidates SET status = 'skipped' WHERE id = ?").run(cand.id);
+      db.prepare("UPDATE adaptation_jobs SET skipped_count = skipped_count + 1, updated_at = datetime('now','localtime') WHERE id = ?").run(cand.job_id);
+      done++;
+    }
+  }
+  // 全部处理完则任务收尾
+  if (jobId != null) {
+    const remain = db.prepare("SELECT COUNT(*) c FROM adaptation_candidates WHERE job_id = ? AND status = 'pending'").get(Number(jobId)).c;
+    if (remain === 0) {
+      db.prepare("UPDATE adaptation_jobs SET status = 'done', updated_at = datetime('now','localtime') WHERE id = ?").run(Number(jobId));
+    }
+  }
+  return res.json({ ok: true, accepted, done });
 });
 
 // 候选：重试（重新生成该章候选）
@@ -3014,6 +3077,20 @@ function managerSystemContext(novelId = null) {
   const activeText = active.length
     ? '当前所有小说的后台生成任务：\n' + active.map((j) => `- novel ${j.novel_id} 阶段 ${j.stage} 状态 ${j.status} 进度 ${j.progress}`).join('\n')
     : '当前没有正在进行的生成任务。';
+  // 当前打开的小说上下文：让 AI 不需要反问"是哪本书"
+  let currentNovelText = '';
+  if (novelId != null) {
+    const n = getNovel(novelId);
+    if (n) {
+      const chs = getChapters(novelId);
+      const done = (chs || []).filter((c) => c.word_count).length;
+      currentNovelText = `\n\n【当前打开的小说】《${n.title || '未命名'}》：
+- 小说 ID：${n.id}（工具调用 get_novel_progress / update_outline / update_character / request_revise / request_generate_chapter 时，涉及这本书必须使用 novel_id=${n.id}）
+- 类型：${n.genre || '未设置'}　状态：${n.status || '未开始'}
+- 已写 ${done}/${n.target_chapters || 0} 章（共 ${n.target_chapters || '?'} 章目标）
+- 打开的小说只有一本时，作者说"这本书"就是指它，直接回答或执行，不要反问是哪本书。`;
+    }
+  }
   const mem = novelId != null
     ? db.prepare('SELECT content FROM manager_memory WHERE (novel_id = ? OR novel_id IS NULL) ORDER BY id DESC LIMIT 12').all(novelId)
     : db.prepare('SELECT content FROM manager_memory WHERE novel_id IS NULL ORDER BY id DESC LIMIT 12').all();
@@ -3026,12 +3103,12 @@ function managerSystemContext(novelId = null) {
 
 ${SEARCH_SYSTEM_PROMPT}
 
-${activeText}${memText}
+${activeText}${currentNovelText}${memText}
 
 行为准则：
 1. 读类工具（含联网搜索）可直接用；写类工具必须由前端弹出授权条由作者确认后才会真正执行——你执行被拒绝时，体面地告知作者"未被授权"。
 2. 沟通风格如真人作家总管，简洁自然，不堆术语。
-3. 当作者询问另一本书进度时优先调 get_novel_progress。
+3. 涉及【当前打开的小说】时，直接根据上面的 ID 与信息回答或调用工具，不要反问"是哪本书"。只有作者明确提到"另一本/别的书"且你知道书名但不确定 ID 时，才调用 get_novel_progress 确认。
 4. 当作者说"查一下""搜一下"或涉及你不确定的事实/资料时，优先调 web_search 联网搜索。
 5. 当你说要修改方案/章节时优先调 request_revise / request_generate_chapter 触发对应 worker；前端会显示候选方案供作者采纳。
 6. 参考长期记忆条目，但若记忆与新事实冲突，以新事实为准。`;

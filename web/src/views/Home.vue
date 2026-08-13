@@ -69,6 +69,15 @@ const importing = ref(false);
 const importTitle = ref('');
 const importFile = ref(null);
 const importResult = ref(null);
+const importPreview = ref(null);
+const importTxtContent = ref('');
+
+function openImport() {
+  importOpen.value = true;
+  importPreview.value = null;
+  importTxtContent.value = '';
+  importFile.value = null;
+}
 
 function onImportPick(file) {
   const raw = file && (file.raw || file);
@@ -81,6 +90,8 @@ function onImportPick(file) {
 
 function onImportRemove() {
   importFile.value = null;
+  importPreview.value = null;
+  importTxtContent.value = '';
 }
 
 async function doImport() {
@@ -90,8 +101,24 @@ async function doImport() {
   importing.value = true;
   try {
     const text = await readTxtFile(importFile.value);
-    const data = await api.importTxt({ title: importTitle.value.trim(), content: text });
+    importTxtContent.value = text;
+    const data = await api.importTxtPreview({ content: text });
+    importPreview.value = data;
+  } catch (e) {
+    importPreview.value = null;
+    ElMessage.error(e.message || '解析失败');
+  } finally {
+    importing.value = false;
+  }
+}
+
+async function confirmImport() {
+  if (!importTxtContent.value) return;
+  importing.value = true;
+  try {
+    const data = await api.importTxt({ title: importTitle.value.trim(), content: importTxtContent.value });
     importResult.value = data;
+    importPreview.value = null;
   } catch (e) {
     ElMessage.error(e.message || '导入失败');
   } finally {
@@ -99,11 +126,19 @@ async function doImport() {
   }
 }
 
+function backToPreview() {
+  importResult.value = null;
+  importPreview.value = null;
+  importTxtContent.value = '';
+}
+
 function finishImport() {
   const novel = importResult.value?.novel;
   if (novel) {
     importOpen.value = false;
     importResult.value = null;
+    importPreview.value = null;
+    importTxtContent.value = '';
     importFile.value = null;
     importTitle.value = '';
     router.push(`/novel/${novel.id}`);
@@ -228,7 +263,7 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
         <el-button size="large" plain @click="router.push('/shared-characters')">
           <el-icon style="margin-right:6px"><UserFilled /></el-icon>共享角色池
         </el-button>
-        <el-button size="large" plain @click="importOpen = true">
+        <el-button size="large" plain @click="openImport">
           <el-icon style="margin-right:6px"><Upload /></el-icon>导入 TXT
         </el-button>
         <el-button type="primary" size="large" @click="dialogOpen = true">
@@ -385,8 +420,9 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
       </template>
     </el-dialog>
 
-    <el-dialog v-model="importOpen" title="导入 TXT 开始改编" width="560px" :close-on-click-modal="false">
-      <div v-if="!importResult" class="import-body">
+    <el-dialog v-model="importOpen" title="导入 TXT 开始改编" width="620px" :close-on-click-modal="false">
+      <!-- 第 1 步：填写标题 + 选择文件 -->
+      <div v-if="!importResult && !importPreview" class="import-body">
         <el-form label-width="80px" @submit.prevent>
           <el-form-item label="作品标题">
             <el-input v-model="importTitle" placeholder="输入书名，例如：异界求生录" maxlength="80" show-word-limit />
@@ -404,12 +440,33 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
               <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
               <div class="el-upload__text">拖拽 TXT 文件到此处，或<em>点击选择</em></div>
               <template #tip>
-                <div class="el-upload__tip">支持 UTF-8 / GBK 等常见编码的 .txt 全文小说，单文件 ≤ 5MB。导入后将按「章/回/节」自动拆分章节。</div>
+                <div class="el-upload__tip">支持 UTF-8 / GBK 等常见编码的 .txt 全文小说，单文件 ≤ 5MB。选好文件后先预览拆分结果，确认后再正式导入。</div>
               </template>
             </el-upload>
           </el-form-item>
         </el-form>
       </div>
+
+      <!-- 第 2 步：预览拆分结果 -->
+      <div v-else-if="importPreview && !importResult" class="import-preview">
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          :title="`解析到 ${importPreview.total || 0} 个章节，共约 ${(importPreview.total_words / 10000).toFixed(1)} 万字${importPreview.splitted ? '（部分无标题段落已自动分段）' : ''}`"
+        />
+        <div class="import-preview-list" v-loading="importing">
+          <div v-for="c in importPreview.chapters" :key="c.index" class="import-preview-item">
+            <span class="ip-idx">#{{ c.index }}</span>
+            <span class="ip-title">{{ c.title }}</span>
+            <span class="ip-words">{{ c.word_count }} 字</span>
+            <span class="ip-head">{{ c.content_head }}</span>
+          </div>
+        </div>
+        <div class="import-preview-hint">确认拆分无误后点击「开始导入」，将创建一本新书并写入全部章节，之后可在详情页进行整本改编。</div>
+      </div>
+
+      <!-- 第 3 步：导入成功 -->
       <div v-else class="import-result">
         <el-result
           icon="success"
@@ -421,9 +478,16 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
           </template>
         </el-result>
       </div>
+
       <template #footer v-if="!importResult">
-        <el-button @click="importOpen = false">取消</el-button>
-        <el-button type="primary" :loading="importing" @click="doImport">导入</el-button>
+        <template v-if="!importPreview">
+          <el-button @click="importOpen = false">取消</el-button>
+          <el-button type="primary" :loading="importing" :disabled="!importFile || !importTitle.trim()" @click="doImport">解析预览</el-button>
+        </template>
+        <template v-else>
+          <el-button @click="backToPreview">重新选择</el-button>
+          <el-button type="primary" :loading="importing" @click="confirmImport">开始导入</el-button>
+        </template>
       </template>
     </el-dialog>
   </div>
@@ -438,6 +502,37 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
 }
 .head-actions { display: flex; gap: 8px; align-items: center; }
 .import-body { padding: 4px 8px; }
+.import-preview { padding: 4px 8px; }
+.import-preview-list {
+  margin-top: 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid #e5e7f0;
+  border-radius: 8px;
+}
+.import-preview-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #f1f3f9;
+  font-size: 12.5px;
+}
+.import-preview-item:last-child { border-bottom: none; }
+.ip-idx { color: #4f46e5; font-weight: 600; flex-shrink: 0; min-width: 34px; }
+.ip-title { font-weight: 600; color: #1e1b4b; flex-shrink: 0; }
+.ip-words { color: #9ca3af; flex-shrink: 0; }
+.ip-head { color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.import-preview-hint {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.7;
+  background: #fafbff;
+  border: 1px dashed #c7d2fe;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
 .import-result :deep(.el-result__title) { font-size: 18px; }
 .import-result :deep(.el-result__subtitle) { line-height: 1.7; padding: 0 12px; }
 .page-title { margin: 0; font-size: 24px; font-weight: 700; }
@@ -571,7 +666,13 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
   gap: 4px 10px;
   width: 100%;
 }
-.check-item { margin-right: 0; }
+.check-item { margin-right: 0; min-width: 0; }
+.check-item :deep(.el-checkbox__label) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .preset-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
 .preset-tag {
   font-size: 11px;
@@ -623,8 +724,12 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
+  max-height: 130px;
+  overflow-y: auto;
+  align-content: flex-start;
 }
 .style-tag {
+  flex-shrink: 0;
   font-size: 12px;
   color: #6b7280;
   border: 1px solid #e5e7eb;

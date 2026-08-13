@@ -571,8 +571,8 @@ watch(
   line-height: 2.05;
   color: #333c50;
   text-align: justify;
-  max-width: 780px;
   width: 100%;
+  max-width: 1100px;
   margin: 0 auto;
 }
 .chapter-content .para {
@@ -585,7 +585,7 @@ watch(
   align-items: center;
   justify-content: space-between;
   padding: 14px 32px 20px;
-  max-width: 780px;
+  max-width: 1100px;
   width: 100%;
   margin: 0 auto;
   flex-shrink: 0;

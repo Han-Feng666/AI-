@@ -5,6 +5,7 @@ import { useEditorStore } from '../stores/editor';
 import { useManagerStore } from '../stores/manager';
 import { useSettingsStore } from '../stores/settings';
 import { useRoute } from 'vue-router';
+import api from '../api';
 import workspaceEventBus from '../utils/workspaceEventBus';
 
 const editor = useEditorStore();
@@ -13,6 +14,25 @@ const settings = useSettingsStore();
 const route = useRoute();
 const input = ref('');
 const listEl = ref(null);
+
+const novelTitleMap = ref({}); // id -> title，用于工具卡片显示真实书名
+
+async function refreshNovelTitles() {
+  try {
+    const list = await api.listNovels();
+    const map = {};
+    for (const n of list || []) map[Number(n.id)] = n.title || `第${n.id}号书`;
+    map[Number(editor.novelId)] = editor.novel?.title || map[Number(editor.novelId)] || `第${editor.novelId}号书`;
+    novelTitleMap.value = map;
+  } catch { /* ignore */ }
+}
+
+function novelLabel(id) {
+  const nid = Number(id);
+  if (novelTitleMap.value[nid]) return `《${novelTitleMap.value[nid]}》`;
+  if (nid === Number(editor.novelId) && editor.novel?.title) return `《${editor.novel.title}》`;
+  return `第 ${nid} 号书`;
+}
 
 const ready = computed(() => settings.isConfigured);
 const novelId = computed(() => Number(editor.novelId) || Number(route.params.id) || null);
@@ -47,13 +67,13 @@ async function scrollBottom() {
   if (listEl.value) listEl.value.scrollTop = listEl.value.scrollHeight;
 }
 
-watch(novelId, (id) => { if (id != null) manager.load(id); }, { immediate: true });
+watch(novelId, (id) => { if (id != null) manager.load(id); refreshNovelTitles(); }, { immediate: true });
 watch(
   () => manager.messages.length + ':' + (manager.replyStream.length || 0) + ':' + manager.pendingToolCalls.length,
   () => { scrollBottom(); }
 );
 
-onMounted(scrollBottom);
+onMounted(() => { scrollBottom(); refreshNovelTitles(); });
 
 // Phase 10：监听联动总线——Manager 工具授权完成后刷新 editor 对应 novel
 const unsub = workspaceEventBus.on('novel:outlineUpdated', ({ novelId }) => {
@@ -92,13 +112,13 @@ async function clear() {
 function toolDescription(name, args) {
   const a = args || {};
   const map = {
-    get_novel_progress: `查询 ${a.novel_id || ''} 号书的进度`,
+    get_novel_progress: `查询 ${novelLabel(a.novel_id)} 的进度`,
     list_shared_characters: '列出共享角色池',
-    introduce_shared_character: `把共享角色 ${a.shared_id || ''} 引入 ${a.novel_id || ''} 号书`,
-    update_outline: `修改 ${a.novel_id || ''} 号书剧情大纲：${(a.new_outline || '').slice(0, 24)}…`,
-    update_character: `修改 ${a.novel_id || ''} 号书角色「${a.name || ''}」`,
-    request_revise: `让 ${a.novel_id || ''} 号书 AI 按"${(a.feedback || '').slice(0, 30)}…"修订方案`,
-    request_generate_chapter: `让 ${a.novel_id || ''} 号书生成下一章`,
+    introduce_shared_character: `把共享角色 ${a.shared_id || ''} 引入 ${novelLabel(a.novel_id)}`,
+    update_outline: `修改 ${novelLabel(a.novel_id)} 剧情大纲：${(a.new_outline || '').slice(0, 24)}…`,
+    update_character: `修改 ${novelLabel(a.novel_id)} 角色「${a.name || ''}」`,
+    request_revise: `让 ${novelLabel(a.novel_id)} AI 按"${(a.feedback || '').slice(0, 30)}…"修订方案`,
+    request_generate_chapter: `让 ${novelLabel(a.novel_id)} 生成下一章`,
     web_search: `联网搜索：${a.query || ''}`
   };
   return map[name] || name;

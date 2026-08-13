@@ -833,6 +833,15 @@ export const useEditorStore = defineStore('editor', {
       return this.adaptationNext();
     },
 
+    // 批量采纳/跳过全部 pending 候选
+    async batchAdaptation(status) {
+      if (!this.adaptJob || !this.adaptJob.id) return;
+      await api.batchAdaptationCandidates({ status, jobId: this.adaptJob.id });
+      await this.loadAdaptation();
+      await this.refresh();
+      this._commit(this.novelId, { adaptCompare: null, adaptTargetChapter: null });
+    },
+
     // 加载/恢复改编任务进度
     async loadAdaptation() {
       const data = await api.getAdaptation(this.novelId);
