@@ -1,6 +1,24 @@
 import { estimateTokens } from './lib.js';
 import { getTaskConfig } from './model_router.js';
 
+// 还原模型/中转站把中文双重转义成的字面 \uXXXX 序列（含代理对）。
+// 正常内容里的真实反斜杠+\u（如讲解转义用法的文本）会被一并还原，但小说创作场景不受影响。
+export function unescapeUnicode(str) {
+  const s = String(str || '');
+  if (!s.includes('\\u')) return s;
+  // 先处理代理对（\uD83D\uDE00 等），避免被单字符还原拆散
+  let out = s.replace(/\\u([0-9a-fA-F]{4})\\u([0-9a-fA-F]{4})/g, (m, h1, h2) => {
+    const c1 = parseInt(h1, 16);
+    const c2 = parseInt(h2, 16);
+    if (c1 >= 0xd800 && c1 <= 0xdbff && c2 >= 0xdc00 && c2 <= 0xdfff) {
+      return String.fromCharCode(c1, c2);
+    }
+    return m;
+  });
+  out = out.replace(/\\u([0-9a-fA-F]{4})/g, (m, h) => String.fromCharCode(parseInt(h, 16)));
+  return out;
+}
+
 const PROVIDER_PRESETS = {
   openai: {
     name: 'OpenAI',
@@ -232,7 +250,7 @@ export async function chat(opts) {
   if (isStream) {
     const r = await consumeStream(resp, onDelta, combined, streamIdleTimeout);
     cleanup();
-    return r;
+    return { ...r, content: unescapeUnicode(r.content) };
   }
 
   try {
@@ -271,7 +289,7 @@ export async function chat(opts) {
       }
     }
 
-    return { content, finishReason, toolCalls };
+    return { content: unescapeUnicode(content), finishReason, toolCalls };
   } catch (e) {
     if (e.name === 'AbortError') {
       if (signal?.aborted) throw e;
@@ -323,7 +341,7 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
         if (payload === '[DONE]') { finishReason = 'stop'; continue; }
         try {
           const json = JSON.parse(payload);
-          const delta = json?.choices?.[0]?.delta?.content ?? '';
+          const delta = unescapeUnicode(json?.choices?.[0]?.delta?.content ?? '');
           if (delta) {
             full += delta;
             onDelta(delta);
@@ -348,7 +366,7 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
     if (payload && payload !== '[DONE]') {
       try {
         const json = JSON.parse(payload);
-        const delta = json?.choices?.[0]?.delta?.content ?? '';
+        const delta = unescapeUnicode(json?.choices?.[0]?.delta?.content ?? '');
         if (delta) { full += delta; onDelta(delta); }
       } catch { /* ignore */ }
     }

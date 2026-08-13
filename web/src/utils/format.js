@@ -110,6 +110,49 @@ export function downloadText(filename, text) {
   URL.revokeObjectURL(url);
 }
 
+// 还原模型/中转站把中文双重转义成的字面 \uXXXX 序列（含代理对）
+export function unescapeUnicode(str) {
+  const s = String(str || '');
+  if (!s.includes('\\u')) return s;
+  let out = s.replace(/\\u([0-9a-fA-F]{4})\\u([0-9a-fA-F]{4})/g, (m, h1, h2) => {
+    const c1 = parseInt(h1, 16);
+    const c2 = parseInt(h2, 16);
+    if (c1 >= 0xd800 && c1 <= 0xdbff && c2 >= 0xdc00 && c2 <= 0xdfff) {
+      return String.fromCharCode(c1, c2);
+    }
+    return m;
+  });
+  out = out.replace(/\\u([0-9a-fA-F]{4})/g, (m, h) => String.fromCharCode(parseInt(h, 16)));
+  return out;
+}
+
+// 读取 TXT 文件并自动识别编码（UTF-8 / UTF-8 BOM / UTF-16 / GBK 等 Windows 常见编码）
+export async function readTxtFile(file) {
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  // BOM 检测
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return new TextDecoder('utf-8').decode(buf.slice(3));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder('utf-16le').decode(buf.slice(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder('utf-16be').decode(buf.slice(2));
+  }
+  // 无 BOM：先尝试严格 UTF-8 解码，失败说明是其他编码（如 GBK/GB18030）
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {
+    try {
+      return new TextDecoder('gb18030').decode(buf);
+    } catch {
+      return new TextDecoder('utf-8').decode(buf);
+    }
+  }
+}
+
+
 export const GENRES = [
   '玄幻', '仙侠', '奇幻', '科幻', '都市', '言情', '悬疑', '推理',
   '惊悚', '恐怖', '历史', '架空', '军事', '战争', '武侠', '游戏',

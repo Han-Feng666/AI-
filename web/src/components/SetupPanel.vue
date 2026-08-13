@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus';
 import { useRouter } from 'vue-router';
 import { useEditorStore } from '../stores/editor';
 import api from '../api';
-import { GENRES, PRESET_STYLES, LENGTH_CLASSES, splitGenres, planStreamPreview } from '../utils/format';
+import { GENRES, PRESET_STYLES, LENGTH_CLASSES, splitGenres, planStreamPreview, readTxtFile } from '../utils/format';
 import { diffLines } from 'diff';
 
 const store = useEditorStore();
@@ -116,10 +116,16 @@ const importTitle = ref('');
 const importFile = ref(null);
 
 function onImportPick(file) {
-  importFile.value = file.raw || file;
-  if (!importTitle.value && importFile.value) {
-    importTitle.value = (importFile.value.name || '').replace(/\.txt$/i, '');
+  const raw = file && (file.raw || file);
+  if (!raw || typeof raw.arrayBuffer !== 'function') return;
+  importFile.value = raw;
+  if (!importTitle.value) {
+    importTitle.value = (raw.name || '').replace(/\.txt$/i, '');
   }
+}
+
+function onImportRemove() {
+  importFile.value = null;
 }
 
 async function doImport() {
@@ -128,7 +134,7 @@ async function doImport() {
   if (importFile.value.size > 5 * 1024 * 1024) { ElMessage.warning('文件过大，请控制在 5MB 以内'); return; }
   importing.value = true;
   try {
-    const text = await importFile.value.text();
+    const text = await readTxtFile(importFile.value);
     const data = await store.importTxt(importTitle.value.trim(), text);
     if (data?.novel) {
       importOpen.value = false;
@@ -634,13 +640,13 @@ function closePlanDialog() {
             :limit="1"
             accept=".txt,text/plain"
             :on-change="onImportPick"
-            :on-remove="() => (importFile.value = null)"
-            :file-list="importFile ? [{ name: importFile.name, raw: importFile }] : []"
+            :on-exceed="() => undefined"
+            :on-remove="onImportRemove"
           >
             <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
             <div class="el-upload__text">拖拽 TXT 文件到此处，或<em>点击选择</em></div>
             <template #tip>
-              <div class="el-upload__tip">支持 UTF-8 编码的 .txt 全文小说，单文件 ≤ 5MB。导入后将按「章/回/节」自动拆分章节，作为一本新书。</div>
+              <div class="el-upload__tip">支持 UTF-8 / GBK 等常见编码的 .txt 全文小说，单文件 ≤ 5MB。导入后将按「章/回/节」自动拆分章节，作为一本新书。</div>
             </template>
           </el-upload>
         </el-form-item>

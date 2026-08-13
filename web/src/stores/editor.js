@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import api from '../api';
-import { saveGenDraft, clearGenDraft, getGenDraftMeta } from '../utils/format';
+import { saveGenDraft, clearGenDraft, getGenDraftMeta, unescapeUnicode } from '../utils/format';
 import workspaceEventBus from '../utils/workspaceEventBus';
 
 // 切换 novel 时顶层字段初始态（仅当 slice 表里没记录该字段时用）
@@ -329,7 +329,7 @@ export const useEditorStore = defineStore('editor', {
             const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
             this._commit(originId, { genProgress: p, busyLabel: msg || `正在修订方案…（${p}%）` });
           },
-          onDelta: (d) => { const cur = String(this.novelId) === String(originId) ? (this.$state.genStream || '') : ((this._slices.get(String(originId)) || {}).genStream || ''); this._commit(originId, { genStream: cur + d }); },
+          onDelta: (d) => { const cur = String(this.novelId) === String(originId) ? (this.$state.genStream || '') : ((this._slices.get(String(originId)) || {}).genStream || ''); this._commit(originId, { genStream: cur + unescapeUnicode(d) }); },
           onError: (m) => { throw new Error(m); }
         });
         this._genAbort = p.abort;
@@ -425,7 +425,7 @@ export const useEditorStore = defineStore('editor', {
           },
           onDelta: (d) => {
             const cur = String(this.novelId) === String(originId) ? (this.$state.genStream || '') : ((this._slices.get(String(originId)) || {}).genStream || '');
-            const updated = cur + d;
+            const updated = cur + unescapeUnicode(d);
             this._commit(originId, { genStream: updated });
             saveGenDraft(this.novelId, updated, params.chapterIndex ?? null);
           },
@@ -589,7 +589,7 @@ export const useEditorStore = defineStore('editor', {
         const p = api.sendChat(this.novelId, { content }, {
           onDelta: (d) => {
             const cur = String(this.novelId) === String(originId) ? (this.$state.chatStream || '') : ((this._slices.get(String(originId)) || {}).chatStream || '');
-            this._commit(originId, { chatStream: cur + d });
+            this._commit(originId, { chatStream: cur + unescapeUnicode(d) });
           }
         });
         this._chatAbort = p.abort;
@@ -747,7 +747,7 @@ export const useEditorStore = defineStore('editor', {
           onProgress: (pct, msg) => { /* 方案阶段进度不细粒度展示 */ },
           onDelta: (d) => {
             const cur = String(this.novelId) === String(originId) ? (this.$state.adaptPlanStream || '') : ((this._slices.get(String(originId)) || {}).adaptPlanStream || '');
-            this._commit(originId, { adaptPlanStream: cur + d });
+            this._commit(originId, { adaptPlanStream: cur + unescapeUnicode(d) });
           },
           onError: (m) => { throw new Error(m); }
         });
@@ -788,7 +788,7 @@ export const useEditorStore = defineStore('editor', {
           },
           onDelta: (d) => {
             const cur = String(this.novelId) === String(originId) ? (this.$state.genStream || '') : ((this._slices.get(String(originId)) || {}).genStream || '');
-            this._commit(originId, { genStream: cur + d });
+            this._commit(originId, { genStream: cur + unescapeUnicode(d) });
           },
           onError: (m) => { throw new Error(m); }
         });
