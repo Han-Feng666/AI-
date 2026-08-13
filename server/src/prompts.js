@@ -584,6 +584,8 @@ export function extractJson(text) {
   // 去除 markdown 代码围栏
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fence) t = fence[1].trim();
+  // 去除注释（/* */ 和 //）
+  t = t.replace(/\/\*[\s\S]*?\*\//g, '');
   // 规整常见非标准 JSON：控制字符、中文冒号、尾随逗号
   t = t
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ')
@@ -692,8 +694,16 @@ export function extractJson(text) {
     candidates.push(norm(fixInnerQuotes(quoteFixed)));
     candidates.push(tryRelaxed(norm(s)));
     candidates.push(tryRelaxed(norm(innerFixed)));
+    // 去除注释后的变体
+    const noComment = (x) => x.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*/g, '');
+    candidates.push(noComment(norm(s)));
+    candidates.push(noComment(norm(innerFixed)));
+    candidates.push(tryRelaxed(noComment(norm(s))));
+    candidates.push(tryRelaxed(noComment(norm(innerFixed))));
     for (const c of candidates) {
       if (!c) continue;
+      // tryRelaxed 返回的已是解析对象，直接返回
+      if (typeof c === 'object' && c !== null) return c;
       try {
         const v = JSON.parse(c);
         return v;
@@ -721,6 +731,20 @@ export function extractJson(text) {
   if (arrStart !== -1 && arrEnd > arrStart) {
     const slice = t.slice(arrStart, arrEnd + 1);
     const v = tryVariants(slice);
+    if (v) return v;
+  }
+  // 多对象逐个提取：针对文本中有多个不连续 {…} 块（如前缀+对象+后缀）
+  const objRegex = /\{[^{}]*\}/g;
+  let objMatch;
+  while ((objMatch = objRegex.exec(t)) !== null) {
+    const v = tryVariants(objMatch[0]);
+    if (v) return v;
+  }
+  // 多数组逐个提取
+  const arrRegex = /\[[^\[\]]*\]/g;
+  let arrMatch;
+  while ((arrMatch = arrRegex.exec(t)) !== null) {
+    const v = tryVariants(arrMatch[0]);
     if (v) return v;
   }
   return null;
