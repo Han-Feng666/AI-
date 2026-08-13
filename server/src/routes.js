@@ -885,7 +885,8 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
     send({ type: 'progress', progress: 30, message: '骨架已生成，正在规划章节…' });
     updateJob(job.id, { progress: 30, stream_cursor: '骨架已生成，正在规划章节…' });
 
-    // 阶段 2：章节规划（分批，每批 20 章，失败自动降级不中断）
+    // 阶段 2：章节规划（分批，超长篇 200+ 章用 30 章/批，其余用 20 章/批）
+    const BATCH_SIZE = target >= 200 ? 30 : 20;
     const skeletonChapters = Array.isArray(skeleton.chapters)
       ? skeleton.chapters.filter((c) => c && c.title).map((c) => ({ title: String(c.title), summary: String(c.summary || '') }))
       : [];
@@ -898,7 +899,7 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
       const MAX_CONSECUTIVE_FALLBACKS = 3;
 
       while (start <= target) {
-        const batchEnd = Math.min(target, start + 19);
+        const batchEnd = Math.min(target, start + BATCH_SIZE - 1);
         const batchSize = batchEnd - start + 1;
 
         const batch = await jsonFrom(
