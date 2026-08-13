@@ -10,7 +10,7 @@ import {
   getKeyMoments, formatKeyMoments, addKeyMomentUnique,
   getStageMemories, formatStageMemories, upsertStageMemory,
   getCharacterProfiles, upsertCharacterProfile, formatCharacterProfiles,
-  scanAiPatterns, blacklistPenalty, blacklistFlagWords,
+  scanAiPatterns, blacklistPenalty, blacklistFlagWords, cleanAiText,
   parseTxtChapters
 } from './lib.js';
 import {
@@ -1221,8 +1221,9 @@ router.post('/adaptation-candidates/:cid/accept', async (req, res) => {
   if (!novel) return res.status(404).json({ error: '小说不存在' });
 
   backupChapter(novel.id, cand.chapter_index, '整本改编');
+  const cleanContent = cleanAiText(cand.candidate_content);
   db.prepare('UPDATE chapters SET title = ?, content = ?, word_count = ?, updated_at = datetime(\'now\',\'localtime\') WHERE novel_id = ? AND chapter_index = ?')
-    .run(cand.candidate_title || cand.original_title, cand.candidate_content, countWords(cand.candidate_content), novel.id, cand.chapter_index);
+    .run(cand.candidate_title || cand.original_title, cleanContent, countWords(cleanContent), novel.id, cand.chapter_index);
   touchNovel(novel.id);
   db.prepare("UPDATE adaptation_candidates SET status = 'accepted' WHERE id = ?").run(cand.id);
   db.prepare("UPDATE adaptation_jobs SET accepted_count = accepted_count + 1, current_index = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(cand.chapter_index, cand.job_id);
@@ -1279,8 +1280,9 @@ router.post('/adaptation-candidates/batch', async (req, res) => {
       const novel = getNovel(cand.novel_id);
       if (!novel) continue;
       backupChapter(novel.id, cand.chapter_index, '整本改编');
+      const cleanContent = cleanAiText(cand.candidate_content);
       db.prepare('UPDATE chapters SET title = ?, content = ?, word_count = ?, updated_at = datetime(\'now\',\'localtime\') WHERE novel_id = ? AND chapter_index = ?')
-        .run(cand.candidate_title || cand.original_title, cand.candidate_content, countWords(cand.candidate_content), novel.id, cand.chapter_index);
+        .run(cand.candidate_title || cand.original_title, cleanContent, countWords(cleanContent), novel.id, cand.chapter_index);
       touchNovel(novel.id);
       db.prepare("UPDATE adaptation_candidates SET status = 'accepted' WHERE id = ?").run(cand.id);
       db.prepare("UPDATE adaptation_jobs SET accepted_count = accepted_count + 1, current_index = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(cand.chapter_index, cand.job_id);
@@ -1557,6 +1559,9 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     if (!full.trim()) {
       return end({ type: 'error', message: 'AI 未返回内容，请重试。' });
     }
+
+    // 规则化清污（标点全角化、省略号归一、叹号压缩、空行折叠）。幂等，润色后也安全。
+    full = cleanAiText(full);
 
     // 保存章节
     let chapterId = existing ? existing.id : null;
@@ -2116,7 +2121,7 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
         maxRounds: AI_MAX_ROUNDS
       });
       if (!iter.text.trim()) return end({ type: 'error', message: 'AI 未返回内容，请重试。' });
-      const finalText = iter.text.trim();
+      const finalText = cleanAiText(iter.text.trim());
       db.prepare('UPDATE chapters SET content = ?, word_count = ?, status = ? WHERE id = ?')
         .run(finalText, countWords(finalText), 'draft', chapter.id);
       touchNovel(novel.id);
@@ -2149,7 +2154,7 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
         onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
       });
       if (!full.trim()) return end({ type: 'error', message: 'AI 未返回内容，请重试。' });
-      full = full.trim();
+      full = cleanAiText(full.trim());
       db.prepare('UPDATE chapters SET content = ?, word_count = ?, status = ? WHERE id = ?')
         .run(full, countWords(full), 'draft', chapter.id);
       touchNovel(novel.id);

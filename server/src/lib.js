@@ -296,6 +296,69 @@ const AI_BLACKLIST = [
   '熠熠生辉', '袅袅', '流淌着', '诉说着', '仿佛能听到', '似乎一切'
 ];
 
+// ---------- AI 高频句式模板（正则级，比词级黑名单更能抓"AI 腔调"） ----------
+// 这些是中文生成模型最常复用的句式骨架，真人偶尔用但密度绝不会高。
+// 每命中一处计 1 次，纳入质量门判定。
+const AI_SENTENCE_TEMPLATES = [
+  { re: /不由(?:自主|自|得)?(?:地|的)?(?:\s*)/g, label: '不由自主句式' },
+  { re: /仿佛[\s\S]{0,10}?(?:静止|凝固|是个梦|什么也没发生)/g, label: '仿佛凝固句式' },
+  { re: /就在(?:这个)?(?:时候|时(?:候)?|这时)/g, label: '就在这个时候' },
+  { re: /时间过.{0,6}(?:飞快|飞快地|如(?:同)?(?:白驹过隙|流水))|光阴如梭/g, label: '时间飞逝句式' },
+  { re: /(?:紧|紧地|紧紧)地?(?:攥紧|握住|抓住|抱着|勒紧)/g, label: '紧紧-句式' },
+  { re: /一声(?:轻(?:响|轻)?|低哼|闷响|冷哼)/g, label: '一声XX句式' },
+  { re: /(?:似乎|好像)想起了什么/g, label: '似乎想起什么' },
+  { re: /(?:这股|那)?股(?:寒意|暖流|怒火|杀意)(?:从|自).{0,6}(?:升起|涌起|蔓延|窜起|袭来)/g, label: '一股XX从X升起' },
+  { re: /心底(?:深处|里)?(?:闪过|涌起|泛起|升腾起)/g, label: '心底涌起句式' },
+  { re: /心中(?:一动|一紧|一沉|大震|涌起|掀起)/g, label: '心中XX句式' },
+  { re: /(?:他|她|我)的(?:瞳孔|眼眸|眸子|眼睛)(?:微微|不由|骤然)/g, label: '瞳孔骤缩句式' },
+  { re: /(?:像是|好像|仿佛)要把/g, label: '像是要把句式' },
+  { re: /(?:不由|忍不住)(?:抬头|低头|抬头望向|摇了摇头)/g, label: '不由抬头句式' },
+  { re: /空气(?:中)?(?:仿佛|似乎)?(?:都)?(?:凝固|安静|寂静)(?:了)?(?:数|几)?(?:秒|息)?/g, label: '空气凝固句式' },
+  { re: /(?:脑海中|脑海里)(?:不禁|不由|突然)?(?:浮现|闪过|涌出)/g, label: '脑海浮现句式' },
+  { re: /(?:这个词|这三个字)(?:还)?(?:在|盘旋)(?:在)?(?:他|她)?(?:脑海里|脑中)/g, label: '四字盘旋句式' },
+  { re: /(?:他|她)(?:深吸一口气|呼出一口气)(?:，|,)(?:然后|随即|缓缓)/g, label: '深呼一口气句式' },
+  { re: /(?:嘴角|唇边)(?:却|不由|微微)(?:勾起|扬起|浮现)/g, label: '嘴角勾起句式' },
+  { re: /(?:一阵|一股)(?:微风|冷风|寒风吹来|暖风)/g, label: '一阵X风句式' },
+  { re: /(?:迎着|迎着风|面向|朝着)(?:朝阳|夕阳|夕阳)|(?:(?:夕阳|阳光)(?:下|中|里))(?:他的身影|影子)/g, label: '迎着夕阳句式' },
+  { re: /(?:渐渐|逐渐|慢慢)(?:地|的)?(?:合拢|闭合|消散|消失|模糊)/g, label: '渐渐消散句式' },
+  { re: /(?:一切|所有|全部)(?:都)?(?:仿佛|像是|似乎)?(?:陷入|归于|化作)(?:了)?(?:虚无|沉寂|平静|寂静)/g, label: '一切归于寂语句式' },
+  { re: /(?:命运|宿命)(?:的)?(?:的)?(?:轮回|齿轮|嘲弄)|(?:在(?:这|那)一刻)。{0,8}命运/g, label: '命运齿轮句式' }
+];
+
+export function scanAiSentenceTemplates(text) {
+  const s = String(text || '');
+  const hits = [];
+  for (const tpl of AI_SENTENCE_TEMPLATES) {
+    const m = s.match(tpl.re);
+    if (m && m.length) hits.push({ word: tpl.label, count: m.length, template: true });
+  }
+  return hits;
+}
+
+// 段落节奏检测：真人文字段落长短错落；AI 易连续多段同样长度（过短或过匀）
+export function scanParagraphRhythm(text) {
+  const s = String(text || '');
+  // 按空行分段
+  const paras = s.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
+  const hits = [];
+  if (paras.length < 5) return hits;
+  // 1) 连续 ≥5 段都 < 30 字（鸡零狗碎的碎片化）
+  let shortRun = 0;
+  for (const p of paras) {
+    if (p.length < 30) { shortRun++; if (shortRun >= 5) break; }
+    else shortRun = 0;
+  }
+  if (shortRun >= 5) hits.push({ word: '段落过于碎片化(连续多段<30字)', count: shortRun, template: true });
+  // 2) 连续 ≥6 段都 > 150 字（大段压得人喘不过气，AI 长文常见）
+  let longRun = 0;
+  for (const p of paras) {
+    if (p.length > 150) { longRun++; if (longRun >= 6) break; }
+    else longRun = 0;
+  }
+  if (longRun >= 6) hits.push({ word: '段落过长过匀(连续多段>150字)', count: longRun, template: true });
+  return hits;
+}
+
 export function scanAiPatterns(text) {
   if (!text) return [];
   const hits = [];
@@ -312,6 +375,8 @@ export function scanAiPatterns(text) {
     if (count > 0) hits.push({ word: w, count });
   }
   hits.push(...scanAiPunctuation(text));
+  hits.push(...scanAiSentenceTemplates(text));
+  hits.push(...scanParagraphRhythm(text));
   return hits.sort((a, b) => b.count - a.count);
 }
 
@@ -332,6 +397,30 @@ export function scanAiPunctuation(text) {
   const half = s.match(/[\u4e00-\u9fff][,.!?][\u4e00-\u9fff]/g) || [];
   if (half.length) hits.push({ word: '半角标点混入', count: half.length });
   return hits;
+}
+
+// 生成后代码级去 AI 味：只做"绝对安全的规则化修正"，不改写语义。
+// 供章节生成/润色/改编在落库前调用，作为 prompt 质量门之外的第三层防线。
+export function cleanAiText(text) {
+  let s = String(text || '');
+  if (!s) return s;
+  // 1) 英文标点一律转全角（仅处理中文相邻的半角标点，保留句子中真正的英文内容）
+  s = s
+    .replace(/([\u4e00-\u9fff\u3000-\u303f])[ \t]*,[ \t]*(?=[\u4e00-\u9fff\u201c\u2018])/g, '$1，')
+    .replace(/([\u4e00-\u9fff\u3000-\u303f])[ \t]*;[ \t]*(?=[\u4e00-\u9fff])/g, '$1；')
+    .replace(/([\u4e00-\u9fff\u3000-\u303f])[ \t]*:[ \t]*(?=[\u4e00-\u9fff\u201c\u2018])/g, '$1：')
+    .replace(/([\u4e00-\u9fff\u3000-\u303f])[ \t]*![ \t]*/g, '$1！')
+    .replace(/([\u4e00-\u9fff\u3000-\u303f])[ \t]*\?[ \t]*/g, '$1？')
+    .replace(/([\u4e00-\u9fff\u3000-\u303f])[ \t]*\.[ \t]*(?=[\u4e00-\u9fff\u201c\u2018])/g, '$1。')
+    .replace(/([\u4e00-\u9fff\u3000-\u303f])\.(?![.\w])/g, '$1。');
+  // 2) 省略号归一：连续点号 → "……"，连续双省略号合并
+  s = s.replace(/[.．.]{6,}/g, '……').replace(/……{2,}/g, '……').replace(/…{2}/g, '……');
+  // 3) 感叹号连用压缩为单个
+  s = s.replace(/[!！]{2,}/g, '！');
+  // 4) 折叠连续空行（>=2 个换行 → 单个），删除行尾空白
+  s = s.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+  // 5) 全等号无空格包裹的中文语气助词错字（"了了""着着"等偶发）——暂不做，避免误伤。
+  return s;
 }
 
 // 质量门判定：黑名单词命中达到阈值即判"AI 味超标"，需要再润色
