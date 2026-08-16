@@ -13,19 +13,27 @@ if (!fs.existsSync(src)) {
 }
 
 fs.mkdirSync(path.dirname(dest), { recursive: true });
+fs.rmSync(dest, { recursive: true, force: true });
 fs.cpSync(src, dest, { recursive: true, force: true });
 
 // 清理 onnxruntime-node 中不需要的平台二进制（减小安装包体积）
-// 保留 win32/x64，移除 darwin/linux
-const ortBin = path.join(dest, 'onnxruntime-node', 'bin', 'napi-v6');
+// binding.js 实际加载 bin/napi-v3/${platform}/，保留 win32/x64，移除 darwin/linux
+const ortBin = path.join(dest, 'onnxruntime-node', 'bin', 'napi-v3');
 if (fs.existsSync(ortBin)) {
   for (const plat of ['darwin', 'linux']) {
     const platDir = path.join(ortBin, plat);
     if (fs.existsSync(platDir)) {
       fs.rmSync(platDir, { recursive: true, force: true });
-      console.log(`[prepare-deps] 已清理 onnxruntime-node/${plat} 平台二进制`);
+      console.log(`[prepare-deps] 已清理 onnxruntime-node/napi-v3/${plat} 平台二进制`);
     }
   }
+}
+
+// napi-v6 目录未被 binding.js 引用（无 napi-v3 时兜底走 napi-v3），整个移除以减小体积
+const ortNapiV6 = path.join(dest, 'onnxruntime-node', 'bin', 'napi-v6');
+if (fs.existsSync(ortNapiV6)) {
+  fs.rmSync(ortNapiV6, { recursive: true, force: true });
+  console.log('[prepare-deps] 已移除 onnxruntime-node/napi-v6（未被引用）');
 }
 
 // 移除 onnxruntime-web（浏览器 WASM 版，Node 环境用 onnxruntime-node 即可）

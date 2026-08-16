@@ -119,8 +119,10 @@ export function storeChunks(novelId, chapterIdx, content) {
 }
 
 // 检索与 query 最相关的 top-K chunks
-export function retrieveRelevant(novelId, query, topK = 5) {
-  const rows = db.prepare('SELECT id, chapter_index, chunk_index, text, keywords FROM chapter_chunks WHERE novel_id = ? ORDER BY chapter_index, chunk_index').all(novelId);
+export function retrieveRelevant(novelId, query, topK = 5, beforeIndex = null) {
+  const rows = beforeIndex !== null
+    ? db.prepare('SELECT id, chapter_index, chunk_index, text, keywords FROM chapter_chunks WHERE novel_id = ? AND chapter_index < ? ORDER BY chapter_index, chunk_index').all(novelId, beforeIndex)
+    : db.prepare('SELECT id, chapter_index, chunk_index, text, keywords FROM chapter_chunks WHERE novel_id = ? ORDER BY chapter_index, chunk_index').all(novelId);
   if (!rows.length || !query) return [];
 
   const docs = rows.map((r) => ({ id: r.id, text: r.text + ' ' + (r.keywords || '') }));

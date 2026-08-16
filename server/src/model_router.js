@@ -1,6 +1,7 @@
 // 多模型路由：同一部小说可同时启用多个 AI 大模型，按任务类型分发
 // settings 表新增键 llm_models = JSON 数组，每条为 { id, name, enabled, tasks[], config }
 import { getSetting, setSetting } from './db.js';
+import { normalizeLLMConfig } from './lib.js';
 
 // 任务类型定义（前端展示用）
 export const TASK_TYPES = {
@@ -15,7 +16,8 @@ export const TASK_TYPES = {
 export function getModels() {
   try {
     const list = JSON.parse(getSetting('llm_models') || '[]');
-    return Array.isArray(list) ? list : [];
+    if (!Array.isArray(list)) return [];
+    return list.map((m) => m && m.id ? { ...m, config: normalizeLLMConfig(m.config || {}) } : m);
   } catch {
     return [];
   }
@@ -29,7 +31,7 @@ export function saveModels(models) {
       name: m.name || '未命名模型',
       enabled: !!m.enabled,
       tasks: Array.isArray(m.tasks) ? m.tasks : [],
-      config: m.config || {}
+      config: normalizeLLMConfig(m.config || {})
     }));
   setSetting('llm_models', JSON.stringify(safe));
   return safe;
@@ -50,7 +52,7 @@ export function getTaskConfig(task) {
   if (!models.length) return null;
   const usable = models.find((m) => isUsable(m.config));
   const chosen = usable || models[0];
-  return chosen ? chosen.config : null;
+  return chosen ? normalizeLLMConfig(chosen.config) : null;
 }
 
 // 当前启用的模型概览（Settings 页展示 + 健康检测用）

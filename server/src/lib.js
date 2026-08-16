@@ -10,14 +10,33 @@ export function countWords(text) {
 
 export function getLLMConfig() {
   try {
-    return JSON.parse(getSetting('llm_config') || '{}');
+    const cfg = JSON.parse(getSetting('llm_config') || '{}');
+    return normalizeLLMConfig(cfg);
   } catch {
     return {};
   }
 }
 
+// 规范化 LLM 配置的数值字段：防历史数据/手输把 temperature/maxTokens/contextLength 存成字符串，
+// 导致部分服务商严格类型校验时报 400（如 'temperature' must be Float）
+export function normalizeLLMConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object') return {};
+  const out = { ...cfg };
+  const toNum = (v, def) => {
+    if (v === null || v === undefined || v === '') return def;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : def;
+  };
+  if (out.temperature !== undefined) out.temperature = Math.min(1.99, Math.max(0, toNum(out.temperature, 0.9)));
+  if (out.maxTokens !== undefined) out.maxTokens = toNum(out.maxTokens, 8192);
+  if (out.contextLength !== undefined) out.contextLength = toNum(out.contextLength, 32768);
+  if (out.max_tokens !== undefined) out.max_tokens = toNum(out.max_tokens, 8192);
+  if (out.compressThreshold !== undefined) out.compressThreshold = Math.min(0.95, Math.max(0.1, toNum(out.compressThreshold, 0.5)));
+  return out;
+}
+
 export function saveLLMConfig(config) {
-  setSetting('llm_config', JSON.stringify(config));
+  setSetting('llm_config', JSON.stringify(normalizeLLMConfig(config)));
 }
 
 export function getNovel(id) {
@@ -53,7 +72,9 @@ export function getStyle(id) {
 
 export function parseStyleIds(novel) {
   if (!novel) return [];
-  try { return JSON.parse(novel.style_ids || '[]'); } catch { return []; }
+  const v = novel.style_ids;
+  if (Array.isArray(v)) return v.map(Number).filter(Boolean);
+  try { return JSON.parse(v || '[]').map(Number).filter(Boolean); } catch { return []; }
 }
 
 // 超长文本抽样：保留开头、均匀抽取中段、保留结尾，用于风格分析等大文本场景
@@ -85,7 +106,12 @@ export function getForeshadowings(novelId) {
   ).all(novelId);
 }
 
-export function getOpenForeshadowings(novelId, limit = 30) {
+export function getOpenForeshadowings(novelId, limit = 30, beforeIndex = null) {
+  if (beforeIndex !== null) {
+    return db.prepare(
+      'SELECT * FROM foreshadowings WHERE novel_id = ? AND status = ? AND chapter_index < ? ORDER BY id ASC LIMIT ?'
+    ).all(novelId, 'open', beforeIndex, limit);
+  }
   return db.prepare(
     'SELECT * FROM foreshadowings WHERE novel_id = ? AND status = ? ORDER BY id ASC LIMIT ?'
   ).all(novelId, 'open', limit);
@@ -99,7 +125,12 @@ export function formatForeshadowList(items) {
 }
 
 // 关键剧情事实锚点：长期连载中防止设定冲突与关键信息遗忘
-export function getKeyMoments(novelId, limit = 80) {
+export function getKeyMoments(novelId, limit = 80, beforeIndex = null) {
+  if (beforeIndex !== null) {
+    return db.prepare(
+      'SELECT * FROM novel_key_moments WHERE novel_id = ? AND chapter_index < ? ORDER BY id DESC LIMIT ?'
+    ).all(novelId, beforeIndex, limit).reverse();
+  }
   return db.prepare(
     'SELECT * FROM novel_key_moments WHERE novel_id = ? ORDER BY id DESC LIMIT ?'
   ).all(novelId, limit).reverse();
@@ -126,7 +157,12 @@ export function addKeyMomentUnique(novelId, content, chapterIndex) {
 }
 
 // 阶段记忆（卷快照）：每 50 章浓缩一条，超长连载中早期剧情不丢
-export function getStageMemories(novelId) {
+export function getStageMemories(novelId, beforeIndex = null) {
+  if (beforeIndex !== null) {
+    return db.prepare(
+      'SELECT * FROM novel_stage_memories WHERE novel_id = ? AND stage_end < ? ORDER BY stage_no'
+    ).all(novelId, beforeIndex);
+  }
   return db.prepare(
     'SELECT * FROM novel_stage_memories WHERE novel_id = ? ORDER BY stage_no'
   ).all(novelId);
@@ -189,7 +225,10 @@ export function formatCharacterProfiles(items) {
   return items.map((c) => `- ${c.char_name}：${c.profile}`).join('\n');
 }
 
-export function getRecentChapters(novelId, n = 2) {
+export function getRecentChapters(novelId, n = 2, beforeIndex = null) {
+  if (beforeIndex !== null) {
+    return db.prepare('SELECT chapter_index, title, content FROM chapters WHERE novel_id = ? AND content != \'\' AND chapter_index < ? ORDER BY chapter_index DESC LIMIT ?').all(novelId, beforeIndex, n).reverse();
+  }
   return db.prepare('SELECT chapter_index, title, content FROM chapters WHERE novel_id = ? AND content != \'\' ORDER BY chapter_index DESC LIMIT ?').all(novelId, n).reverse();
 }
 
@@ -206,7 +245,7 @@ export function getRelationships(novelId) {
 }
 
 export function getChapters(novelId) {
-  return db.prepare('SELECT id, novel_id, chapter_index, title, summary, word_count, status, ai_score, created_at, updated_at FROM chapters WHERE novel_id = ? ORDER BY chapter_index').all(novelId);
+  return db.prepare('SELECT id, novel_id, chapter_index, title, summary, emotion, arc_hint, hook, beats, word_count, status, ai_score, created_at, updated_at FROM chapters WHERE novel_id = ? ORDER BY chapter_index').all(novelId);
 }
 
 export function getChapter(novelId, chapterIndex) {
@@ -256,8 +295,11 @@ export function formatWorldSettings(items) {
 }
 
 // 逐章摘要链：按 token 预算保留摘要，最近优先（预算不足时丢最老摘要）
-export function buildHistorySummaries(novelId, budgetTokens) {
-  const rows = db.prepare("SELECT chapter_index, title, summary FROM chapters WHERE novel_id = ? AND summary != '' ORDER BY chapter_index").all(novelId);
+export function buildHistorySummaries(novelId, budgetTokens, beforeIndex = null) {
+  const sql = beforeIndex !== null
+    ? "SELECT chapter_index, title, summary FROM chapters WHERE novel_id = ? AND summary != '' AND chapter_index < ? ORDER BY chapter_index"
+    : "SELECT chapter_index, title, summary FROM chapters WHERE novel_id = ? AND summary != '' ORDER BY chapter_index";
+  const rows = beforeIndex !== null ? db.prepare(sql).all(novelId, beforeIndex) : db.prepare(sql).all(novelId);
   if (!budgetTokens || budgetTokens <= 0 || rows.length <= 1) return rows;
   const kept = [];
   let used = 0;
@@ -359,6 +401,96 @@ export function scanParagraphRhythm(text) {
   return hits;
 }
 
+// 句首重复检测：AI 极易连续多句以同一词/同一代词开头（"他…他…他…""然后…然后…"）
+export function scanSentenceOpeners(text) {
+  const s = String(text || '');
+  const sentences = s.split(/[。！？!?；\n]+/).map((x) => x.trim()).filter((x) => x.length >= 2);
+  if (sentences.length < 10) return [];
+  const hits = [];
+  // 连续 ≥5 句以相同 1-2 字开头
+  let prevKey = null;
+  let run = 0;
+  for (const sent of sentences) {
+    const key = sent.slice(0, 2);
+    if (key === prevKey) { run++; if (run >= 5) break; }
+    else { prevKey = key; run = 1; }
+  }
+  if (run >= 5) hits.push({ word: `句首连续重复（"${prevKey}"开头的句子连了 ${run} 句）`, count: run, template: true });
+  // 全章句首同字占比过高：超过 45% 的句子以同一单字开头
+  const firstChars = sentences.map((x) => x.slice(0, 1));
+  const freq = {};
+  for (const c of firstChars) freq[c] = (freq[c] || 0) + 1;
+  const top = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
+  if (top && top[1] >= 8 && top[1] / firstChars.length > 0.45) {
+    hits.push({ word: `句首用字单调（"${top[0]}"开头占 ${Math.round((top[1] / firstChars.length) * 100)}%）`, count: top[1], template: true });
+  }
+  return hits;
+}
+
+// 转折/连接词过密：AI 叙事爱堆"然而/但是/不过/却/忽然/突然/于是/然后"制造转折感
+export function scanTransitionOveruse(text) {
+  const s = String(text || '');
+  const hits = [];
+  const count = (re) => {
+    const m = s.match(re);
+    return m ? m.length : 0;
+  };
+  const transCount = count(/然而|但是|不过|可是|却|忽然|突然|顿时|于是|随即|紧接着/g);
+  if (transCount >= 12) hits.push({ word: `转折连词过密(全文 ${transCount} 处"然而/但是/却/突然"等)`, count: transCount, template: true });
+  const soCount = count(/(?:于是|然后|接着|随即|紧接着|便|就)\s*(?:他|她|我|他们|她们|它)/g);
+  if (soCount >= 8) hits.push({ word: `"于是/然后+人称"句式过密(${soCount} 处)`, count: soCount, template: true });
+  return hits;
+}
+
+// 镜头逐一扫描检测：AI 把每个动作的每一帧都拍一遍（"伸出手…够到…端起…送到嘴边"）
+export function scanVerboseFrames(text) {
+  const s = String(text || '');
+  const hits = [];
+  // 连续 3+ 个短动作句（每句 <12 字，动词开头），如"他伸出手。够到杯子。端起来。送到嘴边。"
+  const sentences = s.split(/[。！？!?；\n]+/).map((x) => x.trim()).filter((x) => x.length >= 2 && x.length < 14);
+  if (sentences.length >= 4) {
+    let run = 0;
+    let bestRun = 0;
+    for (const sent of sentences) {
+      const isShortAction = /^(?:他|她|我|它|你|对方|那人)?(?:从|把|将|一|就|便|又|顺手|随手)?(?:伸|抬|低|转|站|坐|拿|端|够|放|推|开|关|抓|握|捡|接|递|凑|退|停|回|望|看|瞥|扫|掀|翻|摸|拍|压|拎|背|扛|踢|踩|蹲|跳|扑|冲|点|摆|摇|收|拢|送|喝|吃|咬|咽|指|戳|拔|抽|塞|放|甩|扔|丢|套|穿|解|系|拉|拽|扯|按|捏|掐|挠|擦|拭|盖|掀|敲|叩|踹|蹬|迈|跨|走|跑|退|靠|贴|整|理|侧|偏|垂|仰|低|皱|眯|瞪|眨|拢|含|抿|舔|咽|呼|吸|叹|吐|咳)/.test(sent);
+      if (isShortAction) { run++; bestRun = Math.max(bestRun, run); }
+      else run = 0;
+    }
+    if (bestRun >= 4) hits.push({ word: `动作逐帧扫描(连续 ${bestRun} 个短动作句，"伸手-够到-端起"式流水账)`, count: bestRun, template: true });
+  }
+  // "了"字句尾过载：一页内超过 35% 的句子以"了。"结尾
+  const allSents = s.split(/[。！？!?；\n]+/).filter((x) => x.trim().length >= 2);
+  if (allSents.length >= 10) {
+    const leCount = allSents.filter((x) => /了$/.test(x.trim())).length;
+    if (leCount / allSents.length > 0.35) {
+      hits.push({ word: `句尾"了"过载(${leCount}/${allSents.length} 句以"了"收尾，流水账感)`, count: leCount, template: true });
+    }
+  }
+  return hits;
+}
+
+// 年代/题材串戏意象检测：AI 生成长篇时易在非古代题材中顽固混入市井古代元素
+const TOPIC_DRIFT_WORDS = ['老六', '烟锅', '烟杆', '门槛', '铜钱', '镖局', '镖师', '客栈', '青石板', '扁担', '水缸', '红绳', '布衫', '当铺', '账房', '前清', '抽屉凳', '油灯芯', '纺车', '租子', '佃户'];
+// 现代/都市/悬疑/恐怖等题材不应出现这些元素；玄幻/仙侠/都市修仙等题材的"老江湖"意象判断交给 prompt 与人工
+const MODERN_GENRES = ['都市', '悬疑', '恐怖', '惊悚', '刑侦', '灵异', '现代', '职场', '科幻', '校园', '网游', '都市异能'];
+
+export function scanTopicDrift(text, genre) {
+  if (!text) return [];
+  const g = String(genre || '');
+  const isModern = !g || MODERN_GENRES.some((m) => g.includes(m));
+  if (!isModern) return [];
+  const hits = [];
+  for (const w of TOPIC_DRIFT_WORDS) {
+    let count = 0, from = 0;
+    while ((from = text.indexOf(w, from)) !== -1) { count++; from += w.length; }
+    if (count > 0) hits.push({ word: w, count });
+  }
+  if (hits.length) {
+    hits.push({ word: `跑题：现代题材中混入古代市井元素(${hits.map(h=>h.word).join('、')})`, count: Math.max(...hits.map(h=>h.count)) });
+  }
+  return hits;
+}
+
 export function scanAiPatterns(text) {
   if (!text) return [];
   const hits = [];
@@ -377,6 +509,17 @@ export function scanAiPatterns(text) {
   hits.push(...scanAiPunctuation(text));
   hits.push(...scanAiSentenceTemplates(text));
   hits.push(...scanParagraphRhythm(text));
+  hits.push(...scanSentenceOpeners(text));
+  hits.push(...scanTransitionOveruse(text));
+  hits.push(...scanVerboseFrames(text));
+  // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
+  const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
+  if (allParas.length >= 4) {
+    const avgLen = allParas.reduce((s, p) => s + p.length, 0) / allParas.length;
+    if (avgLen < 50) {
+      hits.push({ word: `段落碎片化(平均每段${Math.round(avgLen)}字，共${allParas.length}段，应合并短段)`, count: Math.round(50 / avgLen) });
+    }
+  }
   return hits.sort((a, b) => b.count - a.count);
 }
 
@@ -396,6 +539,29 @@ export function scanAiPunctuation(text) {
   // 全角文本中夹杂半角句末标点（如句号用. 逗号用, 未被 .net 误判）
   const half = s.match(/[\u4e00-\u9fff][,.!?][\u4e00-\u9fff]/g) || [];
   if (half.length) hits.push({ word: '半角标点混入', count: half.length });
+  // 句号过度切割短句（网文标点规范硬检测）：连续 ≥3 句超短句（<8字）都落在<10字的片段内
+  const sentLike = s.split(/[。！？!?\n]+/).map((x) => x.trim()).filter((x) => x.length > 2);
+  let shortRun = 0;
+  let startIdx = -1;
+  let bestStart = -1;
+  let bestRun = 0;
+  for (let i = 0; i < sentLike.length; i++) {
+    const short = sentLike[i].length <= 8;
+    if (short) {
+      if (shortRun === 0) startIdx = i;
+      shortRun++;
+      if (shortRun > bestRun) { bestRun = shortRun; bestStart = startIdx; }
+    } else {
+      shortRun = 0;
+    }
+  }
+  if (bestRun >= 3) {
+    const sample = sentLike.slice(bestStart, bestStart + Math.min(bestRun, 5)).join('。');
+    hits.push({ word: `句号过度切割短句(连续${bestRun}个超短句"${sample}…"，应改用逗号衔接)`, count: bestRun });
+  }
+  // 分号滥用：中文小说中分号密度过高（AI 爱用分号强行排列表象）
+  const sc = s.match(/；/g) || [];
+  if (sc.length >= 6) hits.push({ word: `分号滥用(全文${sc.length}处分号，应优先改用逗号)`, count: sc.length });
   return hits;
 }
 
@@ -419,7 +585,45 @@ export function cleanAiText(text) {
   s = s.replace(/[!！]{2,}/g, '！');
   // 4) 折叠连续空行（>=2 个换行 → 单个），删除行尾空白
   s = s.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
-  // 5) 全等号无空格包裹的中文语气助词错字（"了了""着着"等偶发）——暂不做，避免误伤。
+  // 5) 相邻重复字清理（AI 偶发的"他他""了了""的的"类误输入，只在紧跟中文后续或标点时收拢，避免误伤拟声字如"嘿嘿""哈哈"）
+  s = s.replace(/(他|她|它|你|我|这|那|了|的|在|是|与|和|个)(\1)(?=[\u4e00-\u9fff，。！？；：""''、])/g, '$1');
+  // 5b) 相邻重复短语清理（AI 偶发"画面上他自己画面上他自己"类整段重复）：
+  //    相邻两段 ≥3 字完全相同的内容合并为一段。只做字符串重复折叠，避免误伤故意重复（口头禅）。
+  for (let i = 0; i < 3; i++) {
+    const before = s;
+    s = s.replace(/([\u4e00-\u9fff]{3,12})(\1)/g, '$1');
+    if (s === before) break;
+  }
+  // 6) 中文与中文之间多余空格（全角文本中夹杂半角空格）
+  s = s.replace(/([\u4e00-\u9fff])[ ]+([\u4e00-\u9fff])/g, '$1$2');
+  // 7) 网文标点强制规范（保守规则化）：把"动作短句。"后紧跟的"身体部位/状态动词碎片"断开处改为逗号衔接
+  //    高置信模式：句号前是 ≤7 字的动作分句，句号后紧跟"目光/眼神/嘴角/语气/声音/心里/脑中/脚步/手上/眼里/头顶/肩头/指节"等身体部位短语
+  //    或"他/她+叹/笑/咳/笑了一声"等状态补充。只处理这种明确属于同一连续叙事的，避免误伤真正的句号收束。
+  s = s.replace(/([\u4e00-\u9fff]{2,7})。((?:目光|眼神|嘴角|语气|声音|心里|脑中|脑子|脚步|手上|眼里|头顶|肩头|指节|心头|胸中|脸上|眉间|喉咙|指尖|后背|腰上|脚下|身侧|心口|眼前|脑海)[\u4e00-\u9fff]{0,4})/g, '$1，$2');
+  // 8) 破折号过度清洗：AI 爱用"——"连接不相关分句。保留对话内说明性破折号，
+  //    但正文中连续多处"X——Y"且 Y 是独立成句的，改回逗号/句号。保守处理：把"——"后紧跟陈述句的改为"，"
+  s = s
+    .replace(/——\s*(?=(?:这|那|他|她|它|我|你|只|就|便|却|而|但|可|因|所以|于是|不过|然后|接着|突然|忽然|终于|毕竟|其实|当然|这时|此刻|当下|原来|原来如此)[\u4e00-\u9fff]{2,})/g, '，')
+    .replace(/——{2,}/g, '——');
+  // 9) 段落碎片合并：连续 2 段以上每段 ≤ 50 字且无对话的短描写段，合并为一段
+  const paras = s.split('\n').map((p) => p.trim()).filter((p) => p.length > 0);
+  if (paras.length >= 4) {
+    const merged = [];
+    let buf = [];
+    const flushBuf = () => { if (buf.length >= 2) merged.push(buf.join('')); else merged.push(...buf); buf = []; };
+    for (const p of paras) {
+      const isShort = p.length <= 40 && !p.includes('"') && !p.includes('"') && !p.match(/^[「『【（]/);
+      const isDialogue = p.match(/^[""「『""].*[""」』""]$/);
+      if (isShort && !isDialogue) { buf.push(p); }
+      else { flushBuf(); merged.push(p); }
+    }
+    flushBuf();
+    s = merged.join('\n');
+  }
+  // 10) 同一主语的连续动作句句号改逗号：如"他揉了下眼角。左手按住耳机。"→"他揉了下眼角，左手按住耳机。"
+  s = s.replace(/(他|她|我|它|你)([\u4e00-\u9fff]{1,6}[了着])。(\1(?:[\u4e00-\u9fff]{1,4}[了着])?[\u4e00-\u9fff]{0,6})/g, '$1$2，$3');
+  // 11) AI 排比句式清理："光秃秃的墙，光秃秃的地砖"→"墙和地砖都光秃秃的"
+  s = s.replace(/([\u4e00-\u9fff]{1,4})的([\u4e00-\u9fff]{1,4})，\1的([\u4e00-\u9fff]{1,4})/g, '$2和$3都$1的');
   return s;
 }
 

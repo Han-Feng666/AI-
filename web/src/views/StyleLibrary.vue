@@ -16,6 +16,7 @@ const editForm = ref({ name: '', notes: '' });
 
 const form = ref({ name: '', notes: '', sourceText: '' });
 const fileInput = ref(null);
+const uploadRef = ref(null);
 
 async function load() {
   loading.value = true;
@@ -31,6 +32,7 @@ async function load() {
 function openCreate() {
   form.value = { name: '', notes: '', sourceText: '' };
   analyzeStatus.value = '';
+  uploadRef.value?.clearFiles();
   dialogOpen.value = true;
 }
 
@@ -63,12 +65,15 @@ function onFileChange(uploadFile) {
   if (!raw) return;
   if (!/\.(txt|md|text)$/i.test(raw.name) && raw.type !== 'text/plain') {
     ElMessage.warning('请选择 .txt 或纯文本文件');
+    uploadRef.value?.clearFiles();
     return;
   }
   const reader = new FileReader();
   reader.onload = () => {
     form.value.sourceText = String(reader.result || '');
     ElMessage.success(`已读取「${raw.name}」`);
+    // 立即清空 upload 内部 fileList，否则 :limit 会阻止连续导入第二个文件
+    uploadRef.value?.clearFiles();
   };
   reader.readAsText(raw, 'utf-8');
 }
@@ -175,10 +180,10 @@ onMounted(load);
         </el-form-item>
         <el-form-item label="小说文本" required>
           <el-upload
+            ref="uploadRef"
             drag
             :auto-upload="false"
             :show-file-list="false"
-            :limit="1"
             accept=".txt,.md,.text,text/plain"
             :on-change="onFileChange"
           >

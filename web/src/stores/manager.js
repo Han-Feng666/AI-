@@ -87,11 +87,21 @@ export const useManagerStore = defineStore('manager', {
           workspaceEventBus.emit('novel:reviseRequested', { novelId: Number(args.novel_id), feedback: args.feedback });
         } else if (meta?.name === 'request_generate_chapter') {
           workspaceEventBus.emit('novel:generateChapterRequested', { novelId: Number(args.novel_id) });
+        } else if (meta?.name === 'request_revise_chapter') {
+          workspaceEventBus.emit('novel:reviseChapterRequested', { novelId: Number(args.novel_id), chapterIndex: Number(args.chapter_index), instructions: args.instructions });
         }
         return r;
       } catch (e) {
         this.messages.push({ role: 'assistant', content: '授权失败：' + e.message });
         throw e;
+      }
+    },
+
+    async clear(novelId) {
+      try {
+        await api.managerClear(novelId);
+      } catch (e) {
+        throw new Error('清空失败：' + e.message);
       }
     },
 

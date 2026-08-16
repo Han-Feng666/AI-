@@ -75,7 +75,8 @@ const DEFAULT_CONFIG = {
   reasoning: 'off',
   autoPolish: false,
   autoCompress: true,
-  compressThreshold: 0.5
+  compressThreshold: 0.5,
+  forceNonStreaming: false
 };
 
 // 计算单次请求的上下文预算（token）：窗口 - 输出预留 - 余量
@@ -156,12 +157,21 @@ export async function chat(opts) {
   if (!cfg.baseUrl) throw new Error('未配置 API Base URL');
 
   const endpoint = normalizeEndpoint(cfg.baseUrl);
-  const effectiveMax = maxTokens && cfg.maxTokens ? Math.min(maxTokens, cfg.maxTokens) : (maxTokens || cfg.maxTokens);
+  // 规范化数值字段：配置里可能因历史数据/手输存成字符串（如 temperature='0.9'、maxTokens='8192'），统一转回 Number；非法值给默认
+  const safeNum = (v, def) => {
+    if (v === null || v === undefined || v === '') return def;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : def;
+  };
+  const effectiveMax = safeNum(
+    (maxTokens && cfg.maxTokens) ? Math.min(maxTokens, cfg.maxTokens) : (maxTokens || cfg.maxTokens),
+    0
+  );
   const body = {
-    model: cfg.model,
+    model: String(cfg.model || ''),
     messages: trimMessagesToBudget(messages, contextBudget(cfg)),
-    temperature: temperature ?? cfg.temperature ?? 0.9,
-    stream: typeof onDelta === 'function'
+    temperature: Math.min(1.99, Math.max(0, safeNum(temperature ?? cfg.temperature, 0.9))),
+    stream: typeof onDelta === 'function' && !cfg.forceNonStreaming
   };
   if (effectiveMax) body.max_tokens = effectiveMax;
   // Phase 5：tool-use 透传（非流式）
@@ -184,16 +194,17 @@ export async function chat(opts) {
   } else {
     // reasoning=off 时，对支持思考的模型显式关闭，防止默认思考吞掉 max_tokens
     const model = String(cfg.model || '').toLowerCase();
-    if (/deepseek.*r|reasoner/.test(model)) {
+    if (/deepseek.*r|reasoner|deepseek-chat/.test(model)) {
       body.enable_thinking = false;
     }
   }
 
   let resp;
   const isStream = typeof onDelta === 'function';
-  // 流式调用加无数据超时（默认 180s，长任务如方案生成不容易被超时打断），非流式加整体超时（默认 120s）
-  const streamIdleTimeout = isStream ? (Number(opts.streamIdleTimeout) || 180000) : 0;
-  const timeoutMs = isStream ? 0 : Number(opts.timeout) || 120000;
+  // 流式调用：响应头超时（connectTimeout，默认 180s）防止 fetch 无限挂起；拿到响应后交给 consumeStream 的 idle 超时（默认 300s）
+  // 非流式调用：整体超时（默认 180s）
+  const connectTimeoutMs = isStream ? (Number(opts.connectTimeout) || 180000) : (Number(opts.timeout) || 180000);
+  const timeoutMs = isStream ? 0 : connectTimeoutMs;
   let timeoutCtrl = null;
   let timer = null;
   let combined = signal;
@@ -204,6 +215,18 @@ export async function chat(opts) {
     if (signal?.aborted) timeoutCtrl.abort();
     else if (signal) signal.addEventListener('abort', doAbort);
     timer = setTimeout(() => timeoutCtrl.abort(), timeoutMs);
+    combined = timeoutCtrl.signal;
+    cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', doAbort);
+    };
+  } else if (isStream && connectTimeoutMs > 0) {
+    // 流式：仅对「等待响应头」阶段设超时，避免 LLM API 不响应时永久挂起
+    timeoutCtrl = new AbortController();
+    const doAbort = () => timeoutCtrl.abort();
+    if (signal?.aborted) timeoutCtrl.abort();
+    else if (signal) signal.addEventListener('abort', doAbort);
+    timer = setTimeout(() => timeoutCtrl.abort(), connectTimeoutMs);
     combined = timeoutCtrl.signal;
     cleanup = () => {
       if (timer) clearTimeout(timer);
@@ -221,7 +244,7 @@ export async function chat(opts) {
     cleanup();
     if (e.name === 'AbortError') {
       if (signal?.aborted) throw e;
-      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒）：模型响应过慢，请检查网络、模型负载或增大超时。`);
+      throw new Error(`请求超时（${Math.round(connectTimeoutMs / 1000)} 秒）：模型 API 无响应，请检查 Base URL 是否正确、模型名称是否存在、网络是否可达。`);
     }
     throw new Error(`网络请求失败：${e.message}（请检查 Base URL 或网络连接）`);
   }
@@ -238,17 +261,31 @@ export async function chat(opts) {
     if (resp.status === 401 || resp.status === 403) {
       throw new Error(`认证失败（HTTP ${resp.status}）：API Key 无效或无权限。${detail}`);
     }
+    if (resp.status === 402) {
+      throw new Error(`账户余额不足（HTTP 402）：API 服务返回「${detail}」，请到模型服务商后台充值或检查套餐用量。`);
+    }
     if (resp.status === 404) {
       throw new Error(`接口不存在（HTTP 404）：请检查 Base URL 与模型名是否拼写正确。${detail}`);
     }
     if (resp.status === 429) {
       throw new Error(`请求过于频繁或额度不足（HTTP 429）：请稍后重试或检查余额。${detail}`);
     }
+    if (resp.status === 503 && /model_not_found|no available channel/i.test(detail)) {
+      throw new Error(`模型不可用（HTTP 503）：当前 API 网关没有渠道提供「${cfg.model}」这个模型。模型名大小写敏感、且中转站模型名可能与官方不同（如 Kimi-K2.6 / DeepSeek-V4-Flash）。请到设置页点击“获取模型列表”，选择列表中的准确名称。${detail}`);
+    }
+    if (resp.status >= 400 && resp.status < 500) {
+      // 4xx 为确定性错误，重试不会成功，直接抛出
+      throw new Error(`模型 API 拒绝请求（HTTP ${resp.status}）：${detail || resp.statusText}`);
+    }
     throw new Error(`调用失败（HTTP ${resp.status}）：${detail || resp.statusText}`);
   }
 
   if (isStream) {
+    // 响应头已收到，说明连接成功：释放仅用于「等待响应头」的 connect 超时定时器，
+    // 避免它一直挂着，把整个流式会话也限制在 connectTimeout 内（慢速流式模型会因此被误杀）。
+    if (timer) { clearTimeout(timer); timer = null; }
     try {
+      const streamIdleTimeout = Number(opts.streamIdleTimeout) || 300000;
       const r = await consumeStream(resp, onDelta, combined, streamIdleTimeout);
       return { ...r, content: unescapeUnicode(r.content) };
     } finally {
@@ -259,7 +296,7 @@ export async function chat(opts) {
   try {
     const data = await resp.json();
     const choice = data?.choices?.[0] || {};
-    let content = choice.message?.content ?? '';
+    let content = unescapeUnicode(choice.message?.content ?? '');
     let finishReason = choice.finish_reason || 'stop';
     let toolCalls = Array.isArray(choice.message?.tool_calls) ? choice.message.tool_calls.map((tc) => ({
       id: tc.id,
@@ -282,7 +319,7 @@ export async function chat(opts) {
       if (retryResp.ok) {
         const retryData = await retryResp.json();
         const retryChoice = retryData?.choices?.[0] || {};
-        content = retryChoice.message?.content ?? '';
+        content = unescapeUnicode(retryChoice.message?.content ?? '');
         finishReason = retryChoice.finish_reason || 'stop';
         toolCalls = Array.isArray(retryChoice.message?.tool_calls) ? retryChoice.message.tool_calls.map((tc) => ({
           id: tc.id,
@@ -311,12 +348,22 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
   let full = '';
   let finishReason = '';
   let idleTimer = null;
+  let signalAbortCleanup = null;
+
+  const cancelReader = () => {
+    try { reader.cancel(); } catch { /* ignore */ }
+  };
+
+  if (signal && !signal.aborted) {
+    signal.addEventListener('abort', cancelReader, { once: true });
+    signalAbortCleanup = () => signal.removeEventListener('abort', cancelReader);
+  }
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     if (idleTimeoutMs > 0) {
       idleTimer = setTimeout(() => {
-        try { reader.cancel(); } catch { /* ignore */ }
+        cancelReader();
         if (!signal?.aborted) {
           const err = new Error(`流式响应超时（${Math.round(idleTimeoutMs / 1000)} 秒无新数据）：模型可能卡住或网络中断。`);
           err.name = 'AbortError';
@@ -344,6 +391,13 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
         if (payload === '[DONE]') { finishReason = 'stop'; continue; }
         try {
           const json = JSON.parse(payload);
+          // 中间帧出现 error 字段（如网关 503/限流/余额不足），直接抛出，避免静默返回空内容
+          if (json?.error) {
+            const msg = json.error.message || JSON.stringify(json.error).slice(0, 300);
+            cancelReader();
+            const err = new Error(`模型流式响应出错：${msg}`);
+            throw err;
+          }
           const delta = unescapeUnicode(json?.choices?.[0]?.delta?.content ?? '');
           if (delta) {
             full += delta;
@@ -352,16 +406,22 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
           if (json?.choices?.[0]?.finish_reason) {
             finishReason = json.choices[0].finish_reason;
           }
-        } catch {
+        } catch (e) {
+          if (e instanceof Error && !(e instanceof SyntaxError) && e.message?.startsWith('模型流式响应出错')) {
+            throw e;
+          }
           // 忽略无法解析的中间帧
         }
       }
     }
   } catch (e) {
     if (e.name === 'AbortError') throw e;
-    // 流中断时尽量保留已生成内容
+    // 网关在流中返回的明确错误（如 503 过载/限流/余额不足）原样抛出，不能静默吞掉
+    if (e.message?.startsWith('模型流式响应出错')) throw e;
+    // 其他异常：流中断时尽量保留已生成内容
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
+    if (signalAbortCleanup) signalAbortCleanup();
   }
 
   if (buffer.trim()) {

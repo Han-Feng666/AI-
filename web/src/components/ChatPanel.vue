@@ -77,12 +77,97 @@ onMounted(() => { scrollBottom(); refreshNovelTitles(); });
 
 // Phase 10：监听联动总线——Manager 工具授权完成后刷新 editor 对应 novel
 const unsub = workspaceEventBus.on('novel:outlineUpdated', ({ novelId }) => {
-  if (Number(novelId) === Number(novelId.value)) editor.refresh();
+  if (Number(novelId) === Number(editor.novelId)) editor.refresh();
 });
 const unsubChar = workspaceEventBus.on('novel:characterUpdated', ({ novelId }) => {
-  if (Number(novelId) === Number(novelId.value)) editor.refresh();
+  if (Number(novelId) === Number(editor.novelId)) editor.refresh();
 });
-onBeforeUnmount(() => { unsub?.(); unsubChar?.(); });
+
+// Manager 授权 request_revise / request_generate_chapter 后真正触发重写任务
+const unsubRevise = workspaceEventBus.on('novel:reviseRequested', async ({ novelId, feedback }) => {
+  const target = Number(novelId) || Number(editor.novelId);
+  const current = Number(editor.novelId);
+  let proceed = true;
+  if (Number(novelId) && target !== current) {
+    try {
+      await ElMessageBox.confirm(
+        `AI 管家请求对《${novelLabel(target)}》修订方案，当前打开的是另一本书。是否切换过去并执行？`,
+        '授权方案修订',
+        { confirmButtonText: '切换并执行', cancelButtonText: '取消', type: 'warning' }
+      );
+      await editor.switchTo(target);
+    } catch { proceed = false; }
+  }
+  if (!proceed || !editor.novelId) return;
+  if (editor.busy) { ElMessage.warning('工作区正在生成，请稍后再执行修订'); return; }
+  if (!feedback || !String(feedback).trim()) { ElMessage.warning('AI 未提供修改意见，无法修订'); return; }
+  try {
+    await editor.revisePlan(String(feedback).trim());
+    ElMessage.success('方案修订任务已触发，稍后在前方「候选方案」中查看并采纳');
+  } catch (e) {
+    ElMessage.error('修订失败：' + (e.message || ''));
+  }
+});
+const unsubGen = workspaceEventBus.on('novel:generateChapterRequested', async ({ novelId }) => {
+  const target = Number(novelId) || Number(editor.novelId);
+  const current = Number(editor.novelId);
+  let proceed = true;
+  if (Number(novelId) && target !== current) {
+    try {
+      await ElMessageBox.confirm(
+        `AI 管家请求为《${novelLabel(target)}》生成下一章，当前打开的是另一本书。是否切换过去并执行？`,
+        '授权章节生成',
+        { confirmButtonText: '切换并执行', cancelButtonText: '取消', type: 'warning' }
+      );
+      await editor.switchTo(target);
+    } catch { proceed = false; }
+  }
+  if (!proceed || !editor.novelId) return;
+  if (editor.busy) { ElMessage.warning('工作区正在生成，请稍后再生成章节'); return; }
+  try {
+    await editor.generateChapter({ mode: 'next' });
+    ElMessage.success('章节生成任务已触发');
+  } catch (e) {
+    ElMessage.error('章节生成失败：' + (e.message || ''));
+  }
+});
+const unsubReviseChapter = workspaceEventBus.on('novel:reviseChapterRequested', async ({ novelId, chapterIndex, instructions }) => {
+  const target = Number(novelId) || Number(editor.novelId);
+  const current = Number(editor.novelId);
+  let proceed = true;
+  if (Number(novelId) && target !== current) {
+    try {
+      await ElMessageBox.confirm(
+        `AI 管家请求为《${novelLabel(target)}》修改第 ${chapterIndex} 章，当前打开的是另一本书。是否切换过去并执行？`,
+        '授权章节修改',
+        { confirmButtonText: '切换并执行', cancelButtonText: '取消', type: 'warning' }
+      );
+      await editor.switchTo(target);
+    } catch { proceed = false; }
+  }
+  if (!proceed || !editor.novelId) return;
+  if (editor.busy) { ElMessage.warning('工作区正在生成，请稍后再修改'); return; }
+  if (!instructions || !String(instructions).trim()) { ElMessage.warning('AI 未提供修改要求，无法修改'); return; }
+  try {
+    // 弹出确认框让作者确认或修改要求
+    const { value } = await ElMessageBox.prompt(
+      `AI 管家建议修改第 ${chapterIndex} 章。您可以修改下面的要求，确认后执行。`,
+      '确认修改要求',
+      { inputValue: String(instructions).trim(), inputType: 'textarea', confirmButtonText: '执行修改', cancelButtonText: '取消' }
+    );
+    if (!String(value).trim()) return;
+    // 切换到目标章节
+    if (editor.activeChapter?.chapter_index !== chapterIndex) {
+      await editor.selectChapter(chapterIndex);
+    }
+    await editor.reviseChapter(String(value).trim());
+    ElMessage.success(`第 ${chapterIndex} 章修改完成`);
+  } catch (e) {
+    if (e === 'cancel') return;
+    ElMessage.error('修改失败：' + (e.message || ''));
+  }
+});
+onBeforeUnmount(() => { unsub?.(); unsubChar?.(); unsubRevise?.(); unsubGen?.(); unsubReviseChapter?.(); });
 
 function send(text) {
   if (!ready.value) {
@@ -104,9 +189,13 @@ async function clear() {
   try {
     await ElMessageBox.confirm('清空后丢失全部总管对话历史，确定吗？', '清空对话', { type: 'warning' });
   } catch { return; }
-  await manager.clear(novelId.value);
-  manager.clearLocal();
-  ElMessage.success('已清空');
+  try {
+    await manager.clear(novelId.value);
+    manager.clearLocal();
+    ElMessage.success('已清空');
+  } catch (e) {
+    ElMessage.error(e.message || '清空失败');
+  }
 }
 
 function toolDescription(name, args) {
@@ -119,6 +208,7 @@ function toolDescription(name, args) {
     update_character: `修改 ${novelLabel(a.novel_id)} 角色「${a.name || ''}」`,
     request_revise: `让 ${novelLabel(a.novel_id)} AI 按"${(a.feedback || '').slice(0, 30)}…"修订方案`,
     request_generate_chapter: `让 ${novelLabel(a.novel_id)} 生成下一章`,
+    request_revise_chapter: `让 ${novelLabel(a.novel_id)} 修改第 ${a.chapter_index} 章：${(a.instructions || '').slice(0, 30)}…`,
     web_search: `联网搜索：${a.query || ''}`
   };
   return map[name] || name;

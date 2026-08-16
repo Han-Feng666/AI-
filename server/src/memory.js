@@ -147,7 +147,10 @@ export async function compressSummariesIfNeeded(novelId, currentIdx, config) {
 
 // ---------- P1-1: 结构化事实库 ----------
 
-export function getActiveFacts(novelId) {
+export function getActiveFacts(novelId, currentIdx = null) {
+  if (currentIdx !== null) {
+    return db.prepare(`SELECT * FROM novel_facts WHERE novel_id = ? AND superseded_by IS NULL AND chapter_index < ? ORDER BY chapter_index`).all(novelId, currentIdx);
+  }
   return db.prepare(`SELECT * FROM novel_facts WHERE novel_id = ? AND superseded_by IS NULL ORDER BY chapter_index`).all(novelId);
 }
 
@@ -184,8 +187,8 @@ export function checkFactConflicts(novelId, newFacts, chapterIdx) {
   return conflicts;
 }
 
-export function formatFactsBlock(novelId) {
-  const facts = getActiveFacts(novelId);
+export function formatFactsBlock(novelId, currentIdx = null) {
+  const facts = getActiveFacts(novelId, currentIdx);
   if (!facts.length) return '';
   const grouped = {};
   for (const f of facts) {
@@ -209,8 +212,12 @@ export function getCharacterTimeline(novelId, characterId, limit = 20) {
     .all(novelId, characterId, limit);
 }
 
-export function formatTimelineBlock(novelId) {
-  const rows = db.prepare(`SELECT ct.character_id, ct.chapter_index, ct.field, ct.old_value, ct.new_value, ct.reason, c.name
+export function formatTimelineBlock(novelId, currentIdx = null) {
+  const rows = currentIdx !== null
+    ? db.prepare(`SELECT ct.character_id, ct.chapter_index, ct.field, ct.old_value, ct.new_value, ct.reason, c.name
+                           FROM character_timeline ct LEFT JOIN characters c ON ct.character_id = c.id
+                           WHERE ct.novel_id = ? AND ct.chapter_index < ? ORDER BY ct.id DESC LIMIT 30`).all(novelId, currentIdx)
+    : db.prepare(`SELECT ct.character_id, ct.chapter_index, ct.field, ct.old_value, ct.new_value, ct.reason, c.name
                            FROM character_timeline ct LEFT JOIN characters c ON ct.character_id = c.id
                            WHERE ct.novel_id = ? ORDER BY ct.id DESC LIMIT 30`).all(novelId);
   if (!rows.length) return '';
@@ -224,8 +231,8 @@ export function formatTimelineBlock(novelId) {
 // ---------- P2-1: 伏笔自动追踪增强 ----------
 
 export function getOverdueForeshadowings(novelId, currentIdx) {
-  return db.prepare(`SELECT * FROM foreshadowings WHERE novel_id = ? AND status = 'open' AND expected_recall_chapter IS NOT NULL AND expected_recall_chapter <= ?`)
-    .all(novelId, currentIdx);
+  return db.prepare(`SELECT * FROM foreshadowings WHERE novel_id = ? AND status = 'open' AND chapter_index < ? AND expected_recall_chapter IS NOT NULL AND expected_recall_chapter <= ?`)
+    .all(novelId, currentIdx, currentIdx);
 }
 
 export function setExpectedRecall(novelId, foreshadowId, chapter) {
@@ -287,7 +294,7 @@ export function saveTimelineEvent(novelId, chapterIdx, storyTime, event) {
 }
 
 export function formatTimelineSummary(novelId, currentIdx) {
-  const rows = db.prepare(`SELECT * FROM novel_timeline WHERE novel_id = ? AND chapter_index <= ? ORDER BY chapter_index DESC LIMIT 20`).all(novelId, currentIdx);
+  const rows = db.prepare(`SELECT * FROM novel_timeline WHERE novel_id = ? AND chapter_index < ? ORDER BY chapter_index DESC LIMIT 20`).all(novelId, currentIdx);
   if (!rows.length) return '';
   const lines = rows.reverse().map((r) => {
     const t = r.story_time ? `[${r.story_time}] ` : '';
@@ -306,11 +313,11 @@ export function buildEnhancedMemoryBlock(novelId, currentIdx) {
   if (hierCtx) parts.push(`【分层摘要树（按距离自动选取摘要层级）】\n${hierCtx}`);
 
   // P1-1: 结构化事实
-  const factsBlock = formatFactsBlock(novelId);
+  const factsBlock = formatFactsBlock(novelId, currentIdx);
   if (factsBlock) parts.push(`【硬事实库（角色属性/能力/世界状态，创作时必须遵循，发现矛盾须以最新事实为准）】\n${factsBlock}`);
 
   // P1-2: 角色时间线（最近 30 条变化）
-  const tlBlock = formatTimelineBlock(novelId);
+  const tlBlock = formatTimelineBlock(novelId, currentIdx);
   if (tlBlock) parts.push(`【角色成长轨迹（按时间排列的变化记录）】\n${tlBlock}`);
 
   // P3: 时间线

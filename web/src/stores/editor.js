@@ -132,14 +132,66 @@ export const useEditorStore = defineStore('editor', {
       try {
         const job = await api.getActiveJob(this.novelId);
         if (job && job.status === 'running') {
+          const createdAt = new Date(job.created_at + 'Z').getTime();
+          const elapsed = (Date.now() - createdAt) / 60000;
+          if (elapsed > 20) {
+            api.abortJob(this.novelId).catch(() => {});
+            this.busy = false;
+            this.busyLabel = '';
+            this._genAbort = null;
+            return;
+          }
+          // 恢复忙碌态，并让「停止生成」对恢复的僵尸 job 也生效（调用后端 abort 接口清理）
           this.busy = true;
+          this._genAbort = () => {
+            api.abortJob(this.novelId).catch(() => {});
+            this._genAbort = null;
+            this.busy = false;
+            this.busyLabel = '';
+            this.genStream = '';
+            this.genProgress = 0;
+          };
           const stageLabels = { plan: '正在生成创作方案…', revise: '正在按你的意见修订方案…', generate_chapter: '正在写章节…', polish: '正在去除 AI 味…', compress: '正在压缩上下文…' };
-          this.busyLabel = stageLabels[job.stage] || '正在生成…';
+          this.busyLabel = (job.stream_cursor && job.stage !== 'plan') ? job.stream_cursor : (stageLabels[job.stage] || '正在生成…');
           this.genStream = job.stream_cursor || '';
+          this.genProgress = Math.max(0, Math.min(99, Number(job.progress) || 0));
+          // 生成进行中也刷新章节列表：正文可能已写入，避免切回空白
+          try {
+            const novel = await api.getNovel(this.novelId);
+            this.chapters = novel.chapters || [];
+            const curHas = this.activeChapter && Number(this.activeChapter.word_count) > 0;
+            if (!this.activeChapter || !curHas) {
+              const withContent = [...this.chapters].filter((c) => Number(c.word_count) > 0);
+              if (withContent.length) this.selectChapter(withContent[withContent.length - 1].chapter_index);
+            }
+          } catch { /* 刷新失败不阻塞 */ }
         } else {
           this.busy = false;
           this.busyLabel = '';
+          this._genAbort = null;
           // 保留 genStream 仅当 busy 时可见，便于切回查看最后一段
+          // job 已结束：刷新章节，确保切换界面后看到最新生成的内容
+          if (job && this.novelId) {
+            try {
+              const novel = await api.getNovel(this.novelId);
+              this.novel = novel;
+              this.chapters = novel.chapters || [];
+              this.characters = novel.characters || [];
+              this.relationships = novel.relationships || [];
+              this.factions = novel.factions || [];
+              this.foreshadowings = novel.foreshadowings || [];
+              // 若当前 activeChapter 无内容（或为 null），选最近有内容的一章
+              const cur = this.activeChapter;
+              const curHasContent = cur && Number(cur.word_count) > 0;
+              if (!cur || !curHasContent) {
+                const withContent = [...this.chapters].filter((c) => Number(c.word_count) > 0);
+                if (withContent.length) {
+                  const idx = withContent[withContent.length - 1].chapter_index;
+                  this.selectChapter(idx);
+                }
+              }
+            } catch { /* 刷新失败不阻塞 */ }
+          }
         }
       } catch { /* ignore */ }
     },
@@ -212,10 +264,18 @@ export const useEditorStore = defineStore('editor', {
       if (idx == null) { this.activeChapter = null; return; }
       const req = ++this._chapterReq;
       this.chapterLoading = true;
+      // 拉取失败时用本地列表章节兜底（避免切界面后空白）
+      const localCh = this.chapters.find((c) => c.chapter_index === idx) || null;
       try {
         const ch = await api.getChapter(this.novelId, idx);
         if (req === this._chapterReq) {
           this.activeChapter = ch;
+          this.chapterEdit = false;
+        }
+      } catch (e) {
+        // API 拉取失败，用本地章节对象兜底（可能无 content，但标题/状态仍在）
+        if (req === this._chapterReq && localCh) {
+          this.activeChapter = { ...localCh, content: localCh.content || '' };
           this.chapterEdit = false;
         }
       } finally {
@@ -244,9 +304,18 @@ export const useEditorStore = defineStore('editor', {
 
     // ---------- 生成 ----------
     stop() {
-      if (this.busy && this._genAbort) {
-        this._genAbort();
-        this._genAbort = null;
+      if (this.busy) {
+        if (this._genAbort) {
+          this._genAbort();
+          this._genAbort = null;
+        } else {
+          // 兜底：无本地 abort 句柄（如恢复的僵尸 job），直接调后端清理
+          api.abortJob(this.novelId).catch(() => {});
+          this.busy = false;
+          this.busyLabel = '';
+          this.genStream = '';
+          this.genProgress = 0;
+        }
       }
       if (this.chatBusy && this._chatAbort) {
         this._chatAbort();
@@ -334,13 +403,13 @@ export const useEditorStore = defineStore('editor', {
         });
         this._genAbort = p.abort;
         const data = await p;
-        const verPatch = data?.data?.version ? {
+        const verPatch = data?.version ? {
           pendingVersion: {
-            id: data.data.version.id,
-            versionNo: data.data.version.version_no,
+            id: data.version.id,
+            versionNo: data.version.version_no,
             feedback: feedback,
-            snapshot: data.data.version.snapshot || {},
-            createdAt: data.data.version.created_at
+            snapshot: data.version.snapshot || {},
+            createdAt: data.version.created_at
           }
         } : {};
         this._commit(originId, { ...verPatch, busy: false, busyLabel: '', genStream: '', genProgress: 100, _genAbort: null });
@@ -409,13 +478,22 @@ export const useEditorStore = defineStore('editor', {
       return r;
     },
 
+    async generateNextChapter(params = {}) {
+      const activeIdx = this.activeChapter?.chapter_index;
+      if (!activeIdx) {
+        throw new Error('请先选择章节');
+      }
+      return this.generateChapter({ mode: 'regenerate', chapterIndex: activeIdx + 1, ...params });
+    },
+
     async generateChapter(params = {}) {
-      if (this.busy) return;
+      if (this.busy) throw new Error('系统正忙，请等待当前任务完成后再试');
       const originId = this.novelId;
       this.busy = true;
       this.busyLabel = '正在准备生成…';
       this.genStream = '';
       this.genProgress = 0;
+      let done = false;
       try {
         const p = api.generateChapter(this.novelId, params, {
           onStatus: (m) => { this._commit(originId, { busyLabel: m }); },
@@ -429,11 +507,16 @@ export const useEditorStore = defineStore('editor', {
             this._commit(originId, { genStream: updated });
             saveGenDraft(this.novelId, updated, params.chapterIndex ?? null);
           },
+          onReset: () => {
+            this._commit(originId, { genStream: '' });
+            clearGenDraft(this.novelId);
+          },
           onError: (m) => { throw new Error(m); }
         });
         this._genAbort = p.abort;
         const data = await p;
         clearGenDraft(this.novelId);
+        done = true;
         const resultPatch = {
           novel: data.novel,
           chapters: data.novel.chapters,
@@ -453,10 +536,20 @@ export const useEditorStore = defineStore('editor', {
         }
         return data;
       } catch (e) {
-        if (e.message === '已停止') return null;
+        if (e.message === '已停止') {
+          this._commit(originId, { busy: false, busyLabel: '', genStream: '', genProgress: 0, _genAbort: null });
+          return null;
+        }
+        const partial = this.genStream || '';
+        this._commit(originId, { busy: false, busyLabel: '生成失败', genStream: partial || '', genProgress: 0, _genAbort: null });
+        if (partial) {
+          saveGenDraft(this.novelId, partial, params.chapterIndex ?? null);
+        }
         throw e;
       } finally {
-        this._commit(originId, { busy: false, busyLabel: '', genStream: '', genProgress: 0, _genAbort: null });
+        if (!done) {
+          this._commit(originId, { busy: false, busyLabel: '', genStream: '', genProgress: 0, _genAbort: null });
+        }
       }
     },
 
@@ -550,6 +643,42 @@ export const useEditorStore = defineStore('editor', {
             const cur = String(this.novelId) === String(originId) ? (this.$state.genStream || '') : ((this._slices.get(String(originId)) || {}).genStream || '');
             this._commit(originId, { genStream: cur + d });
           },
+          onError: (m) => { throw new Error(m); }
+        });
+        this._genAbort = p.abort;
+        const data = await p;
+        this._commit(originId, { activeChapter: data.chapter, chapterEdit: false, busy: false, busyLabel: '', genStream: '', genProgress: 100, _genAbort: null });
+        if (String(this.novelId) === String(originId)) await this.refresh();
+        return data;
+      } catch (e) {
+        if (e.message === '已停止') return null;
+        throw e;
+      } finally {
+        this._commit(originId, { busy: false, busyLabel: '', genStream: '', genProgress: 0, _genAbort: null });
+      }
+    },
+
+    // 按作者要求修改当前章节
+    async reviseChapter(instructions) {
+      if (this.busy || !this.activeChapter) return null;
+      const originId = this.novelId;
+      const idx = this.activeChapter.chapter_index;
+      this.busy = true;
+      this.busyLabel = '正在按要求修改…';
+      this.genStream = '';
+      this.genProgress = 0;
+      try {
+        const p = api.reviseChapter(this.novelId, idx, instructions, {
+          onStatus: (m) => { this._commit(originId, { busyLabel: m }); },
+          onProgress: (pct, msg) => {
+            const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+            this._commit(originId, { genProgress: p, busyLabel: msg || `正在按要求修改…（${p}%）` });
+          },
+          onDelta: (d) => {
+            const cur = String(this.novelId) === String(originId) ? (this.$state.genStream || '') : ((this._slices.get(String(originId)) || {}).genStream || '');
+            this._commit(originId, { genStream: cur + unescapeUnicode(d) });
+          },
+          onReset: () => { this._commit(originId, { genStream: '' }); },
           onError: (m) => { throw new Error(m); }
         });
         this._genAbort = p.abort;
@@ -744,7 +873,10 @@ export const useEditorStore = defineStore('editor', {
       try {
         const p = api.adaptationPlan(this.novelId, intent, {
           onStatus: (m) => { this._commit(originId, { adaptBusy: true }); },
-          onProgress: (pct, msg) => { /* 方案阶段进度不细粒度展示 */ },
+          onProgress: (pct, msg) => {
+            const v = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+            this._commit(originId, { genProgress: v, busyLabel: msg || '正在生成改编方案…' });
+          },
           onDelta: (d) => {
             const cur = String(this.novelId) === String(originId) ? (this.$state.adaptPlanStream || '') : ((this._slices.get(String(originId)) || {}).adaptPlanStream || '');
             this._commit(originId, { adaptPlanStream: cur + unescapeUnicode(d) });
@@ -753,8 +885,13 @@ export const useEditorStore = defineStore('editor', {
         });
         this._genAbort = p.abort;
         const data = await p;
+        const plans = Array.isArray(data.plans) ? data.plans : [];
         this._commit(originId, {
-          adaptJob: { ...(this.adaptJob || {}), id: data.jobId, status: 'plan_ready', plan: data.plan },
+          adaptJob: {
+            ...(this.adaptJob || {}),
+            id: data.jobId, status: 'plan_ready', plan: data.plan,
+            plans
+          },
           adaptBusy: false, adaptPlanStream: '', _genAbort: null
         });
         return data;
@@ -763,6 +900,17 @@ export const useEditorStore = defineStore('editor', {
         throw e;
       } finally {
         this._commit(originId, { adaptBusy: false, _genAbort: null });
+      }
+    },
+
+    // 选择改编方案（多方案中选一个）后开始
+    async selectAdaptationPlan(planId) {
+      try {
+        const data = await api.selectAdaptationPlan(this.novelId, planId);
+        await this.loadAdaptation();
+        return data;
+      } catch (e) {
+        throw e;
       }
     },
 

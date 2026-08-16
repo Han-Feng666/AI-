@@ -190,8 +190,10 @@ async function regenerate() {
     await ElMessageBox.confirm(`将重新生成第 ${idx} 章并覆盖当前内容，确定吗？`, '重新生成本章', { type: 'warning' });
   } catch { return; }
   try {
-    await store.generateChapter({ mode: 'regenerate', chapterIndex: idx });
-    ElMessage.success('本章已重新生成');
+    const result = await store.generateChapter({ mode: 'regenerate', chapterIndex: idx });
+    if (result) {
+      ElMessage.success('本章已重新生成');
+    }
   } catch (e) {
     ElMessage.error(e.message);
   }
@@ -217,6 +219,32 @@ async function polish() {
     ElMessage.success(data?.passed ? '润色完成，AI 味检测已达标' : '润色完成（检测仍有残留，可再次润色）');
   } catch (e) {
     ElMessage.error(e.message);
+  }
+}
+
+async function revise() {
+  try {
+    const { value } = await ElMessageBox.prompt('请输入您对本章的修改要求，AI 将按要求改写本章。', '按要求修改', {
+      inputPlaceholder: '例如：把主角的对话改得更强硬、增加一段打斗描写、把结尾改得温馨一些…',
+      confirmButtonText: '开始修改',
+      cancelButtonText: '取消',
+      inputType: 'textarea',
+      inputValidator: (v) => !!String(v).trim(),
+      inputErrorMessage: '请填写修改要求'
+    });
+    if (!String(value).trim()) return;
+    const data = await store.reviseChapter(String(value).trim());
+    detect.value = {
+      score: data?.detect?.score ?? 0,
+      issues: data?.detect?.issues || [],
+      blacklist: data?.detect?.blacklist || [],
+      passed: !!data?.passed,
+      rounds: data?.rounds || []
+    };
+    ElMessage.success('修改完成');
+  } catch (e) {
+    if (e === 'cancel') return;
+    ElMessage.error(e.message || '修改失败');
   }
 }
 
@@ -356,6 +384,7 @@ watch(
           <el-button size="small" type="success" plain @click="copyChapter"><el-icon style="margin-right:4px"><CopyDocument /></el-icon>一键复制</el-button>
           <el-button size="small" type="info" plain :loading="detectLoading" @click="runDetect"><el-icon style="margin-right:4px"><Aim /></el-icon>AI味检测</el-button>
           <el-button size="small" type="warning" plain @click="polish"><el-icon style="margin-right:4px"><Brush /></el-icon>去AI味</el-button>
+          <el-button size="small" type="warning" plain @click="revise"><el-icon style="margin-right:4px"><Edit /></el-icon>按要求修改</el-button>
           <el-button size="small" type="primary" plain @click="store.adaptDialog = true"><el-icon style="margin-right:4px"><MagicStick /></el-icon>整本改编</el-button>
           <el-button size="small" @click="openBackups"><el-icon style="margin-right:4px"><Clock /></el-icon>历史版本</el-button>
           <el-button size="small" type="warning" plain @click="regenerate"><el-icon style="margin-right:4px"><Refresh /></el-icon>重新生成</el-button>

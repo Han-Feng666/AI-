@@ -198,14 +198,39 @@ async function restoreContext() {
 }
 
 onMounted(() => {
-  store.switchTo(novelId.value).then(() => checkGenDraft()).catch((e) => ElMessage.error(e.message));
+  store.switchTo(novelId.value).then(() => { checkGenDraft(); checkAutoAdapt(); }).catch((e) => ElMessage.error(e.message));
   if (!settings.loaded) settings.load();
 });
 
 // 同组件内切换到另一 novel 时切 slice（防止两本状态串扰）
 watch(novelId, (nid) => {
-  if (nid) store.switchTo(nid).then(() => checkGenDraft()).catch((e) => ElMessage.error(e.message));
+  if (nid) store.switchTo(nid).then(() => { checkGenDraft(); checkAutoAdapt(); }).catch((e) => ElMessage.error(e.message));
 });
+
+// 从导入页跳转而来且带 adapt 标记时，自动打开改编对话框询问怎么改
+async function checkAutoAdapt() {
+  if (route.query.adapt !== '1') return;
+  // 清除标记，避免刷新后重复弹出
+  router.replace({ query: { ...route.query, adapt: undefined } });
+  if (!store.novelId) return;
+  try {
+    await store.loadAdaptation();
+  } catch (e) { /* 加载失败不阻塞弹窗 */ }
+  const job = store.adaptJob;
+  // 已有已完成的改编任务则不再打扰
+  if (job && (job.status === 'adapting' || job.status === 'done' || job.status === 'plan_ready')) {
+    store.adaptDialog = true;
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      'TXT 解析完成。是否要为这本小说生成改编方案？\n\n你可以描述想怎么改（改节奏、换风格、改结局…），也可以让系统直接生成几个方案供你参考。',
+      '整本改编',
+      { confirmButtonText: '开始改编', cancelButtonText: '稍后再说', type: 'question', confirmButtonClass: 'el-button--primary' }
+    );
+    store.adaptDialog = true;
+  } catch { /* 用户选择稍后再说，不弹窗 */ }
+}
 
 async function checkGenDraft() {
   if (!store.hasGenDraft()) return;

@@ -13,6 +13,7 @@ import { GENRES } from '../utils/format';
 const store = useEditorStore();
 const router = useRouter();
 const activeTab = ref('chapters');
+const useReference = ref(false);
 
 function onTabChange(name) {
   if (name === 'foreshadowings') {
@@ -181,11 +182,14 @@ function selectChapter(idx) {
               class="gen-next-btn"
               :loading="store.busy"
               :disabled="store.busy"
-              @click="store.generateChapter({ mode: 'next' })"
+              @click="store.generateNextChapter({ useReference: useReference.value }).catch((e) => ElMessage.error(e.message || '生成失败'))"
             >
               <el-icon style="margin-right:6px"><EditPen /></el-icon>
               {{ store.busy ? store.busyLabel : '生成下一章' }}
             </el-button>
+            <div class="gen-options">
+              <el-checkbox v-model="useReference" size="small">参考同类热门小说</el-checkbox>
+            </div>
             <div
               v-for="c in store.chapters"
               :key="c.chapter_index"
@@ -315,7 +319,8 @@ function selectChapter(idx) {
 .panel-tabs :deep(.el-tabs__content) { flex: 1; overflow: hidden; }
 .panel-tabs :deep(.el-tab-pane) { height: 100%; }
 .chapter-list { height: 100%; overflow-y: auto; padding: 12px; }
-.gen-next-btn { width: 100%; margin-bottom: 12px; }
+.gen-next-btn { width: 100%; margin-bottom: 6px; }
+.gen-options { margin-bottom: 12px; padding-left: 2px; }
 .chapter-item {
   display: flex;
   align-items: center;

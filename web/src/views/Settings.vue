@@ -29,6 +29,92 @@ const savingModel = ref(false);
 const checkTask = ref('writing');
 const routingInfo = ref({});
 
+// 多模型对话框快捷填充
+const modelProviderId = ref('');
+const mmFetching = ref(false);
+const mmModelOptions = ref([]);
+const mmShowModelSelect = ref(false);
+const mmAutoFetchTimer = null;
+
+function applyModelProvider(pid) {
+  const p = PROVIDERS.find((x) => x.value === pid);
+  if (!p) return;
+  modelDraft.value.config = {
+    ...(modelDraft.value.config || {}),
+    baseUrl: p.baseUrl,
+    provider: p.value,
+    model: p.model,
+    apiKey: modelDraft.value.config?.apiKey || ''
+  };
+  if (!modelDraft.value.name && p.name) modelDraft.value.name = p.name + ' 模型';
+  autoFillContext(modelDraft.value.config);
+  mmModelOptions.value = [];
+  mmShowModelSelect.value = false;
+  // Ollama 无需 Key，自动后拉取模型
+  if (p.value === 'ollama') scheduleMMAutoFetch();
+}
+
+function copyFromMain() {
+  const cfg = (store && store.llm_config) || {};
+  modelDraft.value.config = {
+    ...(modelDraft.value.config || {}),
+    baseUrl: cfg.baseUrl || '',
+    apiKey: cfg.apiKey || '',
+    model: cfg.model || '',
+    provider: cfg.provider || '',
+    contextLength: cfg.contextLength,
+    temperature: cfg.temperature
+  };
+  if (!modelDraft.value.name && cfg.model) modelDraft.value.name = cfg.model + '（主力）';
+  modelProviderId.value = PROVIDERS.some((p) => p.value === cfg.provider) ? cfg.provider : 'custom';
+  mmModelOptions.value = [];
+  mmShowModelSelect.value = false;
+  ElMessage.success('已填入当前默认主力模型配置');
+}
+
+let mmFetchTimer = null;
+let mmLastFetchKey = '';
+function scheduleMMAutoFetch() {
+  const cfg = modelDraft.value.config || {};
+  if (!cfg.baseUrl.trim()) return;
+  const key = `${cfg.baseUrl}|${cfg.apiKey}`;
+  if (key === mmLastFetchKey) return;
+  clearTimeout(mmFetchTimer);
+  mmFetchTimer = setTimeout(() => { mmLastFetchKey = key; fetchMMModels(true); }, 600);
+}
+
+async function fetchMMModels(auto = false) {
+  const cfg = modelDraft.value.config || {};
+  if (!cfg.baseUrl.trim()) return auto ? null : ElMessage.warning('请先填写 API Base URL');
+  const isLocal = cfg.provider === 'ollama' || cfg.provider === 'transformers';
+  if (!isLocal && !cfg.apiKey.trim()) return auto ? null : ElMessage.warning('请先填写 API Key');
+  mmFetching.value = true;
+  mmModelOptions.value = [];
+  try {
+    const r = await api.fetchModels({ ...cfg });
+    const list = Array.isArray(r?.models) ? r.models : [];
+    if (!list.length) {
+      if (!auto) ElMessage.warning('该平台未返回任何模型，请检查 Base URL 或手动填写模型名');
+      mmShowModelSelect.value = false;
+      return;
+    }
+    mmModelOptions.value = list.map((m) => ({ id: String(m.id || m), name: String(m.name || m.id || m) }));
+    mmShowModelSelect.value = true;
+    if (auto && !mmModelOptions.value.some((m) => m.id === cfg.model)) {
+      modelDraft.value.config.model = mmModelOptions.value[0].id;
+    }
+    autoFillContext(modelDraft.value.config);
+  } catch (e) {
+    if (!auto) ElMessage.error('拉取失败：' + e.message);
+  } finally {
+    mmFetching.value = false;
+  }
+}
+
+function onMMConfigInput() {
+  scheduleMMAutoFetch();
+}
+
 async function loadModels() {
   try {
     const r = await store.loadModels();
@@ -46,6 +132,10 @@ function openAddModel() {
     tasks: ['writing'],
     config: { ...store.llm_config }
   };
+  modelProviderId.value = '';
+  mmModelOptions.value = [];
+  mmShowModelSelect.value = false;
+  mmLastFetchKey = '';
   showModelDialog.value = true;
 }
 
@@ -57,6 +147,10 @@ function openEditModel(m) {
     tasks: [...(m.tasks || [])],
     config: { ...(m.config || {}) }
   };
+  modelProviderId.value = PROVIDERS.some((p) => p.value === m.config?.provider) ? (m.config?.provider || '') : 'custom';
+  mmModelOptions.value = [];
+  mmShowModelSelect.value = false;
+  mmLastFetchKey = '';
   showModelDialog.value = true;
 }
 
@@ -64,6 +158,7 @@ async function saveModel() {
   const cfg = modelDraft.value.config;
   if (!cfg.baseUrl || !cfg.model) return ElMessage.warning('请填写 Base URL 与模型名称');
   if (!modelDraft.value.tasks.length) return ElMessage.warning('请至少指派一个任务类型');
+  autoFillContext(cfg);
   savingModel.value = true;
   try {
     const payload = {
@@ -567,6 +662,52 @@ const PROVIDERS = [
 
 const needKey = computed(() => store.llm_config.provider !== 'ollama');
 
+// 模型名 → 该模型支持的最大上下文窗口（token）。按前缀匹配，命中即返回；匹配不到返回空（保留用户手动值）。
+const MODEL_CONTEXT_HINTS = [
+  // 官方长上下文旗舰优先
+  { match: /google|gemini/i, ctx: 1048576 },
+  { match: /gpt-4\.1|gpt-4-1/i, ctx: 1048576 },
+  { match: /gpt-5/i, ctx: 400000 },
+  { match: /gpt-4o/i, ctx: 128000 },
+  { match: /gpt-4-turbo|gpt-4-32k/i, ctx: 128000 },
+  { match: /^gpt-4/i, ctx: 128000 },
+  { match: /o\d+|o[34]-mini|o4|o3/i, ctx: 200000 },
+  { match: /claude/i, ctx: 200000 },
+  { match: /deepseek/i, ctx: 131072 },
+  { match: /qwen|通义/i, ctx: 131072 },
+  { match: /glm|zhipu|智谱|bigmodel/i, ctx: 131072 },
+  { match: /moonshot|kimi|月之暗面/i, ctx: 131072 },
+  { match: /doubao|豆包|volcengine/i, ctx: 262144 },
+  { match: /hunyuan|混元/i, ctx: 131072 },
+  { match: /ernie|文心|baidu/i, ctx: 131072 },
+  { match: /spark|讯飞|xfyun/i, ctx: 131072 },
+  { match: /yi-|零一|lingyi/i, ctx: 131072 },
+  { match: /qwen2\.5|llama3\.1|llama-3\.1/i, ctx: 131072 },
+  { match: /llama/i, ctx: 131072 },
+  { match: /mistral/i, ctx: 131072 },
+  { match: /internlm/i, ctx: 131072 },
+  { match: /command-r/i, ctx: 131072 }
+];
+
+// 根据模型名推断最高上下文长度；推断不到返回 null
+function inferContextForModel(model) {
+  const m = String(model || '').trim();
+  if (!m) return null;
+  for (const { match, ctx } of MODEL_CONTEXT_HINTS) {
+    if (match.test(m)) return ctx;
+  }
+  return null;
+}
+
+// 自动把推断出的上下文长度填入配置（仅当推断到，且当前值为空或小于推断值时才覆盖，避免覆盖用户手动选择）
+function autoFillContext(cfg) {
+  if (!cfg || !cfg.model) return;
+  const inferred = inferContextForModel(cfg.model);
+  if (!inferred) return;
+  const cur = Number(cfg.contextLength) || 0;
+  if (!cur || cur < inferred) cfg.contextLength = inferred;
+}
+
 function formatToken(n) {
   return n >= 1000 ? `${Math.round(n / 1000)}K` : String(n);
 }
@@ -585,6 +726,8 @@ function onProviderChange(val) {
     store.llm_config.baseUrl = p.baseUrl;
     store.llm_config.model = p.model;
     testResult.value = null;
+    autoFillContext(store.llm_config);
+    scheduleAutoFetch();
   }
 }
 
@@ -593,6 +736,7 @@ async function save() {
   if (!cfg.baseUrl.trim()) return ElMessage.warning('请填写 API Base URL');
   if (!cfg.model.trim()) return ElMessage.warning('请填写模型名称');
   if (needKey.value && !cfg.apiKey.trim()) return ElMessage.warning('请填写 API Key');
+  autoFillContext(cfg);
   try {
     await store.save();
     ElMessage.success('设置已保存');
@@ -643,6 +787,7 @@ async function fetchModels(auto = false) {
     if (auto && !modelOptions.value.some((m) => m.id === store.llm_config.model)) {
       store.llm_config.model = modelOptions.value[0].id;
     }
+    autoFillContext(store.llm_config);
     if (!auto) ElMessage.success(`已获取 ${modelOptions.value.length} 个可用模型，请在下拉中选择`);
   } catch (e) {
     showModelSelect.value = false;
@@ -678,7 +823,7 @@ async function fetchModels(auto = false) {
       </div>
       <div class="field-tip" style="margin: 4px 0 16px">把当前配置（服务商 + URL + Key + 模型 + 参数）保存为命名预设，下次一键切换，免去反复填写。</div>
 
-      <el-form label-position="top" style="max-width: 640px">
+      <el-form label-position="top">
         <el-form-item label="模型服务商">
           <el-select v-model="store.llm_config.provider" style="width: 100%" @change="onProviderChange">
             <el-option v-for="p in PROVIDERS" :key="p.value" :label="p.name" :value="p.value" />
@@ -709,24 +854,25 @@ async function fetchModels(auto = false) {
             allow-create
             default-first-option
             style="width: 100%"
+            @change="autoFillContext(store.llm_config)"
           >
             <el-option v-for="m in modelOptions" :key="m.id" :label="m.name" :value="m.id" />
           </el-select>
           <div v-else class="model-row">
-            <el-input v-model="store.llm_config.model" placeholder="deepseek-chat / gpt-4o-mini / qwen-plus …" style="flex:1" />
+            <el-input v-model="store.llm_config.model" placeholder="deepseek-chat / gpt-4o-mini / qwen-plus …" style="flex:1" @blur="autoFillContext(store.llm_config)" />
             <el-button :loading="fetchingModels" @click="fetchModels(false)">
               <el-icon style="margin-right:4px"><Download /></el-icon>获取可用模型
             </el-button>
           </div>
           <div v-if="fetchingModels" class="fetch-loading"><el-icon class="is-loading"><Loading /></el-icon>正在获取可用模型列表…</div>
           <div v-else-if="fetchError" class="fetch-error"><el-icon><WarningFilled /></el-icon>{{ fetchError }}</div>
-          <div class="field-tip" style="margin-top:6px">输入 Base URL 与 API Key 后会自动拉取该平台可用模型供选择；也可手动点「获取可用模型」。支持输入列表外的模型名。</div>
+          <div class="field-tip" style="margin-top:6px">选择或输入模型后会按该模型自动填入支持的最高上下文长度；输入 Base URL 与 API Key 后也会自动拉取该平台可用模型供选择。支持输入列表外的模型名。</div>
         </el-form-item>
 
         <div class="two-col">
-          <el-form-item label="上下文长度（模型窗口）">
+          <el-form-item label="上下文长度（模型窗口，选好模型后自动填入最高支持值）">
             <el-select v-model="store.llm_config.contextLength" style="width: 100%">
-              <el-option v-for="n in [8192, 16384, 32768, 65536, 131072, 196608]" :key="n" :label="formatToken(n)" :value="n" />
+              <el-option v-for="n in [8192, 16384, 32768, 65536, 131072, 196608, 262144, 393216, 524288, 786432, 1048576, 1572864, 2097152]" :key="n" :label="formatToken(n)" :value="n" />
             </el-select>
           </el-form-item>
           <el-form-item label="思考功能（Reasoning）">
@@ -741,11 +887,19 @@ async function fetchModels(auto = false) {
 
         <div class="two-col">
           <el-form-item label="温度（越高越有创造性）">
-            <el-slider v-model="store.llm_config.temperature" :min="0" :max="2" :step="0.1" show-input />
+            <el-slider v-model="store.llm_config.temperature" :min="0" :max="1.9" :step="0.1" show-input />
           </el-form-item>
           <el-form-item label="单次最大输出 Token">
             <el-input-number v-model="store.llm_config.maxTokens" :min="512" :max="128000" :step="512" style="width:100%" />
           </el-form-item>
+        </div>
+        <div class="param-presets">
+          <span class="param-presets-label">参数预设：</span>
+          <el-button size="small" @click="store.llm_config.temperature=0.5; store.llm_config.contextLength=32768; store.llm_config.maxTokens=8192">精确模式</el-button>
+          <el-button size="small" @click="store.llm_config.temperature=0.9; store.llm_config.contextLength=32768; store.llm_config.maxTokens=8192" type="primary">平衡模式（推荐）</el-button>
+          <el-button size="small" @click="store.llm_config.temperature=1.3; store.llm_config.contextLength=65536; store.llm_config.maxTokens=8192">创意模式</el-button>
+          <el-button size="small" @click="store.llm_config.temperature=0.9; store.llm_config.contextLength=131072; store.llm_config.maxTokens=16384">长文本模式</el-button>
+          <el-button size="small" @click="store.llm_config.temperature=0.7; store.llm_config.contextLength=16384; store.llm_config.maxTokens=4096">快速模式</el-button>
         </div>
         <div class="field-tip">
           上下文长度决定单次请求能携带的设定与历史；输出 Token 为单次生成上限；思考功能仅对支持推理的模型生效（如 OpenAI o 系列 / Qwen thinking / Ollama think）。
@@ -881,24 +1035,38 @@ async function fetchModels(auto = false) {
 
     <el-dialog v-model="showModelDialog" :title="editingModel ? '编辑模型' : '添加模型'" width="640px">
       <el-form label-position="top">
+        <div class="mm-quick-bar">
+          <el-select v-model="modelProviderId" placeholder="选择服务商，自动填充（推荐）" style="flex:1" @change="applyModelProvider">
+            <el-option v-for="p in PROVIDERS" :key="p.value" :label="p.name" :value="p.value" />
+          </el-select>
+          <el-button @click="copyFromMain">从默认主力复制</el-button>
+        </div>
+        <div v-if="modelProviderId === 'ollama'" class="field-tip" style="margin:6px 0 10px">Ollama 本地模型无需 API Key，可在同一台机器部署多个本地模型分别指派任务。</div>
         <el-form-item label="模型名称（备注用，如：写作主力）">
           <el-input v-model="modelDraft.name" placeholder="例如：DeepSeek 写作主力 / GLM 大纲 / Kimi 对话" />
         </el-form-item>
         <div class="two-col">
           <el-form-item label="API Base URL">
-            <el-input v-model="modelDraft.config.baseUrl" placeholder="https://api.deepseek.com" />
+            <el-input v-model="modelDraft.config.baseUrl" placeholder="https://api.deepseek.com" @input="onMMConfigInput" />
           </el-form-item>
           <el-form-item label="API Key">
-            <el-input v-model="modelDraft.config.apiKey" type="password" show-password placeholder="sk-...（本地 Ollama 可留空）" />
+            <el-input v-model="modelDraft.config.apiKey" type="password" show-password placeholder="sk-...（本地 Ollama 可留空）" @input="onMMConfigInput" />
           </el-form-item>
         </div>
         <div class="two-col">
           <el-form-item label="模型名称（服务商侧）">
-            <el-input v-model="modelDraft.config.model" placeholder="deepseek-chat / glm-4-plus" />
+            <div class="mm-model-row">
+              <el-input v-if="!mmShowModelSelect" v-model="modelDraft.config.model" placeholder="deepseek-chat / glm-4-plus" @blur="autoFillContext(modelDraft.config)" />
+              <el-select v-else v-model="modelDraft.config.model" filterable style="flex:1" @change="autoFillContext(modelDraft.config)">
+                <el-option v-for="o in mmModelOptions" :key="o.id" :label="o.name" :value="o.id" />
+              </el-select>
+              <el-button :loading="mmFetching" @click="fetchMMModels(false)">拉取模型</el-button>
+            </div>
+            <div class="field-tip" style="margin-top:6px">选择或输入模型名后会自动填入该模型支持的最高上下文长度（如 GPT-4o→128K、Gemini→1M、DeepSeek→128K）。</div>
           </el-form-item>
           <el-form-item label="上下文长度">
             <el-select v-model="modelDraft.config.contextLength" style="width: 100%">
-              <el-option v-for="n in [8192, 16384, 32768, 65536, 131072, 196608]" :key="n" :label="formatToken(n)" :value="n" />
+              <el-option v-for="n in [8192, 16384, 32768, 65536, 131072, 196608, 262144, 393216, 524288, 786432, 1048576, 1572864, 2097152]" :key="n" :label="formatToken(n)" :value="n" />
             </el-select>
           </el-form-item>
         </div>
@@ -914,7 +1082,7 @@ async function fetchModels(auto = false) {
             </el-checkbox-group>
           </div>
         </el-form-item>
-        <div class="field-tip">同一任务可指派给多个模型，路由时优先选用配置完整（有 Key 或本地模型）的那一个。</div>
+        <div class="field-tip">同一任务可指派给多个模型，路由时优先选用配置完整（有 Key 或本地模型）的那一个。填写 Base URL 与 Key 后会自动拉取可用模型列表，免去手动输入模型名。</div>
       </el-form>
       <template #footer>
         <el-button @click="showModelDialog = false">取消</el-button>
@@ -1099,7 +1267,7 @@ async function fetchModels(auto = false) {
     <div class="settings-card search-card">
       <h3 class="card-title">联网搜索</h3>
       <p class="storage-tip">总管 AI 可联网搜索资料，辅助创作参考。搜索结果会注入对话上下文。</p>
-      <el-form label-position="top" style="max-width: 640px">
+      <el-form label-position="top">
         <el-form-item label="搜索引擎">
           <el-radio-group v-model="searchSettings.search_engine">
             <el-radio value="duckduckgo">DuckDuckGo（免配置）</el-radio>
@@ -1130,7 +1298,7 @@ async function fetchModels(auto = false) {
         每一本小说会自动在此目录下创建以「小说名」命名的独立文件夹，每一章保存为一个独立的
         TXT 文本文件（形如「第3章-章节标题.txt」），方便直接用记事本或任意阅读软件打开查看。
       </p>
-      <el-form label-position="top" style="max-width: 640px">
+      <el-form label-position="top">
         <el-form-item label="作品文件夹根目录（可自定义安装到任意盘 / 分区）">
           <el-input v-model="storageRoot" placeholder="例如 Windows：D:\Novels ；macOS/Linux：/Users/你的名字/Novels" />
         </el-form-item>
@@ -1158,17 +1326,24 @@ async function fetchModels(auto = false) {
 </template>
 
 <style scoped>
+.settings-page {
+  max-width: 1080px;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
 .page-head { margin-bottom: 20px; }
 .page-title { margin: 0; font-size: 24px; font-weight: 700; }
 .page-sub { margin: 6px 0 0; color: #6b7280; font-size: 13px; }
 .card-title { margin: 0 0 4px; font-size: 16px; color: #1e1b4b; }
-.preset-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 4px; }
+.preset-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 4px; flex-wrap: wrap; }
 .settings-card {
   background: #fff;
   border-radius: 12px;
   padding: 24px;
   box-shadow: 0 1px 3px rgba(20,24,80,.06);
-  max-width: 720px;
+  width: 100%;
+  box-sizing: border-box;
 }
 .storage-card { margin-top: 20px; }
 .storage-tip {
@@ -1181,8 +1356,8 @@ async function fetchModels(auto = false) {
   border-radius: 8px;
   padding: 10px 14px;
 }
-.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-.field-tip { font-size: 12px; color: #9ca3af; margin: -8px 0 16px; line-height: 1.6; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px 20px; }
+.field-tip { font-size: 12px; color: #9ca3af; margin: -2px 0 16px; line-height: 1.6; }
 .memory-tip {
   font-size: 12px;
   color: #047857;
@@ -1193,12 +1368,16 @@ async function fetchModels(auto = false) {
   line-height: 1.7;
   margin-bottom: 16px;
 }
-.polish-switch { display: flex; align-items: center; gap: 14px; }
-.polish-tip { font-size: 12px; color: #9ca3af; }
-.model-row { display: flex; gap: 10px; align-items: center; }
+.polish-switch { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-width: 0; }
+.polish-tip { font-size: 12px; color: #9ca3af; flex: 1; min-width: 200px; }
+.model-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .fetch-loading { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #4f46e5; margin-top: 4px; }
 .fetch-error { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #dc2626; margin-top: 4px; word-break: break-all; }
-.actions { display: flex; gap: 12px; margin-top: 8px; }
+.actions { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+.mm-quick-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.mm-model-row { display: flex; gap: 8px; align-items: center; width: 100%; flex-wrap: wrap; }
+.param-presets { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: -4px 0 14px; }
+.param-presets-label { font-size: 12px; color: #6b7280; white-space: nowrap; }
 .mm-empty {
   border: 1px dashed #c7d2fe;
   border-radius: 10px;
@@ -1260,7 +1439,8 @@ async function fetchModels(auto = false) {
   background: #fff;
   border-radius: 12px;
   padding: 20px 24px;
-  max-width: 720px;
+  width: 100%;
+  box-sizing: border-box;
   box-shadow: 0 1px 3px rgba(20,24,80,.06);
 }
 .tips-card h4 { margin: 0 0 10px; color: #1e1b4b; }

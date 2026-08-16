@@ -22,6 +22,7 @@ const form = ref({
 });
 
 const filterGenre = ref('');
+const uploadRef = ref(null);
 
 const filteredCorpora = computed(() => {
   if (!filterGenre.value) return corpora.value;
@@ -42,6 +43,7 @@ async function load() {
 function openImport() {
   form.value = { title: '', genre: '', author: '', content: '' };
   importStatus.value = '';
+  uploadRef.value?.clearFiles();
   dialogOpen.value = true;
 }
 
@@ -50,6 +52,7 @@ function onFileChange(uploadFile) {
   if (!raw) return;
   if (!/\.(txt|md|text)$/i.test(raw.name) && raw.type !== 'text/plain') {
     ElMessage.warning('请选择 .txt 或纯文本文件');
+    uploadRef.value?.clearFiles();
     return;
   }
   const reader = new FileReader();
@@ -57,6 +60,8 @@ function onFileChange(uploadFile) {
     form.value.content = String(reader.result || '');
     form.value.title = form.value.title || raw.name.replace(/\.(txt|md|text)$/i, '');
     ElMessage.success(`已读取「${raw.name}」（${formatNumber(form.value.content.length)} 字）`);
+    // 立即清空 upload 内部 fileList，否则 :limit 会阻止连续导入第二个文件
+    uploadRef.value?.clearFiles();
   };
   reader.readAsText(raw, 'utf-8');
 }
@@ -196,10 +201,10 @@ onMounted(load);
         </el-form-item>
         <el-form-item label="小说文本" required>
           <el-upload
+            ref="uploadRef"
             drag
             :auto-upload="false"
             :show-file-list="false"
-            :limit="1"
             accept=".txt,.md,.text,text/plain"
             :on-change="onFileChange"
           >

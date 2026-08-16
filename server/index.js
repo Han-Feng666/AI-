@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import routes from './src/routes.js';
 import { ensureRoot } from './src/storage.js';
+import { clearZombieJobs } from './src/jobs.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -25,7 +26,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '200mb' }));
 
 app.get('/api/health', (req, res) => res.json({ ok: true, name: 'novel-studio-server' }));
 app.use('/api', routes);
@@ -47,6 +48,8 @@ app.use((err, req, res, next) => {
 });
 
 ensureRoot().then(() => {
+  const cleaned = clearZombieJobs();
+  if (cleaned) console.log(`[startup] 清理 ${cleaned} 个残留任务`);
   app.listen(PORT, () => {
     console.log(`Novel Studio server running at http://localhost:${PORT}`);
   });

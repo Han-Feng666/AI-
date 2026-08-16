@@ -190,6 +190,27 @@ export const toolRegistry = {
     executor: async ({ novel_id }) => ({ ok: true, hint: '须由前端经 /novels/:id/chapters/generate 触发', novel_id })
   },
 
+  request_revise_chapter: {
+    needsAuth: true,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'request_revise_chapter',
+        description: '触发某小说指定章节的修改任务（与作者在章节操作面板点"按要求修改"等价）。前端会弹出输入框，待作者确认修改要求后执行。',
+        parameters: {
+          type: 'object',
+          properties: {
+            novel_id: { type: 'integer' },
+            chapter_index: { type: 'integer', description: '要修改的章节序号' },
+            instructions: { type: 'string', description: '作者的修改要求，如"把主角对话改得更强硬""添加一段打斗描写"等' }
+          },
+          required: ['novel_id', 'chapter_index', 'instructions']
+        }
+      }
+    },
+    executor: async ({ novel_id, chapter_index, instructions }) => ({ ok: true, hint: '须由前端经 /novels/:id/chapters/:idx/revise 触发', novel_id, chapter_index, instructions })
+  },
+
   web_search: {
     needsAuth: false,
     schema: {

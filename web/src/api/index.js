@@ -2,7 +2,7 @@ import axios from 'axios';
 
 const http = axios.create({
   baseURL: '/api',
-  timeout: 60000
+  timeout: 120000
 });
 
 http.interceptors.response.use(
@@ -14,12 +14,16 @@ http.interceptors.response.use(
 );
 
 // 流式请求：解析后端 SSE，返回 AbortController 以便取消
-export async function streamRequest(url, body, { onStatus, onDelta, onError, onProgress, idleTimeout = 120000 } = {}) {
+export async function streamRequest(url, body, { onStatus, onDelta, onError, onProgress, onReset, idleTimeout = 120000 } = {}) {
   const ctrl = new AbortController();
   let timer;
+  let idleAborted = false;
   const resetTimer = () => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => ctrl.abort(), idleTimeout);
+    timer = setTimeout(() => {
+      idleAborted = true;
+      ctrl.abort();
+    }, idleTimeout);
   };
   resetTimer();
   let resp;
@@ -51,6 +55,8 @@ export async function streamRequest(url, body, { onStatus, onDelta, onError, onP
   const reader = resp.body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
+  let doneReceived = false;
+  let errorReceived = false;
   const cleanup = () => clearTimeout(timer);
 
   const parse = async () => {
@@ -60,7 +66,7 @@ export async function streamRequest(url, body, { onStatus, onDelta, onError, onP
         try {
           chunk = await reader.read();
         } catch (e) {
-          if (e.name === 'AbortError') throw new Error('已停止');
+          if (e.name === 'AbortError') throw new Error(idleAborted ? '请求超时，请重试' : '已停止');
           throw new Error('连接中断');
         }
         resetTimer();
@@ -76,22 +82,26 @@ export async function streamRequest(url, body, { onStatus, onDelta, onError, onP
           try {
             obj = JSON.parse(t.slice(5).trim());
           } catch { continue; }
+          if (obj.type === 'done') { doneReceived = true; return obj.data; }
           if (obj.type === 'status' && onStatus) onStatus(obj.message);
           else if (obj.type === 'delta' && onDelta) onDelta(obj.content);
           else if (obj.type === 'progress' && onProgress) onProgress(obj.progress, obj.message);
-          else if (obj.type === 'error' && onError) onError(obj.message);
-          else if (obj.type === 'done') return obj.data;
+          else if (obj.type === 'error' && onError) { onError(obj.message); errorReceived = true; }
+          else if (obj.type === 'reset' && onReset) onReset();
           else if (obj.type === 'aborted') throw new Error('已停止');
         }
       }
-      throw new Error('连接中断');
+      if (!doneReceived) {
+        if (errorReceived) return;
+        throw new Error('连接中断');
+      }
     } finally {
       cleanup();
     }
   };
 
   const promise = parse();
-  promise.abort = () => { clearTimeout(timer); ctrl.abort(); };
+  promise.abort = () => { clearTimeout(timer); try { reader.cancel(); } catch { /* ignore */ } ctrl.abort(); };
   return promise;
 }
 
@@ -118,6 +128,7 @@ export const api = {
   // 生成任务 Job（Phase 2）
   getActiveJob: (id) => http.get(`/novels/${id}/job`).then((r) => r.job),
   listActiveJobs: () => http.get('/jobs/active').then((r) => r.jobs),
+  abortJob: (id) => http.post(`/novels/${id}/job/abort`).then((r) => r.job),
 
   // Manager 总管 AI（Phase 5 / Phase 6）
   managerChat: (novelId, body) => http.post('/manager/chat', body),
@@ -150,8 +161,9 @@ export const api = {
   getChapter: (id, idx) => http.get(`/novels/${id}/chapters/${idx}`),
   updateChapter: (id, idx, data) => http.put(`/novels/${id}/chapters/${idx}`, data),
   deleteChapter: (id, idx) => http.delete(`/novels/${id}/chapters/${idx}`),
-  generateChapter: (id, data, handlers) => streamRequest(`/novels/${id}/chapters/generate`, data, handlers),
-  polishChapter: (id, idx, handlers) => streamRequest(`/novels/${id}/chapters/${idx}/polish`, {}, handlers),
+  generateChapter: (id, data, handlers) => streamRequest(`/novels/${id}/chapters/generate`, data, { ...handlers, idleTimeout: 300000 }),
+  polishChapter: (id, idx, handlers) => streamRequest(`/novels/${id}/chapters/${idx}/polish`, {}, { ...handlers, idleTimeout: 300000 }),
+  reviseChapter: (id, idx, instructions, handlers) => streamRequest(`/novels/${id}/chapters/${idx}/revise`, { instructions }, { ...handlers, idleTimeout: 300000 }),
 
   // 导出
   exportNovel: (id) => http.get(`/novels/${id}/export`, { responseType: 'text' }),
@@ -214,10 +226,13 @@ export const api = {
   updateStyle: (id, data) => http.put(`/styles/${id}`, data),
   deleteStyle: (id) => http.delete(`/styles/${id}`),
 
+  // 灵感生成器：按题材+风格批量产出小说创意大纲
+  generateIdeas: (data, handlers) => streamRequest('/ideas', data, handlers),
+
   // 设置
   getSettings: () => http.get('/settings'),
   saveSettings: (data) => http.put('/settings', data),
-  testLLM: (llm_config) => http.post('/settings/test', { llm_config }),
+  testLLM: (llm_config) => http.post('/settings/test', { llm_config }, { timeout: 180000 }),
   fetchModels: (llm_config) => http.post('/settings/models', { llm_config }),
 
   // LLM 预设
@@ -232,7 +247,7 @@ export const api = {
   createLLMModel: (model) => http.post('/settings/llm-models', model),
   updateLLMModel: (mid, patch) => http.put(`/settings/llm-models/${mid}`, patch),
   deleteLLMModel: (mid) => http.delete(`/settings/llm-models/${mid}`),
-  testLLMRoute: (task) => http.post('/settings/llm-models/route-test', { task }),
+  testLLMRoute: (task) => http.post('/settings/llm-models/route-test', { task }, { timeout: 180000 }),
 
   // 知识学习库
   importKnowledge: (data, handlers) => streamRequest('/knowledge/import', data, handlers),
@@ -268,7 +283,7 @@ export const api = {
   searchRag: (novelId, query, topK) => http.post('/rag-cache/search', { novelId, query, topK }),
 
   // 本地对话测试
-  localChatTest: (messages, sessionKey) => http.post('/local-model/chat-test', { messages, sessionKey }),
+  localChatTest: (messages, sessionKey) => http.post('/local-model/chat-test', { messages, sessionKey }, { timeout: 180000 }),
 
   // Ollama 内置安装器
   getOllamaInstallStatus: () => http.get('/ollama-installer/status'),
@@ -300,8 +315,8 @@ export const api = {
   consistencyCheck: (novelId, chapterIndex) => http.post(`/novels/${novelId}/consistency-check`, { chapterIndex }),
 
   // 文笔风格学习
-  styleLearn: (novelId, sampleText) => http.post(`/novels/${novelId}/style-learn`, { sampleText }),
-  styleLearnFromChapters: (novelId, chapterCount) => http.post(`/novels/${novelId}/style-learn-from-chapters`, { chapterCount }),
+  styleLearn: (novelId, sampleText) => http.post(`/novels/${novelId}/style-learn`, { sampleText }, { timeout: 180000 }),
+  styleLearnFromChapters: (novelId, chapterCount) => http.post(`/novels/${novelId}/style-learn-from-chapters`, { chapterCount }, { timeout: 180000 }),
   styleLearnOffline: (novelId) => http.post(`/novels/${novelId}/style-learn-offline`, {}),
 
   // 题材模板查询
@@ -321,14 +336,18 @@ export const api = {
 
   // 联网搜索
   search: (query, opts = {}) => http.post('/search', { query, ...opts }),
+  referenceSearch: (id) => http.post(`/novels/${id}/reference-search`),
+  analyzeMergeNovels: (id, novels) => http.post(`/novels/${id}/adaptation/analyze-merge`, { novels }),
   getSearchSettings: () => http.get('/search/settings'),
   saveSearchSettings: (data) => http.put('/search/settings', data),
 
   // TXT 导入 + 整本改编
-  importTxt: (data) => http.post('/novels/import-txt', data),
-  importTxtPreview: (data) => http.post('/novels/import-txt/preview', data),
+  importTxt: (data) => http.post('/novels/import-txt', data, { timeout: 180000 }),
+  importTxtPreview: (data) => http.post('/novels/import-txt/preview', data, { timeout: 180000 }),
   adaptationPlan: (id, intent, handlers) => streamRequest(`/novels/${id}/adaptation/plan`, { intent }, handlers),
+  adaptationFromSong: (id, data, handlers) => streamRequest(`/novels/${id}/adaptation/from-song`, data, handlers),
   getAdaptation: (id) => http.get(`/novels/${id}/adaptation`),
+  selectAdaptationPlan: (id, planId) => http.post(`/novels/${id}/adaptation/select-plan`, { planId }),
   adaptationStart: (id) => http.post(`/novels/${id}/adaptation/start`, {}),
   adaptationNext: (id, handlers) => streamRequest(`/novels/${id}/adaptation/next`, {}, handlers),
   acceptCandidate: (cid) => http.post(`/adaptation-candidates/${cid}/accept`, {}),

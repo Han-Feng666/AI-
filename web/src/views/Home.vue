@@ -71,12 +71,14 @@ const importFile = ref(null);
 const importResult = ref(null);
 const importPreview = ref(null);
 const importTxtContent = ref('');
+const importUploadRef = ref(null);
 
 function openImport() {
   importOpen.value = true;
   importPreview.value = null;
   importTxtContent.value = '';
   importFile.value = null;
+  importUploadRef.value?.clearFiles();
 }
 
 function onImportPick(file) {
@@ -86,24 +88,27 @@ function onImportPick(file) {
   if (!importTitle.value) {
     importTitle.value = (raw.name || '').replace(/\.txt$/i, '');
   }
+  importUploadRef.value?.clearFiles();
 }
 
 function onImportRemove() {
   importFile.value = null;
   importPreview.value = null;
   importTxtContent.value = '';
+  importUploadRef.value?.clearFiles();
 }
 
 async function doImport() {
   if (!importFile.value) { ElMessage.warning('请选择 TXT 文件'); return; }
   if (!importTitle.value.trim()) { ElMessage.warning('请填写作品标题'); return; }
-  if (importFile.value.size > 5 * 1024 * 1024) { ElMessage.warning('文件过大，请控制在 5MB 以内'); return; }
+  if (importFile.value.size > 200 * 1024 * 1024) { ElMessage.warning('文件过大，请控制在 200MB 以内'); return; }
   importing.value = true;
   try {
     const text = await readTxtFile(importFile.value);
     importTxtContent.value = text;
     const data = await api.importTxtPreview({ content: text });
     importPreview.value = data;
+    ElMessage.success(`已读取「${importFile.value.name}」并完成解析，请核对拆分结果`);
   } catch (e) {
     importPreview.value = null;
     ElMessage.error(e.message || '解析失败');
@@ -119,6 +124,7 @@ async function confirmImport() {
     const data = await api.importTxt({ title: importTitle.value.trim(), content: importTxtContent.value });
     importResult.value = data;
     importPreview.value = null;
+    ElMessage.success(`「${importFile.value?.name || ''}」导入成功，共 ${data.imported || 0} 章`);
   } catch (e) {
     ElMessage.error(e.message || '导入失败');
   } finally {
@@ -141,7 +147,7 @@ function finishImport() {
     importTxtContent.value = '';
     importFile.value = null;
     importTitle.value = '';
-    router.push(`/novel/${novel.id}`);
+    router.push(`/novel/${novel.id}?adapt=1`);
   }
 }
 
@@ -149,11 +155,15 @@ const form = ref({
   title: '',
   genre: ['玄幻'],
   stylePresets: [],
+  styleIds: [],
   concept: '',
   chapterWordCount: 2000,
   targetChapters: 20,
   knowledgeCorpusIds: []
 });
+
+const styleLibrary = ref([]);
+const styleLibsLoading = ref(false);
 
 const availableKnowledge = ref([]);
 const knowledgeLoading = ref(false);
@@ -192,6 +202,22 @@ function toggleStyle(s) {
   form.value.stylePresets = cur.includes(s) ? cur.filter(x => x !== s) : [...cur, s];
 }
 
+function toggleStyleLib(id) {
+  const cur = form.value.styleIds;
+  form.value.styleIds = cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id];
+}
+
+async function loadStyleLibrary() {
+  styleLibsLoading.value = true;
+  try {
+    styleLibrary.value = await api.listStyles();
+  } catch {
+    styleLibrary.value = [];
+  } finally {
+    styleLibsLoading.value = false;
+  }
+}
+
 async function load() {
   loading.value = true;
   try {
@@ -214,11 +240,12 @@ async function createNovel() {
       ...form.value,
       genre: form.value.genre.join(','),
       stylePresets: form.value.stylePresets,
+      styleIds: form.value.styleIds,
       knowledgeCorpusIds: form.value.knowledgeCorpusIds,
       cover_color: coverColors[Math.floor(Math.random() * coverColors.length)]
     });
     dialogOpen.value = false;
-    form.value = { title: '', genre: ['玄幻'], stylePresets: [], concept: '', chapterWordCount: 2000, targetChapters: 20, knowledgeCorpusIds: [] };
+    form.value = { title: '', genre: ['玄幻'], stylePresets: [], styleIds: [], concept: '', chapterWordCount: 2000, targetChapters: 20, knowledgeCorpusIds: [] };
     availableKnowledge.value = [];
     router.push(`/novel/${novel.id}`);
   } catch (e) {
@@ -247,7 +274,7 @@ async function removeNovel(novel) {
   }
 }
 
-onMounted(() => { load(); pollJobs(); startJobStream(); });
+onMounted(() => { load(); pollJobs(); startJobStream(); loadStyleLibrary(); });
 watch(() => form.value.genre, () => loadKnowledgeForGenres(), { deep: true });
 onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) { try { jobStream.close(); } catch {} jobStream = null; } });
 </script>
@@ -260,6 +287,9 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
         <p class="page-sub">所有作品保存在本地；每本小说拥有独立的世界观、角色、章节与记忆，互不干扰，点击即可继续创作</p>
       </div>
       <div class="head-actions">
+        <el-button size="large" plain @click="router.push('/ideas')">
+          <el-icon style="margin-right:6px"><MagicStick /></el-icon>灵感生成器
+        </el-button>
         <el-button size="large" plain @click="router.push('/shared-characters')">
           <el-icon style="margin-right:6px"><UserFilled /></el-icon>共享角色池
         </el-button>
@@ -387,6 +417,34 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
             </div>
           </div>
         </el-form-item>
+        <el-form-item label="风格库">
+          <div class="knowledge-section">
+            <div v-if="styleLibsLoading" class="knowledge-loading">
+              <el-icon class="is-loading"><Loading /></el-icon>
+              正在加载风格库…
+            </div>
+            <template v-if="!styleLibsLoading && styleLibrary.length">
+              <div class="knowledge-hint">勾选风格库中的作者风格，AI 会深度模仿其文笔特点进行创作（可与上方预设风格叠加）：</div>
+              <div class="knowledge-list">
+                <div
+                  v-for="s in styleLibrary"
+                  :key="s.id"
+                  class="knowledge-tag"
+                  :class="{ active: form.styleIds.includes(s.id) }"
+                  @click="toggleStyleLib(s.id)"
+                >
+                  <el-icon v-if="form.styleIds.includes(s.id)" class="check-icon"><CircleCheck /></el-icon>
+                  {{ s.name }}
+                  <span v-if="s.analysis?.overview" class="k-genre">{{ s.analysis.overview.slice(0, 12) }}</span>
+                </div>
+              </div>
+            </template>
+            <div v-if="!styleLibsLoading && !styleLibrary.length" class="knowledge-empty">
+              风格库为空。
+              <el-link type="primary" @click="router.push('/styles')">前往风格库导入</el-link>
+            </div>
+          </div>
+        </el-form-item>
         <el-form-item label="灵感想法">
           <el-input
             v-model="form.concept"
@@ -429,18 +487,17 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
           </el-form-item>
           <el-form-item label="选择文件">
             <el-upload
+              ref="importUploadRef"
               drag
               :auto-upload="false"
-              :limit="1"
               accept=".txt,text/plain"
               :on-change="onImportPick"
-              :on-exceed="() => undefined"
               :on-remove="onImportRemove"
             >
               <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
               <div class="el-upload__text">拖拽 TXT 文件到此处，或<em>点击选择</em></div>
               <template #tip>
-                <div class="el-upload__tip">支持 UTF-8 / GBK 等常见编码的 .txt 全文小说，单文件 ≤ 5MB。选好文件后先预览拆分结果，确认后再正式导入。</div>
+                <div class="el-upload__tip">支持 UTF-8 / GBK 等常见编码的 .txt 全文小说，单文件 ≤ 200MB。选好文件后先预览拆分结果，确认后再正式导入。</div>
               </template>
             </el-upload>
           </el-form-item>

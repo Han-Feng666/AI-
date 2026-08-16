@@ -1,8 +1,10 @@
 <script setup>
-import { computed } from 'vue';
+import { ref, computed } from 'vue';
+import { ElMessage } from 'element-plus';
 import { useEditorStore } from '../stores/editor';
 
 const store = useEditorStore();
+const useReference = ref(false);
 
 const written = computed(() => store.chapters.filter((c) => c.word_count > 0).length);
 const target = computed(() => Number(store.novel?.target_chapters) || store.chapters.length || 0);
@@ -25,11 +27,14 @@ function aiDotCls(score) {
       class="gen-next-btn"
       :loading="store.busy"
       :disabled="store.busy"
-      @click="store.generateChapter({ mode: 'next' })"
+      @click="store.generateNextChapter({ useReference: useReference.value }).catch((e) => ElMessage.error(e.message || '生成失败'))"
     >
       <el-icon style="margin-right:6px"><EditPen /></el-icon>
       {{ store.busy ? store.busyLabel : '生成下一章' }}
     </el-button>
+    <div class="gen-options">
+      <el-checkbox v-model="useReference" size="small">参考同类热门小说</el-checkbox>
+    </div>
     <div v-if="target" class="list-progress">
       <div class="lp-head">
         <span class="lp-text">已写 {{ written }} / {{ target }} 章</span>
@@ -76,7 +81,8 @@ function aiDotCls(score) {
   border-radius: 12px;
   box-shadow: 0 1px 3px rgba(20,24,80,.06);
 }
-.gen-next-btn { width: 100%; margin-bottom: 12px; }
+.gen-next-btn { width: 100%; margin-bottom: 6px; }
+.gen-options { margin-bottom: 12px; padding-left: 2px; font-size: 12px; }
 .list-progress { margin-bottom: 12px; padding: 8px 10px; background: #f5f6fd; border-radius: 8px; }
 .lp-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
 .lp-text { font-size: 11.5px; color: #6b7280; }

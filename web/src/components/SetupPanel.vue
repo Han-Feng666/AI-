@@ -98,10 +98,14 @@ const planForm = ref({
   concept: '',
   genre: ['玄幻'],
   chapterWordCount: 2000,
-  targetChapters: 20
+  targetChapters: 20,
+  protagonistName: '',
+  heroineName: ''
 });
 const styleIds = ref([]);
 const stylePresets = ref([]);
+const knowledgeIds = ref([]);
+const availableKnowledge = ref([]);
 const planGenerating = ref(false);
 const planDialog = ref(false);
 const feedback = ref('');
@@ -109,6 +113,11 @@ const revHistory = ref([]);
 const searchLoading = ref(false);
 const searchOpen = ref(false);
 const searchResults = ref([]);
+const refSearchOpen = ref(false);
+const refSearchResults = ref([]);
+const refSearching = ref(false);
+const referenceNotesDirty = ref(false);
+const useReferenceInPlan = ref(false);
 
 const importOpen = ref(false);
 const importing = ref(false);
@@ -116,12 +125,14 @@ const importTitle = ref('');
 const importFile = ref(null);
 const importPreview = ref(null);
 const importTxtContent = ref('');
+const importUploadRef = ref(null);
 
 function openImport() {
   importOpen.value = true;
   importPreview.value = null;
   importTxtContent.value = '';
   importFile.value = null;
+  importUploadRef.value?.clearFiles();
 }
 
 function onImportPick(file) {
@@ -131,18 +142,20 @@ function onImportPick(file) {
   if (!importTitle.value) {
     importTitle.value = (raw.name || '').replace(/\.txt$/i, '');
   }
+  importUploadRef.value?.clearFiles();
 }
 
 function onImportRemove() {
   importFile.value = null;
   importPreview.value = null;
   importTxtContent.value = '';
+  importUploadRef.value?.clearFiles();
 }
 
 async function doImport() {
   if (!importFile.value) { ElMessage.warning('请选择 TXT 文件'); return; }
   if (!importTitle.value.trim()) { ElMessage.warning('请填写作品标题'); return; }
-  if (importFile.value.size > 5 * 1024 * 1024) { ElMessage.warning('文件过大，请控制在 5MB 以内'); return; }
+  if (importFile.value.size > 200 * 1024 * 1024) { ElMessage.warning('文件过大，请控制在 200MB 以内'); return; }
   importing.value = true;
   try {
     const text = await readTxtFile(importFile.value);
@@ -200,6 +213,28 @@ async function searchRef() {
   }
 }
 
+async function searchReference() {
+  if (!planForm.value.concept.trim() && !planForm.value.genre.length) {
+    ElMessage.warning('请先输入灵感想法或选择类型');
+    return;
+  }
+  refSearching.value = true;
+  refSearchOpen.value = true;
+  refSearchResults.value = [];
+  try {
+    const data = await api.referenceSearch(store.novelId);
+    refSearchResults.value = data.results || [];
+    referenceNotesDirty.value = true; // 新结果会覆盖旧参考记录
+    if (!refSearchResults.value.length) {
+      ElMessage.info('暂未搜索到相关参考，可直接生成创作方案');
+    }
+  } catch (e) {
+    ElMessage.error(e.message);
+  } finally {
+    refSearching.value = false;
+  }
+}
+
 // Phase 9：篇幅分级
 const lengthClass = ref('medium');
 function applyLengthClass(c) {
@@ -236,11 +271,24 @@ function goStyles() {
   router.push('/styles');
 }
 
+function goKnowledge() {
+  router.push('/knowledge');
+}
+
 onMounted(() => {
   store.loadStyles();
+  loadKnowledgeList();
 });
 
-// 监听 novel 变化，把已保存值同步到草稿（仅在没有进行中的编辑时）
+async function loadKnowledgeList() {
+  try {
+    const list = await api.listKnowledge();
+    availableKnowledge.value = list || [];
+  } catch { /* 加载失败不阻塞 */ }
+}
+
+// 监听 novel 变化，把已保存值同步到草稿（仅在没有进行中的编辑时，且不覆盖用户已手动输入的值）
+let nameDirty = false;
 watch(
   () => store.novel,
   (n) => {
@@ -252,11 +300,20 @@ watch(
     planForm.value.targetChapters = Number(n.target_chapters) || 20;
     styleIds.value = (n.style_ids || []).slice();
     stylePresets.value = (n.style_presets || []).slice();
+    knowledgeIds.value = n.knowledge_corpus_ids ? String(n.knowledge_corpus_ids).split(',').filter(Boolean).map(Number) : [];
     lengthClass.value = n.length_class || 'medium';
+    if (!nameDirty) {
+      planForm.value.protagonistName = n.protagonist_name || '';
+      planForm.value.heroineName = n.heroine_name || '';
+    }
     syncing = false;
   },
   { immediate: true }
 );
+
+// 用户手动输入名字时标记 dirty，防止 watch 覆盖
+watch(() => planForm.value.protagonistName, () => { if (planForm.value.protagonistName) nameDirty = true; });
+watch(() => planForm.value.heroineName, () => { if (planForm.value.heroineName) nameDirty = true; });
 
 // 草稿自动保存：任一字段变化且与已保存值不同就写回后端
 let saveTimer = null;
@@ -280,7 +337,10 @@ async function autoSaveDraft() {
     target_chapters: Number(planForm.value.targetChapters) || 20,
     style_ids: styleIds.value,
     style_presets: stylePresets.value,
-    length_class: lengthClass.value
+    knowledge_corpus_ids: knowledgeIds.value,
+    length_class: lengthClass.value,
+    protagonist_name: planForm.value.protagonistName,
+    heroine_name: planForm.value.heroineName
   };
   // 与已存值不同才保存
   if (
@@ -290,7 +350,10 @@ async function autoSaveDraft() {
     patch.target_chapters === (Number(n.target_chapters) || 20) &&
     JSON.stringify(patch.style_ids) === JSON.stringify(n.style_ids || []) &&
     JSON.stringify(patch.style_presets) === JSON.stringify(n.style_presets || []) &&
-    patch.length_class === (n.length_class || 'medium')
+    JSON.stringify(patch.knowledge_corpus_ids || []) === JSON.stringify(n.knowledge_corpus_ids ? String(n.knowledge_corpus_ids).split(',').filter(Boolean).map(Number) : []) &&
+    patch.length_class === (n.length_class || 'medium') &&
+    patch.protagonist_name === (n.protagonist_name || '') &&
+    patch.heroine_name === (n.heroine_name || '')
   ) return;
   try {
     await store.saveNovelSettings(patch);
@@ -305,6 +368,9 @@ async function startPlan() {
     ElMessage.warning('请先输入你的灵感想法');
     return;
   }
+  const referenceNotes = useReferenceInPlan.value && refSearchResults.value.length
+    ? refSearchResults.value.map((r) => `《${r.title}》：${r.snippet || ''}`).join('\n')
+    : '';
   planGenerating.value = true;
   try {
     await store.saveStyles(styleIds.value);
@@ -312,7 +378,8 @@ async function startPlan() {
       ...planForm.value,
       genre: planForm.value.genre.join(','),
       stylePresets: stylePresets.value,
-      lengthClass: lengthClass.value
+      lengthClass: lengthClass.value,
+      referenceNotes
     });
     if (!data) return;
     planDialog.value = true;
@@ -366,6 +433,14 @@ function closePlanDialog() {
           placeholder="描述你的想法：世界观、主角、核心冲突…"
         />
       </el-form-item>
+      <div class="two-col">
+        <el-form-item label="男主角名字（可选）">
+          <el-input v-model="planForm.protagonistName" placeholder="如：林风 / 陈若辰" maxlength="10" />
+        </el-form-item>
+        <el-form-item label="女主角名字（可选）">
+          <el-input v-model="planForm.heroineName" placeholder="如：苏怜 / 柳如烟" maxlength="10" />
+        </el-form-item>
+      </div>
       <el-form-item label="小说类型（可多选）">
         <el-checkbox-group v-model="planForm.genre" class="check-grid">
           <el-checkbox v-for="g in GENRES" :key="g" :value="g" class="check-item">{{ g }}</el-checkbox>
@@ -421,6 +496,16 @@ function closePlanDialog() {
           导入文本并提取文风
         </div>
       </el-form-item>
+      <el-form-item label="知识学习库（可选，可多选）">
+        <el-checkbox-group v-model="knowledgeIds" class="check-grid">
+          <el-checkbox v-for="k in availableKnowledge" :key="k.id" :value="k.id" class="check-item">{{ k.title }}</el-checkbox>
+        </el-checkbox-group>
+        <div v-if="!availableKnowledge.length" class="style-empty-tip">
+          知识学习库为空，可前往
+          <el-link type="primary" :underline="false" @click="goKnowledge">知识学习库</el-link>
+          导入优秀小说让 AI 学习其文笔与剧情
+        </div>
+      </el-form-item>
       <div class="setup-actions">
         <el-button
           type="primary"
@@ -433,6 +518,9 @@ function closePlanDialog() {
         </el-button>
         <el-button :loading="searchLoading" @click="searchRef">
           <el-icon style="margin-right:4px"><Search /></el-icon>搜索参考
+        </el-button>
+        <el-button :loading="refSearching" @click="searchReference">
+          <el-icon style="margin-right:4px"><Reading /></el-icon>参考方向
         </el-button>
       </div>
 
@@ -447,6 +535,26 @@ function closePlanDialog() {
             <div v-if="r.fetchedContent" class="search-result-content">{{ r.fetchedContent.slice(0, 300) }}…</div>
           </div>
         </div>
+</el-dialog>
+
+      <el-dialog v-model="refSearchOpen" title="同类小说参考方向" width="620px">
+        <div v-loading="refSearching">
+          <div class="ref-intro">以下为当前网络热门同类小说，可参考其方向确定后再生成方案：</div>
+          <div v-if="!refSearchResults.length && !refSearching" class="search-empty">暂未搜索到相关参考，可直接生成创作方案</div>
+          <div v-for="(r, i) in refSearchResults" :key="i" class="search-result-item" style="margin-bottom:12px">
+            <div class="search-result-title">
+              <a :href="r.url" target="_blank" rel="noopener">{{ r.title || '(无标题)' }}</a>
+            </div>
+            <div v-if="r.snippet" class="search-result-snippet">{{ r.snippet }}</div>
+          </div>
+        </div>
+        <div v-if="refSearchResults.length" class="ref-use-check">
+          <el-checkbox v-model="useReferenceInPlan">参考以上小说的套路与节奏来生成创作方案</el-checkbox>
+        </div>
+        <template #footer>
+          <el-button @click="refSearchOpen = false">再看看别的</el-button>
+          <el-button type="primary" @click="refSearchOpen = false; startPlan()">已了解，开始生成方案</el-button>
+        </template>
       </el-dialog>
       <div v-if="store.busy" class="plan-progress">
         <div class="plan-progress-status">
@@ -516,22 +624,22 @@ function closePlanDialog() {
         <el-button size="small" type="primary" @click="acceptPending">采纳</el-button>
         <el-button size="small" @click="dismissPending">弃用</el-button>
       </div>
-      <div class="plan-overview" v-if="store.novel">
+      <div class="plan-overview" v-if="store.novel || store.chapters?.length">
         <div class="plan-head">
-          <span class="plan-book">{{ store.novel.title || '未命名' }}</span>
-          <el-tag v-if="store.novel.genre" size="small" effect="plain">{{ splitGenres(store.novel.genre).join('、') }}</el-tag>
+          <span class="plan-book">{{ store.novel?.title || '未命名' }}</span>
+          <el-tag v-if="store.novel?.genre" size="small" effect="plain">{{ splitGenres(store.novel?.genre).join('、') }}</el-tag>
         </div>
-        <div v-if="store.novel.style_presets?.length" class="plan-block">
+        <div v-if="store.novel?.style_presets?.length" class="plan-block">
           <div class="plan-label">创作风格</div>
           <div class="plan-chars">
             <span v-for="s in store.novel.style_presets" :key="s" class="plan-char">{{ s }}</span>
           </div>
         </div>
-        <div v-if="store.novel.world_view" class="plan-block">
+        <div v-if="store.novel?.world_view" class="plan-block">
           <div class="plan-label">世界观设定</div>
           <div class="plan-text">{{ store.novel.world_view }}</div>
         </div>
-        <div v-if="store.novel.outline" class="plan-block">
+        <div v-if="store.novel?.outline" class="plan-block">
           <div class="plan-label">剧情大纲</div>
           <div class="plan-text">{{ store.novel.outline }}</div>
         </div>
@@ -667,18 +775,17 @@ function closePlanDialog() {
         </el-form-item>
         <el-form-item label="选择文件">
           <el-upload
+            ref="importUploadRef"
             drag
             :auto-upload="false"
-            :limit="1"
             accept=".txt,text/plain"
             :on-change="onImportPick"
-            :on-exceed="() => undefined"
             :on-remove="onImportRemove"
           >
             <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
             <div class="el-upload__text">拖拽 TXT 文件到此处，或<em>点击选择</em></div>
             <template #tip>
-              <div class="el-upload__tip">支持 UTF-8 / GBK 等常见编码的 .txt 全文小说，单文件 ≤ 5MB。选好文件后先预览拆分结果，确认后再正式导入。</div>
+              <div class="el-upload__tip">支持 UTF-8 / GBK 等常见编码的 .txt 全文小说，单文件 ≤ 200MB。选好文件后先预览拆分结果，确认后再正式导入。</div>
             </template>
           </el-upload>
         </el-form-item>
@@ -808,6 +915,8 @@ function closePlanDialog() {
   gap: 8px;
 }
 .search-empty { padding: 20px; text-align: center; color: #9ca3af; }
+.ref-intro { font-size: 13px; color: #4b5563; margin-bottom: 14px; line-height: 1.7; padding: 10px 14px; background: #f0fdf4; border: 1px solid #d1fae5; border-radius: 8px; }
+.ref-use-check { margin-top: 14px; padding: 10px 14px; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; color: #3730a3; font-size: 13px; }
 .search-result-item {
   padding: 12px;
   border: 1px solid #eef0f6;
@@ -1097,4 +1206,5 @@ function closePlanDialog() {
 .ver-at { color: #9ca3af; font-size: 11.5px; margin-left: auto; }
 .ver-feedback { font-size: 12.5px; color: #4b5563; margin-top: 4px; line-height: 1.6; }
 .ver-actions { margin-top: 6px; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 </style>

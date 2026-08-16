@@ -10,7 +10,8 @@ import {
   getKeyMoments, formatKeyMoments, addKeyMomentUnique,
   getStageMemories, formatStageMemories, upsertStageMemory,
   getCharacterProfiles, upsertCharacterProfile, formatCharacterProfiles,
-  scanAiPatterns, blacklistPenalty, blacklistFlagWords, cleanAiText,
+  scanAiPatterns, blacklistPenalty, blacklistFlagWords, cleanAiText, scanTopicDrift,
+  normalizeLLMConfig, estimateTokens,
   parseTxtChapters
 } from './lib.js';
 import {
@@ -30,15 +31,16 @@ import {
   FORESHADOW_ANALYZE_SYSTEM, AI_DETECT_SYSTEM, KEY_MOMENTS_SYSTEM, PLAN_ADVANCE_SYSTEM, STAGE_SUMMARY_SYSTEM, CHARACTER_CONSISTENCY_SYSTEM,
   FACT_EXTRACT_SYSTEM, CHAR_CHANGE_EXTRACT_SYSTEM, FORESHADOW_RECALL_PREDICT_SYSTEM, TIMELINE_EXTRACT_SYSTEM, HIERARCHICAL_SUMMARY_SYSTEM,
   CHARACTER_VOICE_EXTRACT_SYSTEM, PLOT_CONSISTENCY_CHECK_SYSTEM, NOVEL_CONSTITUTION_BUILD_SYSTEM,
-  CHAPTER_BEAT_SYSTEM, AUTO_SUMMARY_SYSTEM, STYLE_LEARN_APPLY_SYSTEM, NAMEGEN_SYSTEM,
+  CHAPTER_BEAT_SYSTEM, PLAN_BEATS_SYSTEM, WRITING_QUALITY_SYSTEM, AUTO_SUMMARY_SYSTEM, STORY_READABILITY_SYSTEM, STYLE_LEARN_APPLY_SYSTEM, NAMEGEN_SYSTEM,
   ARC_PLAN_SYSTEM, WORLD_EXPAND_SYSTEM, EMOTION_CURVE_SYSTEM,
-  ADAPTATION_PLAN_SYSTEM, ADAPTATION_CHAPTER_SYSTEM,
+  ADAPTATION_PLAN_SYSTEM, ADAPTATION_CHAPTER_SYSTEM, LYRICS_TO_NOVEL_SYSTEM,
+  IDEAS_SYSTEM,
   buildNovelContext, buildChapterSystem, buildPolishSystem,
-  buildPolishWithIssues, extractJson
+  buildPolishWithIssues, buildPlotFixSystem, extractJson, buildReviseSystem
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
-  listActiveJobs, tryCreateJob, subscribeJobEvents
+  listActiveJobs, tryCreateJob, subscribeJobEvents, abortJob
 } from './jobs.js';
 import {
   saveVersion, listVersions, getVersion, getLatestPending,
@@ -109,17 +111,19 @@ function startSSE(req, res) {
     if (!finished && !res.writableEnded) ctrl.abort();
   });
   const send = (obj) => {
-    if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(obj)}\n\n`);
   };
   const end = (obj) => {
     finished = true;
     stopKeepalive();
     if (obj) send(obj);
-    if (!res.writableEnded) res.end();
+    if (!res.writableEnded && !res.destroyed) res.end();
   };
   // keepalive：每 15 秒发心跳注释，防止前端 idle 超时误杀长耗时任务
   keepaliveTimer = setInterval(() => {
-    if (!finished && !res.writableEnded) res.write(`:keepalive\n\n`);
+    if (!finished && !res.writableEnded && !res.destroyed) {
+      try { res.write(`:keepalive\n\n`); } catch { ctrl.abort(); }
+    }
   }, 15000);
   return { ctrl, send, end };
 }
@@ -127,6 +131,7 @@ function startSSE(req, res) {
 // ---------- AI 味检测与质量门（铁律模式） ----------
 const AI_SCORE_PASS = 30; // 达标阈值：30 以下视为合格的人类文风
 const AI_MAX_ROUNDS = 3;  // 质量门最多迭代轮数
+const MAX_AUTO_REGENERATE = 2; // 整章重生成最多额外重试次数（共生成 1+2=3 版）
 
 // 铁律模式开关（设置项 strict_ai_mode，默认开启）
 function strictMode() {
@@ -158,6 +163,34 @@ async function runDetection(config, text) {
     score: Math.max(0, Math.min(100, Number(det.score) || 0)),
     issues: Array.isArray(det.issues)
       ? det.issues.filter((i) => i && i.quote)
+      : []
+  };
+}
+
+// 故事可读性检测：文笔干净不等于看得下去。评分 6 个维度，平均≤5 或任一维度≤4 判为 rewrite，
+// 其 issues 小句进入整章重生成反馈，让模型知道自己差在哪、往哪引爆
+async function runReadability(config, text) {
+  const r = await chat({
+    config,
+    task: 'analysis',
+    messages: [
+      { role: 'system', content: STORY_READABILITY_SYSTEM },
+      { role: 'user', content: `请评估以下章节的故事可读性。\n\n${String(text).slice(0, 6000)}` }
+    ],
+    maxTokens: 2200
+  });
+  const rv = extractJson(r.content) || {};
+  const pd = rv.per_dimension && typeof rv.per_dimension === 'object' ? rv.per_dimension : {};
+  const dims = ['curiosity', 'desire', 'tension', 'emotion', 'hook', 'momentum'];
+  const scores = dims.map((k) => Math.max(0, Math.min(10, Number(pd[k]) || 0)));
+  const average = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+  const anyLow = dims.some((k, i) => scores[i] <= 4);
+  const verdict = rv.verdict === 'rewrite' || rv.verdict === 'fail' || average <= 5 || anyLow ? 'rewrite' : 'pass';
+  return {
+    average: Math.round(average * 10) / 10,
+    verdict,
+    issues: Array.isArray(rv.issues)
+      ? rv.issues.filter((i) => i && i.quote)
       : []
   };
 }
@@ -213,6 +246,63 @@ async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX
   return { text: current, lastDetect, blacklist, rounds };
 }
 
+// 剧情逻辑修复循环：根据 checkPlotConsistency 检测出的问题逐条修复，保持文风/人设不变
+async function iteratePlotFix(config, novel, text, issues, { onStatus } = {}) {
+  if (!issues || !issues.length) return { text: String(text || '').trim(), fixed: false };
+  const highIssues = issues.filter((i) => i.severity === 'high' || i.severity === 'medium');
+  if (!highIssues.length) return { text: String(text || '').trim(), fixed: false };
+  if (onStatus) onStatus(`检测到 ${highIssues.length} 处剧情逻辑问题，正在修复…`);
+
+  let current = String(text || '').trim();
+  for (let round = 0; round < 2; round++) {
+    const issueList = highIssues
+      .slice(0, 6)
+      .map((it, i) => `${i + 1}. 【${it.type}】${it.description}${it.quote ? `（原文："${it.quote}"）` : ''}`)
+      .join('\n');
+
+    const r = await chat({
+      config,
+      task: 'writing',
+      messages: [
+        { role: 'system', content: buildPlotFixSystem(
+          getStyles(parseStyleIds(novel)),
+          novel.style_baseline,
+          novel.style_samples,
+          parseStylePresets(novel)
+        ) },
+        { role: 'user', content: `以下是一章小说正文，存在剧情逻辑问题。请按上面列出的问题逐条修复，保持文风与人设不变。
+
+【需要修复的逻辑问题】
+${issueList}
+
+【原文】
+${current}` }
+      ],
+      maxTokens: Math.max(4000, Math.min(32000, (current.length + 2000) * 2))
+    });
+
+    const fixed = (r.content || '').trim();
+    if (!fixed || fixed.length < current.length * 0.3) break;
+    current = fixed;
+
+    // 复检：如果修复后问题消失就不再迭代
+    if (round === 0) {
+      const recheck = await checkPlotConsistency(novel.id, -1, current, config).catch(() => null);
+      if (recheck && recheck.overall_consistency === 'consistent') {
+        if (onStatus) onStatus('逻辑问题已全部修复');
+        break;
+      }
+      if (recheck && recheck.overall_consistency === 'minor_issues') {
+        if (onStatus) onStatus('主要逻辑问题已修复，剩余轻微问题不影响阅读');
+        break;
+      }
+    }
+
+    if (onStatus) onStatus(`正在做第 ${round + 2} 轮逻辑修复…`);
+  }
+  return { text: current, fixed: true };
+}
+
 function requireLLM() {
   const config = getLLMConfig();
   // ollama 本地模型无需 API Key
@@ -225,24 +315,40 @@ function requireLLM() {
 }
 
 function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task } = {}) {
+  if (config?.forceNonStreaming) {
+    return chat({
+      config,
+      task,
+      messages,
+      maxTokens,
+      signal: ctrl?.signal,
+      timeout: 300000
+    }).then((r) => {
+      if (r?.content && onDelta) onDelta(r.content);
+      return r;
+    });
+  }
   return chat({
     config,
     task,
     messages,
     maxTokens,
-    signal: ctrl.signal,
+    signal: ctrl?.signal,
     onDelta
   });
 }
 
 // 续写提示：截取已写末尾，要求紧接续写至自然收尾，不重复内容
 function buildContinuePrompt(full, targetWordsN) {
-  const tail = String(full).slice(-1500);
-  return `以下是一章小说已写部分的末尾节选。请紧接最后一句话继续往下写：不要重复已写内容，不要输出标题，不要总结，自然推进剧情直到本章收尾。
+  const tail = String(full).slice(-1200);
+  return `你是本章小说的作者。下面是本章已经写好的正文末尾，你正在一贯地继续往下写，绝无其他人会插入或提供内容——请直接从最后一句话的最后一个字往后接，用同样的人称、视角和文风继续铺陈剧情。
 
-本章目标字数：约 ${targetWordsN} 字（当前已写 ${countWords(full)} 字，请继续写到目标附近并给本章一个自然结尾）
+要求：
+- 只写正文，不要写"请提供""【末尾节选】""已写部分未完"之类的说明、不要输出标题、不要总结、不要空行占位、不要回复用户。
+- 承接上一句的语感和情境，自然往下推进，不要重复已经写过的句子。
+- 写到接近目标字数（本章目标约 ${targetWordsN} 字，目前正文已有 ${countWords(full)} 字）后，给本章一个自然的收尾。
 
-【末尾节选】
+本章当前正文末尾：
 ${tail}`;
 }
 
@@ -273,8 +379,7 @@ function refreshMemoryFile(novelId) {
 }
 
 // 按上下文预算截断记忆文本：优先保留设定/角色，章节记忆从最老开始丢弃（最近优先）
-function trimMemoryToBudget(text, budgetTokens) {
-  if (!text || estimateTokens(text) <= budgetTokens) return text;
+function trimMemoryToBudget(text, budgetTokens) {  if (!text || estimateTokens(text) <= budgetTokens) return text;
   const marker = '【章节记忆】';
   const idx = text.indexOf(marker);
   if (idx === -1) {
@@ -293,6 +398,28 @@ function trimMemoryToBudget(text, budgetTokens) {
   return head + '\n' + kept.join('\n');
 }
 
+// 过滤记忆文本中的【章节记忆】块：仅保留 chapter_index < beforeIndex 的章节行。
+// 重新生成某章时，其后的章节摘要尚未发生，不得作为前情注入，否则后续剧情会提前泄漏进本章。
+function trimMemoryToIndex(text, beforeIndex) {
+  if (!text || !beforeIndex || beforeIndex <= 1) {
+    // beforeIndex<=1 时无任何前情章节，直接去掉章节记忆块
+    const m1 = text.indexOf('【章节记忆】');
+    if (m1 !== -1) return text.slice(0, m1).replace(/\n*$/, '');
+    return text;
+  }
+  const marker = '【章节记忆】';
+  const idx = text.indexOf(marker);
+  if (idx === -1) return text;
+  const head = text.slice(0, idx + marker.length);
+  const kept = [];
+  for (const line of text.slice(idx + marker.length).split('\n')) {
+    const m = line.match(/第(\d+)章/);
+    if (m && Number(m[1]) >= beforeIndex) continue;
+    kept.push(line);
+  }
+  return head + '\n' + kept.filter(Boolean).join('\n');
+}
+
 // 两条文本的最长公共子串长度（用于伏笔回收的模糊匹配）
 function sharedSubstring(a, b) {
   const aa = String(a || '').slice(0, 24);
@@ -303,6 +430,24 @@ function sharedSubstring(a, b) {
       let k = 0;
       while (i + k < aa.length && j + k < bb.length && aa[i + k] === bb[j + k]) k++;
       if (k > best) best = k;
+    }
+  }
+  return best;
+}
+
+function longestCommonSubstring(a, b) {
+  const aa = String(a || '');
+  const bb = String(b || '');
+  const n = aa.length, m = bb.length;
+  let best = '', dp = new Array(n + 1).fill(0).map(() => new Array(m + 1).fill(0));
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (aa[i - 1] === bb[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+        if (dp[i][j] > best.length) {
+          best = aa.slice(i - dp[i][j], i);
+        }
+      }
     }
   }
   return best;
@@ -350,16 +495,19 @@ router.get('/novels', (req, res) => {
 });
 
 router.post('/novels', async (req, res) => {
-  const { title = '', genre = '', concept = '', chapterWordCount = 2000, targetChapters = 20, stylePresets = [], knowledgeCorpusIds = [] } = req.body || {};
+  const { title = '', genre = '', concept = '', chapterWordCount = 2000, targetChapters = 20, stylePresets = [], styleIds = [], knowledgeCorpusIds = [] } = req.body || {};
   const stylePresetsStr = Array.isArray(stylePresets)
     ? stylePresets.map((s) => String(s).trim()).filter(Boolean).join(',')
     : '';
+  const styleIdsStr = Array.isArray(styleIds)
+    ? JSON.stringify(styleIds.map(Number).filter(Boolean))
+    : '[]';
   const knowledgeIdsStr = Array.isArray(knowledgeCorpusIds)
     ? knowledgeCorpusIds.map((id) => Number(id)).filter(Boolean).join(',')
     : '';
   const info = db.prepare(
-    'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, knowledge_corpus_ids) VALUES (?,?,?,?,?,?,?)'
-  ).run(title, genre, concept, chapterWordCount, targetChapters, stylePresetsStr, knowledgeIdsStr);
+    'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, style_ids, knowledge_corpus_ids) VALUES (?,?,?,?,?,?,?,?)'
+  ).run(title, genre, concept, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr);
   const novel = getNovel(info.lastInsertRowid);
   // 创建独立作品文件夹（以小说名命名）
   try {
@@ -427,6 +575,105 @@ router.post('/novels/import-txt/preview', (req, res) => {
     content_head: String(c.content).slice(0, 60)
   }));
   return res.json({ total: preview.length, splitted, chapters: preview, total_words: countWords(rawContent) });
+});
+
+// 灵感生成器：无灵感时按「题材 + 风格」批量产出多个小说创意大纲供浏览挑选
+router.post('/ideas', async (req, res) => {
+  const { genres = [], stylePresets = [], styleIds = [], count = 3 } = req.body || {};
+  const { config, error } = requireLLM();
+  if (error) return res.status(400).json({ error: error.message });
+
+  const genreList = (Array.isArray(genres) ? genres : []).map((g) => String(g).trim()).filter(Boolean);
+  if (!genreList.length) return res.status(400).json({ error: '请至少选择一个小说题材' });
+  const ideaCount = Math.min(3, Math.max(2, Number(count) || 3));
+
+  const { ctrl, send, end } = startSSE(req, res);
+  send({ type: 'status', message: `正在根据题材与风格构思 ${ideaCount} 个创意…` });
+
+  const styles = getStyles(styleIds);
+  let styleBlock = '';
+  if (styles.length) {
+    const parts = styles.map((s, i) => `风格${i + 1}《${s.name}》：\n${s.analysis || ''}`);
+    styleBlock = `\n\n【写作风格参考】
+已选 ${styles.length} 位作者的写作风格：
+${parts.join('\n\n')}
+
+要求：构思的故事方向、主角气质与叙述基调向这些风格靠拢。`;
+  }
+
+  const presets = (Array.isArray(stylePresets) ? stylePresets : [])
+    .map((s) => String(s).trim()).filter(Boolean);
+  const presetBlock = presets.length
+    ? `\n\n【创作风格基调】${presets.join('、')}\n\n构思的创意应贴合这些风格基调（例如悬念、燃向、轻松日常等）。`
+    : '';
+
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${styleBlock}${presetBlock}\n\n请一次构思 ${ideaCount} 个不同方向的小说创意，输出 JSON 数组。`;
+
+  try {
+    const maxOut = Math.max(8192, Number(config.maxTokens) || 8192);
+    let full = '';
+    if (config?.forceNonStreaming) {
+      const r = await chat({ config, messages: [
+        { role: 'system', content: IDEAS_SYSTEM },
+        { role: 'user', content: userPrompt }
+      ], maxTokens: maxOut, timeout: 300000 });
+      full = r?.content || '';
+    } else {
+      await runLLMStream(config, [
+        { role: 'system', content: IDEAS_SYSTEM },
+        { role: 'user', content: userPrompt }
+      ], {
+        ctrl,
+        task: 'planning',
+        maxTokens: maxOut,
+        onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
+      });
+    }
+    send({ type: 'status', message: '创意构思完成，正在解析…' });
+
+    let ideas = extractJson(full);
+    if (Array.isArray(ideas)) {
+      ideas = ideas.map((it, i) => ({
+        id: `idea-${Date.now()}-${i}`,
+        title: String(it.title || `创意${i + 1}`),
+        genre: String(it.genre || ''),
+        hook: String(it.hook || ''),
+        logline: String(it.logline || ''),
+        protagonist: it.protagonist || {},
+        selling_point: Array.isArray(it.selling_point) ? it.selling_point : [String(it.selling_point || '')],
+        outline_H5: Array.isArray(it.outline_H5) ? it.outline_H5 : [String(it.outline_H5 || '')],
+        potential_risk: String(it.potential_risk || '')
+      }));
+      if (ideas.length) return end({ type: 'done', data: { ideas } });
+    }
+    send({ type: 'status', message: '创意解析失败，将重试一次…' });
+
+    // 容错：重试一次解析（模型返回了文本但没有规整 JSON 时补个兜底）
+    const retry = extractJson(full.replace(/[\n\r]+/g, '\n'));
+    if (Array.isArray(retry) && retry.length && Array.isArray(retry[0]) && retry[0].length > 0 && retry[0][0] && typeof retry[0][0] === 'object' && retry[0][0].title) {
+      const arr = retry[0];
+      const ideas2 = arr.map((it, i) => ({
+        id: `idea-${Date.now()}-${i}`,
+        title: String(it.title || `创意${i + 1}`),
+        genre: String(it.genre || ''),
+        hook: String(it.hook || ''),
+        logline: String(it.logline || ''),
+        protagonist: it.protagonist || {},
+        selling_point: Array.isArray(it.selling_point) ? it.selling_point : [String(it.selling_point || '')],
+        outline_H5: Array.isArray(it.outline_H5) ? it.outline_H5 : [String(it.outline_H5 || '')],
+        potential_risk: String(it.potential_risk || '')
+      }));
+      return end({ type: 'done', data: { ideas: ideas2 } });
+    }
+
+    return end({ type: 'error', message: '创意生成失败：模型返回内容无法解析，请重试。' });
+  } catch (e) {
+    if (e.name === 'AbortError' && ctrl.signal.aborted) {
+      return end({ type: 'aborted', message: '已取消' });
+    }
+    console.error('ideas generate error:', e);
+    return end({ type: 'error', message: e.message || '创意生成失败' });
+  }
 });
 
 router.get('/novels/:id', async (req, res) => {
@@ -577,8 +824,8 @@ async function applyPlan(novel, plan, opts = {}) {
   const outline = String(plan.outline || '').trim();
   const storyArcs = Array.isArray(plan.story_arcs) ? JSON.stringify(plan.story_arcs) : (novel.story_arcs || null);
 
-  db.prepare('UPDATE novels SET title = ?, genre = ?, world_view = ?, outline = ?, concept = ?, chapter_word_count = ?, target_chapters = ?, status = ?, story_arcs = ? WHERE id = ?')
-    .run(title, genreV, worldView, outline, concept, words, target, 'planned', storyArcs, novel.id);
+  db.prepare('UPDATE novels SET title = ?, genre = ?, world_view = ?, outline = ?, concept = ?, chapter_word_count = ?, target_chapters = ?, status = ?, story_arcs = ?, protagonist_name = ?, heroine_name = ? WHERE id = ?')
+    .run(title, genreV, worldView, outline, concept, words, target, 'planned', storyArcs, String(plan.protagonist_name || novel.protagonist_name || ''), String(plan.heroine_name || novel.heroine_name || ''), novel.id);
 
   db.prepare('DELETE FROM relationships WHERE novel_id = ?').run(novel.id);
   db.prepare('DELETE FROM characters WHERE novel_id = ?').run(novel.id);
@@ -625,8 +872,9 @@ async function applyPlan(novel, plan, opts = {}) {
   const chapters = Array.isArray(plan.chapters) ? plan.chapters : [];
   for (let i = 0; i < chapters.length; i++) {
     const ch = chapters[i];
-    db.prepare('INSERT INTO chapters (novel_id, chapter_index, title, summary, content, status) VALUES (?,?,?,?,?,?)')
-      .run(novel.id, i + 1, String(ch?.title || `第${i + 1}章`), String(ch?.summary || ''), '', 'planned');
+    const beatsJson = ch?.beats ? (Array.isArray(ch.beats) ? JSON.stringify(ch.beats) : String(ch.beats)) : '';
+    db.prepare('INSERT INTO chapters (novel_id, chapter_index, title, summary, emotion, arc_hint, hook, beats, content, status) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(novel.id, i + 1, String(ch?.title || `第${i + 1}章`), String(ch?.summary || ''), String(ch?.emotion || ''), String(ch?.arc_hint || ''), String(ch?.hook || ''), beatsJson, '', 'planned');
   }
 
   touchNovel(novel.id);
@@ -639,6 +887,19 @@ async function applyPlan(novel, plan, opts = {}) {
   // 方案已定，初始化小说文件夹下的「记忆.txt」
   refreshMemoryFile(novel.id);
   return updated;
+}
+
+// 根据章节序号与全书目标章节数计算章节阶段，指导节奏
+function chapterStageLabel(idx, total) {
+  const t = Number(total);
+  if (!t || t <= 0) return '一段完整剧情中';
+  const ratio = idx / t;
+  if (ratio <= 0.08) return '开篇引入阶段（建立世界观、抛出核心矛盾与主角处境，节奏应直接、抛出钩子）';
+  if (ratio <= 0.35) return '铺展上升阶段（推进主线、铺垫冲突、塑造角色关系，节奏应稳步推进）';
+  if (ratio <= 0.55) return '中期发酵阶段（冲突加剧、伏笔陆续浮出、暗线交汇，节奏应渐紧）';
+  if (ratio <= 0.75) return '高潮前积累阶段（矛盾全面升级、大转折将至，节奏应逐步收紧）';
+  if (ratio <= 0.92) return '高潮收束阶段（核心冲突正面爆发并解决，节奏应高密度、有力度）';
+  return '终局收尾阶段（解决遗留、情绪落地、结局气势，节奏应完整收束）';
 }
 
 // 把方案骨架组装成文本快照（供章节规划阶段作为上下文）
@@ -701,7 +962,10 @@ function buildPlanSnapshot(novel) {
     lines.push(`- ${nameMap[r.source_id] || '?'} —${r.relation_type}→ ${nameMap[r.target_id] || '?'}${r.description ? '：' + r.description : ''}`);
   }
   lines.push(`章节规划（共 ${chapters.length} 章）：`);
-  for (const c of chapters) lines.push(`- 第${c.chapter_index}章 ${c.title}：${c.summary || ''}`);
+  for (const c of chapters) {
+    const extra = [c.emotion && `情绪：${c.emotion}`, c.arc_hint && `推进：${c.arc_hint}`, c.hook && `钩子：${c.hook}`].filter(Boolean).join('｜');
+    lines.push(`- 第${c.chapter_index}章 ${c.title}：${c.summary || ''}${extra ? `（${extra}）` : ''}`);
+  }
   return lines.join('\n');
 }
 
@@ -709,7 +973,7 @@ function buildPlanSnapshot(novel) {
 router.post('/novels/:id/plan', async (req, res) => {
   const novel = getNovel(req.params.id);
   if (!novel) return res.status(404).json({ error: '小说不存在' });
-  const { concept, genre, chapterWordCount, targetChapters, stylePresets, lengthClass } = req.body || {};
+  const { concept, genre, chapterWordCount, targetChapters, stylePresets, lengthClass, protagonistName, heroineName, referenceNotes } = req.body || {};
   const { config, error } = requireLLM();
   if (error) return res.status(400).json({ error: error.message });
 
@@ -739,7 +1003,10 @@ router.post('/novels/:id/plan', async (req, res) => {
 创作风格：${presets.length ? presets.join('、') : '由你判断，选择适合该题材的风格基调'}
 计划章节数：${target} 章
 每章目标字数：${words} 字
-
+${protagonistName || novel.protagonist_name ? `\n男主角名字：${protagonistName || novel.protagonist_name}（方案中男主必须用这个名字）` : ''}
+${heroineName || novel.heroine_name ? `\n女主角名字：${heroineName || novel.heroine_name}（方案中女主必须用这个名字）` : ''}
+${referenceNotes ? `\n同类小说参考（借鉴其题材套路与节奏，但不要抄袭情节）：\n${referenceNotes}` : ''}
+ 
 请输出创作方案骨架 JSON。`;
 
   if (presets.length) {
@@ -752,20 +1019,25 @@ router.post('/novels/:id/plan', async (req, res) => {
   }
 
   const maxOut = Math.max(4096, Number(config.maxTokens) || 8192);
-  const skeletonMaxOut = Math.min(maxOut, 4096); // 骨架输出量小，4k 足够
-  const chapterMaxOut = Math.min(maxOut, 2048);  // 每批章节输出，2k 足够
+  const skeletonMaxOut = Math.min(maxOut, 8192);
+  const chapterMaxOut = Math.min(maxOut, 4096);
 
   // 流式生成并把内容透传给前端（进度可见），返回完整文本
   // 单批次 idle 超时：3 分钟无数据则判定超时
   const streamCollect = async (messages, label, mt = maxOut) => {
     let full = '';
     send({ type: 'status', message: label });
-    await runLLMStream(config, messages, {
-      ctrl,
-      task: 'planning',
-      maxTokens: mt,
-      onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
-    });
+    if (config?.forceNonStreaming) {
+      const r = await chat({ config, messages, maxTokens: mt, timeout: 300000 });
+      full = r?.content || '';
+    } else {
+      await runLLMStream(config, messages, {
+        ctrl,
+        task: 'planning',
+        maxTokens: mt,
+        onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
+      });
+    }
     return full;
   };
 
@@ -774,7 +1046,7 @@ router.post('/novels/:id/plan', async (req, res) => {
 
   // 流式生成 + 解析 JSON，最多重试 5 次（流式 + 非流式交替 + 指数退避）
   // 重试时追加格式强化提示，降低格式出错率
-  const FORMAT_REMINDER = '\n\n【重要提醒】你之前的输出无法被解析为 JSON。请严格只输出一个 JSON 对象/数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。';
+  const FORMAT_REMINDER = '\n\n【重要提醒】你之前的输出无法被解析为 JSON。请严格只输出一个 JSON 对象或数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
 const jsonFrom = async (messages, label, mt = maxOut) => {
     let lastText = '';
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -782,6 +1054,8 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
         const waitSec = Math.pow(2, attempt - 1);
         send({ type: 'status', message: `AI 返回格式异常，第 ${attempt} 次重试（等待 ${waitSec}s 后重试）…` });
         await sleep(waitSec * 1000);
+        // 递增 max_tokens 防止截断
+        mt = Math.min(maxOut, Math.round(mt * 1.5));
       }
       // 重试时追加格式强化提示
       const useMessages = attempt > 1
@@ -795,7 +1069,7 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
           if (!ctrl.signal.aborted) {
             send({ type: 'status', message: `流式响应超时，正在用非流式重试（第 ${attempt} 次）…` });
             try {
-              const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 180000 });
+              const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 300000 });
               lastText = retry?.content || '';
             } catch (e2) {
               if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
@@ -808,10 +1082,13 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
           } else {
             throw e; // 用户主动中止，直接终止
           }
+        } else if (/HTTP\s+4\d\d/.test(e.message)) {
+          // 4xx 确定性错误（余额不足/Key 无效/接口不存在等），重试不会成功，立即终止
+          throw e;
         } else {
           send({ type: 'status', message: `流式请求失败，正在用非流式重试（第 ${attempt} 次）…` });
           try {
-            const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 180000 });
+            const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 300000 });
             lastText = retry?.content || '';
           } catch (e2) {
             if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
@@ -855,14 +1132,35 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
     // 注入知识学习库分析
     const knowledgeIds = getNovelKnowledgeIds(novel);
     const knowledgeBlock = formatKnowledgeBlock(knowledgeIds);
-    if (knowledgeBlock) {
+    let planSamples = '';
+    if (knowledgeIds.length) {
+      planSamples = knowledgeIds.map((id) => {
+        const s = getSampleSnippets(id, 2000);
+        return s ? `【片段】${s.slice(0, 500)}` : null;
+      }).filter(Boolean).join('\n');
+    }
+    const planKnowledgeBlock = knowledgeBlock + (planSamples ? `\n\n【已导入小说剧情参考（参考其节奏与冲突设置，不抄袭）】\n${planSamples}` : '');
+    if (planKnowledgeBlock) {
       send({ type: 'status', message: '已加载知识学习库参考，正在生成方案…' });
+    }
+
+    // 注入风格库分析：方案骨架里的角色设定、情节节奏、叙述基调应贴合所选文风
+    const planStyles = getStyles(parseStyleIds(novel));
+    let planStyleBlock = '';
+    if (planStyles.length) {
+      const parts = planStyles.map((s, i) => `风格${i + 1}《${s.name}》：\n${s.analysis || ''}`);
+      planStyleBlock = `\n\n【写作风格参考】
+本作启用了以下 ${planStyles.length} 位作者的写作风格：
+${parts.join('\n\n')}
+
+要求：世界观设定、角色气质、情节推进节奏与叙述基调整体向这些风格靠拢，把这些风格自然融合成统一、不生硬的方案风格。`;
+      send({ type: 'status', message: `已加载 ${planStyles.length} 项写作风格参考，正在生成方案…` });
     }
 
     // 阶段 1：作品骨架
     let skeleton = await jsonFrom(
       [
-        { role: 'system', content: PLAN_SKELETON_SYSTEM + knowledgeBlock },
+        { role: 'system', content: PLAN_SKELETON_SYSTEM + planKnowledgeBlock + planStyleBlock },
         { role: 'user', content: userPrompt }
       ],
       '正在构思世界观、角色与剧情大纲…',
@@ -888,7 +1186,7 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
     // 阶段 2：章节规划（分批，超长篇 200+ 章用 30 章/批，其余用 20 章/批）
     const BATCH_SIZE = target >= 200 ? 30 : 20;
     const skeletonChapters = Array.isArray(skeleton.chapters)
-      ? skeleton.chapters.filter((c) => c && c.title).map((c) => ({ title: String(c.title), summary: String(c.summary || '') }))
+      ? skeleton.chapters.filter((c) => c && c.title).map((c) => ({ title: String(c.title), summary: String(c.summary || ''), emotion: String(c.emotion || ''), arc_hint: String(c.arc_hint || ''), hook: String(c.hook || '') }))
       : [];
     const allChapters = skeletonChapters.slice(0, target);
     const brief = buildSkeletonBrief(skeleton);
@@ -902,10 +1200,16 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
         const batchEnd = Math.min(target, start + BATCH_SIZE - 1);
         const batchSize = batchEnd - start + 1;
 
+        // 批次连续性：把已规划的最近章节概要作为前情传给本批，防止批次间剧情脱节/重复
+        const prevTail = allChapters.slice(-6);
+        const prevBlock = prevTail.length
+          ? prevTail.map((c, i) => `第${allChapters.length - prevTail.length + i + 1}章「${c.title}」：${c.summary}`).join('\n')
+          : '';
+
         const batch = await jsonFrom(
           [
             { role: 'system', content: PLAN_CHAPTERS_SYSTEM },
-            { role: 'user', content: `作品骨架：\n${brief}\n\n计划章节数：${target} 章。\n请规划第 ${start} 至第 ${batchEnd} 章的标题与剧情概要（共 ${batchSize} 章），必须完整覆盖此编号范围。` }
+            { role: 'user', content: `作品骨架：\n${brief}\n\n计划章节数：${target} 章。\n请规划第 ${start} 至第 ${batchEnd} 章的标题与剧情概要（共 ${batchSize} 章），必须完整覆盖此编号范围。\n\n【当前规划所处全书阶段】\n本批覆盖第 ${start}-${batchEnd} 章，全书 ${target} 章，对应阶段：${chapterStageLabel(start, target)}。规划时应让剧情节奏符合该阶段（开篇直接抛出钩子、中期渐紧、高潮高密度、终局收束）。\n\n【前情（此前已规划的章节，剧情必须自然承接，不得与之重复或冲突）】\n${prevBlock || '（无，这是开头章节）'}\n\n第 ${start} 章紧接前情结尾继续推进。` }
           ],
           `正在规划章节 ${start}-${batchEnd}（已完成 ${allChapters.length}/${target}）…`,
           chapterMaxOut
@@ -914,7 +1218,13 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
         const list = Array.isArray(batch) ? batch : (Array.isArray(batch?.chapters) ? batch.chapters : []);
         const clean = list
           .filter((c) => c && (c.title || c.summary))
-          .map((c) => ({ title: String(c.title || `第${start}章`), summary: String(c.summary || '') }));
+          .map((c) => ({
+            title: String(c.title || `第${start}章`),
+            summary: String(c.summary || ''),
+            emotion: String(c.emotion || ''),
+            arc_hint: String(c.arc_hint || ''),
+            hook: String(c.hook || '')
+          }));
 
         if (!clean.length) {
           // 降级：生成占位章节，不中断
@@ -951,6 +1261,42 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
     }
 
     const plan = { ...skeleton, chapters: allChapters.slice(0, target) };
+
+    // 生成细纲（场景级 beat）：批量生成，每批 5 章
+    send({ type: 'progress', progress: 93, message: '正在生成细纲…' });
+    updateJob(job.id, { progress: 93, word_count: plan.chapters.length, stream_cursor: '正在生成细纲…' });
+    try {
+      const BEATS_BATCH = 5;
+      for (let batchStart = 0; batchStart < plan.chapters.length; batchStart += BEATS_BATCH) {
+        const batchEnd = Math.min(batchStart + BEATS_BATCH, plan.chapters.length);
+        const batch = plan.chapters.slice(batchStart, batchEnd);
+        const beatsReq = {};
+        batch.forEach((ch, i) => {
+          const idx = batchStart + i + 1;
+          beatsReq[idx] = { title: ch.title, summary: ch.summary, emotion: ch.emotion, arc_hint: ch.arc_hint, hook: ch.hook };
+        });
+        const beatsRes = await jsonFrom(
+          [
+            { role: 'system', content: PLAN_BEATS_SYSTEM },
+            { role: 'user', content: `作品骨架：\n${brief}\n\n请为第 ${batchStart + 1} 至第 ${batchEnd} 章生成细纲（场景级 beat），每章 3-6 个场景。\n\n各章信息：\n${JSON.stringify(beatsReq, null, 2)}` }
+          ],
+          `正在生成细纲（第 ${batchStart + 1}-${batchEnd} 章）…`,
+          { maxAttempts: 2, filter: (v) => typeof v === 'object' && v !== null }
+        );
+        if (beatsRes && typeof beatsRes === 'object') {
+          for (let i = batchStart; i < batchEnd; i++) {
+            const idx = i + 1;
+            const chBeats = beatsRes[String(idx)];
+            if (Array.isArray(chBeats) && chBeats.length) {
+              plan.chapters[i].beats = chBeats;
+            }
+          }
+        }
+        const pct = 93 + Math.round(((batchEnd) / plan.chapters.length) * 3);
+        send({ type: 'progress', progress: pct, message: `细纲进度：${Math.min(batchEnd, plan.chapters.length)}/${plan.chapters.length} 章` });
+      }
+    } catch { /* 细纲生成失败不阻塞，后续章节生成时运行时生成 */ }
+
     send({ type: 'progress', progress: 96, message: '正在应用方案到小说…' });
     const result = await applyPlan(novel, plan, { words, target, concept });
     send({ type: 'progress', progress: 100, message: '方案生成完成' });
@@ -1065,7 +1411,7 @@ router.post('/novels/:id/adaptation/plan', async (req, res) => {
 
   const { ctrl, send, end } = startSSE(req, res);
   send({ type: 'job', jobId, stage: 'adaptation_plan' });
-  send({ type: 'progress', progress: 10, message: '正在根据你的改编意图生成改编方案…' });
+  send({ type: 'progress', progress: 1, message: '正在根据你的改编意图生成改编方案(1%)…' });
   send({ type: 'status', message: '正在根据你的改编意图生成改编方案…' });
   db.prepare('UPDATE adaptation_jobs SET updated_at = datetime(\'now\',\'localtime\') WHERE id = ?').run(jobId);
 
@@ -1076,6 +1422,9 @@ router.post('/novels/:id/adaptation/plan', async (req, res) => {
 
   try {
     let full = '';
+    send({ type: 'progress', progress: 1, message: '正在生成改编方案(1%)…' });
+    send({ type: 'status', message: '正在分析原著章节并构思改编方案，请稍候…' });
+    let deltaCount = 0;
     await runLLMStream(config, [
       { role: 'system', content: ADAPTATION_PLAN_SYSTEM },
       { role: 'user', content: userPrompt }
@@ -1083,22 +1432,141 @@ router.post('/novels/:id/adaptation/plan', async (req, res) => {
       ctrl,
       task: 'planning',
       maxTokens: Math.max(4096, Number(config.maxTokens) || 8192),
-      onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
+      onDelta: (d) => {
+        full += d;
+        deltaCount++;
+        send({ type: 'delta', content: d });
+        if (deltaCount % 2 === 0) {
+          const pct = Math.min(89, 1 + Math.floor(deltaCount / 2));
+          send({ type: 'progress', progress: pct, message: `正在生成改编方案(${pct}%)…` });
+        }
+      }
     });
 
+    send({ type: 'progress', progress: 92, message: '正在解析AI返回的改编方案…' });
+    send({ type: 'status', message: '正在解析AI返回的改编方案…' });
     const plan = extractJson(full);
     if (!plan) {
       db.prepare("UPDATE adaptation_jobs SET status = 'failed', error = ?, updated_at = datetime('now','localtime') WHERE id = ?").run('AI 返回内容无法解析为改编方案', jobId);
       return end({ type: 'error', message: 'AI 返回的内容无法解析为改编方案，请重试。原始输出已附在 raw 字段。', raw: full });
     }
-    db.prepare("UPDATE adaptation_jobs SET plan = ?, status = 'plan_ready', updated_at = datetime('now','localtime') WHERE id = ?").run(JSON.stringify(plan), jobId);
-    send({ type: 'progress', progress: 100, message: '改编方案已生成' });
-    return end({ type: 'done', data: { jobId, plan } });
+    // 多方案兼容：新版输出 {plans:[...]}，旧版输出单个方案对象
+    let plans = Array.isArray(plan.plans) && plan.plans.length ? plan.plans : [];
+    if (!plans.length && (plan.chapters || plan.global_notes || plan.intent_summary)) {
+      // 旧版单方案 → 包装成单元素数组
+      plans = [{ plan_id: 'default', plan_name: '改编方案', intent_summary: plan.intent_summary || '', approach: '', global_notes: plan.global_notes || '', chapters: plan.chapters || [] }];
+    }
+const planPayload = { original_info: plan.original_info || { title: novel.title, total_chapters: getChapters(novel.id).length }, plans };
+    send({ type: 'progress', progress: 95, message: '正在保存改编方案(95%)…' });
+    send({ type: 'status', message: '正在保存改编方案…' });
+    db.prepare("UPDATE adaptation_jobs SET plan = ?, plans = ?, status = ?, updated_at = datetime('now','localtime') WHERE id = ?")
+      .run(JSON.stringify(planPayload), JSON.stringify(plans || []), plans.length ? 'plan_ready' : 'failed', jobId);
+    if (!plans.length) {
+      return end({ type: 'error', message: '改编方案解析后为空，请重试。', raw: full });
+    }
+    send({ type: 'progress', progress: 100, message: `已生成 ${plans.length} 个改编方案` });
+    return end({ type: 'done', data: { jobId, plan: planPayload, plans } });
   } catch (e) {
     if (e.name === 'AbortError') {
-      db.prepare("UPDATE adaptation_jobs SET status = 'aborted', updated_at = datetime('now','localtime') WHERE id = ?").run(jobId);
+      db.prepare("UPDATE adaptation_jobs SET status = 'aborted', error = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(e.message.slice(0, 500), jobId);
       return end({ type: 'aborted', message: '已停止生成' });
     }
+    const curJob = db.prepare("SELECT status FROM adaptation_jobs WHERE id = ?").get(jobId);
+    if (curJob && curJob.status === 'done') {
+      return;
+    }
+    db.prepare("UPDATE adaptation_jobs SET status = 'failed', error = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(e.message.slice(0, 500), jobId);
+    return end({ type: 'error', message: e.message });
+  }
+});
+
+// 歌词改编：基于歌词/歌曲信息生成小说改编方案
+router.post('/novels/:id/adaptation/from-song', async (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const { songTitle, artist, lyrics, style } = (req.body || {});
+  if (!lyrics) return res.status(400).json({ error: '请提供歌词内容' });
+  const { config, error } = requireLLM();
+  if (error) return res.status(400).json({ error: error.message });
+
+  const activeJob = db.prepare(
+    "SELECT id FROM adaptation_jobs WHERE novel_id = ? AND status IN ('drafting_plan','adapting') ORDER BY id DESC LIMIT 1"
+  ).get(novel.id);
+  if (activeJob) {
+    return res.status(409).json({ error: '该小说已有进行中的改编任务', jobId: activeJob.id });
+  }
+
+  const info = db.prepare(
+    "INSERT INTO adaptation_jobs (novel_id, intent, status, total_chapters) VALUES (?,?,?,?)"
+  ).run(novel.id, `歌词改编：${songTitle || '未知歌曲'} - ${artist || '未知歌手'}`, 'drafting_plan', 0);
+  const jobId = Number(info.lastInsertRowid);
+
+  const { ctrl, send, end } = startSSE(req, res);
+  send({ type: 'job', jobId, stage: 'adaptation_plan' });
+  send({ type: 'progress', progress: 1, message: '正在分析歌词(1%)…' });
+  send({ type: 'status', message: '正在分析歌词内容与情感…' });
+
+  const userPrompt = `【歌曲信息】
+歌名：${songTitle || '（未知）'}
+歌手：${artist || '（未知）'}
+风格偏好：${style || '（无，由 AI 自行决定）'}
+
+【歌词全文】
+${lyrics}
+
+请根据以上歌词，输出一份完整的小说改编方案 JSON。`;
+
+  try {
+    let full = '';
+    send({ type: 'progress', progress: 1, message: '正在生成改编方案(1%)…' });
+    send({ type: 'status', message: '正在根据歌词构思小说改编方案，请稍候…' });
+    let deltaCount = 0;
+    await runLLMStream(config, [
+      { role: 'system', content: LYRICS_TO_NOVEL_SYSTEM },
+      { role: 'user', content: userPrompt }
+    ], {
+      ctrl,
+      task: 'planning',
+      maxTokens: Math.max(4096, Number(config.maxTokens) || 8192),
+      onDelta: (d) => {
+        full += d;
+        deltaCount++;
+        send({ type: 'delta', content: d });
+        if (deltaCount % 2 === 0) {
+          const pct = Math.min(89, 1 + Math.floor(deltaCount / 2));
+          send({ type: 'progress', progress: pct, message: `正在生成改编方案(${pct}%)…` });
+        }
+      }
+    });
+
+    send({ type: 'progress', progress: 92, message: '正在解析AI返回的改编方案…' });
+    send({ type: 'status', message: '正在解析AI返回的改编方案…' });
+    const plan = extractJson(full);
+    if (!plan) {
+      db.prepare("UPDATE adaptation_jobs SET status = 'failed', error = ?, updated_at = datetime('now','localtime') WHERE id = ?").run('AI 返回内容无法解析为改编方案', jobId);
+      return end({ type: 'error', message: 'AI 返回的内容无法解析为改编方案，请重试。', raw: full });
+    }
+    let plans = Array.isArray(plan.plans) && plan.plans.length ? plan.plans : [];
+    if (!plans.length && (plan.chapters || plan.global_notes || plan.intent_summary)) {
+      plans = [{ plan_id: 'default', plan_name: '改编方案', intent_summary: plan.intent_summary || '', approach: '', global_notes: plan.global_notes || '', chapters: plan.chapters || [] }];
+    }
+    const planPayload = { original_info: plan.original_info || { title: songTitle || '歌词改编', artist: artist || '', total_chapters: 0 }, plans };
+    send({ type: 'progress', progress: 95, message: '正在保存改编方案(95%)…' });
+    send({ type: 'status', message: '正在保存改编方案…' });
+    db.prepare("UPDATE adaptation_jobs SET plan = ?, plans = ?, status = ?, updated_at = datetime('now','localtime') WHERE id = ?")
+      .run(JSON.stringify(planPayload), JSON.stringify(plans || []), plans.length ? 'plan_ready' : 'failed', jobId);
+    if (!plans.length) {
+      return end({ type: 'error', message: '改编方案解析后为空，请重试。', raw: full });
+    }
+    send({ type: 'progress', progress: 100, message: `已生成 ${plans.length} 个改编方案` });
+    return end({ type: 'done', data: { jobId, plan: planPayload, plans } });
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      db.prepare("UPDATE adaptation_jobs SET status = 'aborted', error = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(e.message, jobId);
+      return end({ type: 'aborted', message: '已停止生成' });
+    }
+    const curJob = db.prepare("SELECT * FROM adaptation_jobs WHERE id = ?").get(jobId);
+    if (curJob && curJob.status === 'done') return;
     db.prepare("UPDATE adaptation_jobs SET status = 'failed', error = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(e.message, jobId);
     return end({ type: 'error', message: e.message });
   }
@@ -1118,6 +1586,69 @@ router.get('/novels/:id/adaptation', (req, res) => {
     'SELECT * FROM adaptation_candidates WHERE job_id = ? ORDER BY chapter_index'
   ).all(job.id);
   return res.json({ job: { ...job, plan }, candidates });
+});
+
+// 选择改编方案：在多方案中选择其一，写入 job.plan 供逐章改编使用
+router.post('/novels/:id/adaptation/select-plan', async (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const { planId } = req.body || {};
+  const job = db.prepare(
+    "SELECT * FROM adaptation_jobs WHERE novel_id = ? AND status = 'plan_ready' ORDER BY id DESC LIMIT 1"
+  ).get(novel.id);
+  if (!job) return res.status(409).json({ error: '没有待选择的改编方案' });
+  let plans = [];
+  try { plans = job.plans ? JSON.parse(job.plans) : []; } catch { plans = []; }
+  if (!plans.length) {
+    // 没有多方案（旧任务），直接放行
+    return res.json({ ok: true, jobId: job.id, plan: (() => { try { return JSON.parse(job.plan || '{}'); } catch { return {}; } })() });
+  }
+  const picked = plans.find((p) => p.plan_id === planId) || plans[0];
+  const planPayload = {
+    original_info: { title: novel.title, total_chapters: getChapters(novel.id).length },
+    plan_id: picked.plan_id,
+    plan_name: picked.plan_name,
+    intent_summary: picked.intent_summary || '',
+    approach: picked.approach || '',
+    global_notes: picked.global_notes || '',
+    chapters: picked.chapters || []
+  };
+  db.prepare("UPDATE adaptation_jobs SET plan = ?, updated_at = datetime('now','localtime') WHERE id = ?")
+    .run(JSON.stringify(planPayload), job.id);
+  res.json({ ok: true, jobId: job.id, plan: planPayload });
+});
+
+// 多本融合分析：导入多本小说，AI 分析各本特点并给出融合建议
+router.post('/novels/:id/adaptation/analyze-merge', async (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const { novels: inputNovels } = req.body || {};
+  if (!Array.isArray(inputNovels) || inputNovels.length < 2) {
+    return res.status(400).json({ error: '请至少导入 2 本小说' });
+  }
+  const { config, error } = requireLLM();
+  if (error) return res.status(400).json({ error: error.message });
+
+  try {
+    const novelList = inputNovels.slice(0, 5).map((n) => {
+      const text = String(n.content || '').slice(0, 3000);
+      return `【${n.title || '未命名'}】\n${text}`;
+    }).join('\n\n---\n\n');
+
+    const r = await chat({
+      config,
+      messages: [
+        { role: 'system', content: '你是小说分析专家。以下是用户导入的多本小说开头片段。请分析每本小说的核心特点（世界观、文风、角色、剧情结构），然后给出融合改编的建议方向。输出 JSON：{"books":[{"title":"书名","features":"核心特点"}],"merge_suggestions":["融合方向1","融合方向2","融合方向3"]}' },
+        { role: 'user', content: `以下是我导入的 ${inputNovels.length} 本小说，请分析并给出融合建议：\n\n${novelList}` }
+      ],
+      maxTokens: 4096,
+      timeout: 120000
+    });
+    const analysis = extractJson(r.content);
+    res.json({ ok: true, analysis: analysis || { books: [], merge_suggestions: ['分析失败，请手动描述改编意图'] } });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // 开始逐章改编（用户在方案确认后调用）
@@ -1184,8 +1715,10 @@ router.post('/novels/:id/adaptation/next', async (req, res) => {
 
   const { ctrl, send, end } = startSSE(req, res);
   send({ type: 'job', jobId: job.id, stage: 'adaptation_chapter', chapterIndex: target.chapter_index });
-  send({ type: 'progress', progress: Math.round((currentIndex / total) * 100), message: `正在改编第 ${target.chapter_index}/${total} 章…` });
-  send({ type: 'status', message: `正在改编第 ${target.chapter_index}/${total} 章…` });
+  const rangeStart = Math.round((currentIndex / total) * 100);
+  const rangeEnd = Math.round((target.chapter_index / total) * 100);
+  send({ type: 'progress', progress: rangeStart, message: `正在改编第 ${target.chapter_index}/${total} 章…` });
+  send({ type: 'status', message: `正在分析第 ${target.chapter_index} 章原文…` });
 
   const userPrompt = `【本章原文】\n第${target.chapter_index}章 ${target.title}\n\n${target.content}
 
@@ -1199,8 +1732,13 @@ router.post('/novels/:id/adaptation/next', async (req, res) => {
 
 请按改编方案改写本章。`;
 
+  const subProgress = (pct) => Math.round(rangeStart + (rangeEnd - rangeStart) * pct / 100);
+
   try {
     let full = '';
+    send({ type: 'progress', progress: subProgress(1), message: `正在生成第 ${target.chapter_index} 章改编内容(1%)…` });
+    send({ type: 'status', message: `正在生成第 ${target.chapter_index} 章改编内容，请稍候…` });
+    let deltaCount = 0;
     await runLLMStream(config, [
       { role: 'system', content: ADAPTATION_CHAPTER_SYSTEM },
       { role: 'user', content: userPrompt }
@@ -1208,15 +1746,28 @@ router.post('/novels/:id/adaptation/next', async (req, res) => {
       ctrl,
       task: 'writing',
       maxTokens: Math.max(6000, Math.min(32000, (target.content.length + 4000) * 2)),
-      onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
+      onDelta: (d) => {
+        full += d;
+        deltaCount++;
+        send({ type: 'delta', content: d });
+        if (deltaCount % 2 === 0) {
+          const chapterPct = 1 + Math.floor(deltaCount / 2);
+          const pct = Math.min(subProgress(89), subProgress(1) + Math.round((subProgress(89) - subProgress(1)) * chapterPct / 89));
+          send({ type: 'progress', progress: pct, message: `正在生成第 ${target.chapter_index} 章改编内容(${pct}%)…` });
+        }
+      }
     });
 
+    send({ type: 'progress', progress: subProgress(92), message: '正在AI味检测…' });
+    send({ type: 'status', message: '正在AI味检测…' });
     const candidateContent = full.trim();
     if (!candidateContent) {
       db.prepare("UPDATE adaptation_jobs SET failed_count = failed_count + 1, updated_at = datetime('now','localtime') WHERE id = ?").run(job.id);
       return end({ type: 'error', message: 'AI 未返回内容，请重试该章。' });
     }
 
+    send({ type: 'progress', progress: subProgress(95), message: '正在保存候选章节(95%)…' });
+    send({ type: 'status', message: '正在保存候选章节…' });
     // 写入候选（唯一索引 (job_id, chapter_index)，重复则更新）
     db.prepare(
       `INSERT INTO adaptation_candidates (novel_id, job_id, chapter_index, original_title, original_content, candidate_title, candidate_content, status)
@@ -1227,7 +1778,7 @@ router.post('/novels/:id/adaptation/next', async (req, res) => {
       target.title, candidateContent, 'pending'
     );
     db.prepare("UPDATE adaptation_jobs SET current_index = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(target.chapter_index, job.id);
-    send({ type: 'progress', progress: Math.round(((target.chapter_index) / total) * 100), message: `第 ${target.chapter_index} 章候选已生成` });
+    send({ type: 'progress', progress: subProgress(100), message: `第 ${target.chapter_index} 章候选已生成` });
 
     const cand = db.prepare("SELECT * FROM adaptation_candidates WHERE job_id = ? AND chapter_index = ?").get(job.id, target.chapter_index);
     return end({ type: 'done', data: { jobId: job.id, candidate: cand, total, current: target.chapter_index } });
@@ -1405,23 +1956,37 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
   const { config, error } = requireLLM();
   if (error) return res.status(400).json({ error: error.message });
 
-  const { mode = 'next', chapterIndex, targetWords, overrideTitle } = req.body || {};
+  const { mode = 'next', chapterIndex, targetWords, overrideTitle, useReference } = req.body || {};
   const { ctrl, send, end } = startSSE(req, res);
 
   let idx;
   if (mode === 'regenerate') {
     idx = Number(chapterIndex);
   } else {
-    // 优先填充空内容的占位章节
+    // "下一章"逻辑：优先补第一个空内容章节，其次在已有内容的最后一章之后新建
     const firstEmpty = db.prepare("SELECT chapter_index FROM chapters WHERE novel_id = ? AND content = '' ORDER BY chapter_index LIMIT 1").get(novel.id);
-    idx = firstEmpty ? firstEmpty.chapter_index : getMaxChapterIndex(novel.id) + 1;
+    const lastDone = db.prepare("SELECT MAX(chapter_index) m FROM chapters WHERE novel_id = ? AND content != ''").get(novel.id);
+    if (firstEmpty && lastDone && firstEmpty.chapter_index <= Number(lastDone.m || 0)) {
+      // 空章节排在已写章节之前：说明它是"未写成功"的旧占位，用已写章节的下一章，避免重复生成已写章节
+      idx = Number(lastDone.m) + 1;
+      // 但若计划里该序号的占位不存在（全新扩展），使用 max+1
+    } else {
+      idx = firstEmpty ? firstEmpty.chapter_index : getMaxChapterIndex(novel.id) + 1;
+    }
   }
   if (mode === 'regenerate' && (!idx || idx < 1)) {
     return end({ type: 'error', message: '缺少章节号' });
   }
 
   // Job 化
-  const jobTry = tryCreateJob(novel.id, 'generate_chapter', { mode, chapterIndex: idx, targetWords });
+  let jobTry = tryCreateJob(novel.id, 'generate_chapter', { mode, chapterIndex: idx, targetWords });
+  if (jobTry.conflict) {
+    // 存在残留 running 的 generate_chapter 任务：abort 旧任务再新建（用户点生成/重新生成，意图明确）
+    // 覆盖场景：上次生成中断后 job 残留 running，导致"已有进行中的章节生成任务"永远无法重试
+    const staleId = jobTry.jobId;
+    if (staleId) abortJob(staleId);
+    jobTry = tryCreateJob(novel.id, 'generate_chapter', { mode, chapterIndex: idx, targetWords });
+  }
   if (jobTry.conflict) {
     return end({ type: 'error', message: '该小说已有进行中的章节生成任务', jobId: jobTry.jobId });
   }
@@ -1432,10 +1997,11 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 
   const targetWordsN = Number(targetWords) || novel.chapter_word_count || 2000;
 
-  // 已有章节（用于记忆），过滤掉正在生成的章
+  // 已有章节（用于记忆），过滤掉正在生成的章及其之后的章节（重新生成某章时，
+  // 其后的章节尚未发生，不得作为前情注入，否则会把后面的剧情提前写进本章）
   const existing = getChapter(novel.id, idx);
-  const recentChapters = getRecentChapters(novel.id, 3).filter((c) => c.chapter_index !== idx);
-  const historySummaries = buildHistorySummaries(novel.id, Math.floor(contextBudget(config) * 0.6)).filter((s) => s.chapter_index !== idx);
+  const recentChapters = getRecentChapters(novel.id, 3, idx);
+  const historySummaries = buildHistorySummaries(novel.id, Math.floor(contextBudget(config) * 0.6), idx);
   const characters = getCharacters(novel.id);
   const novelFactions = getFactions(novel.id);
 
@@ -1452,20 +2018,29 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       if (planChapter?.title) {
         title = planChapter.title;
       } else {
+        const prevChapterTitle = db.prepare("SELECT title FROM chapters WHERE novel_id = ? AND chapter_index = ? AND content != ''").get(novel.id, idx - 1);
+        const titleContext = buildNovelContext(novel, characters, [], [], 0, '', novelFactions)
+          + (prevChapterTitle ? `\n\n上一章标题：${prevChapterTitle.title}` : '')
+          + `\n\n即将创作第 ${idx} 章的剧情概要：${planChapter?.summary || '承接前文继续推进'}\n\n请为这一章拟一个贴合内容的标题。`;
         const tRes = await chat({
           config,
           messages: [
             { role: 'system', content: CHAPTER_TITLE_SYSTEM },
-            { role: 'user', content: buildNovelContext(novel, characters, [], [], 0, '', novelFactions) + `\n\n即将创作第 ${idx} 章的剧情概要：${planChapter?.summary || '承接前文继续推进'}\n\n请为这一章拟标题。` }
+            { role: 'user', content: titleContext }
           ],
           maxTokens: 200
         });
-        title = (tRes.content || '').replace(/["'《》]/g, '').trim() || `第${idx}章`;
+        let rawTitle = (tRes.content || '').trim();
+        // 清理标题：去掉引号、书名号、章节前缀（中文数字和阿拉伯数字）
+        rawTitle = rawTitle.replace(/["'《》「」『』]/g, '').replace(/^第[一二三四五六七八九十百千\d]+章\s*/g, '').replace(/\n+/g, ' ').trim();
+        title = rawTitle.slice(0, 15) || `第${idx}章`;
       }
     }
 
     send({ type: 'status', message: `正在创作「${title}」（目标 ${targetWordsN} 字）…` });
     send({ type: 'progress', progress: 15, message: `正在创作「${title}」…` });
+
+    send({ type: 'status', message: '正在读取前文记忆与设定…' });
 
     // 上下文记忆：压缩模式下用故事状态简报替代前情摘要 + 最近章节全文
     const useCompressed = novel.context_compressed == 1 && novel.compressed_context;
@@ -1473,7 +2048,10 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     if (!useCompressed) {
       try {
         const memText = await readMemoryFile(novel);
-        if (memText) memoryBlock = trimMemoryToBudget(memText, Math.floor(contextBudget(config) * 0.55));
+        if (memText) {
+          const memFiltered = trimMemoryToIndex(memText, idx);
+          memoryBlock = trimMemoryToBudget(memFiltered, Math.floor(contextBudget(config) * 0.55));
+        }
       } catch { memoryBlock = ''; }
     }
     const context = useCompressed
@@ -1482,8 +2060,8 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         ? buildNovelContext(novel, characters, recentChapters, [], contextBudget(config), memoryBlock, novelFactions)
         : buildNovelContext(novel, characters, recentChapters, historySummaries, contextBudget(config), 0, novelFactions);
 
-    // 待回收伏笔注入：防止前期埋下的坑被遗忘
-    const openFores = getOpenForeshadowings(novel.id, 60);
+    // 待回收伏笔注入：防止前期埋下的坑被遗忘（仅取本章之前埋下的）
+    const openFores = getOpenForeshadowings(novel.id, 60, idx);
     const foresBlock = formatForeshadowList(openFores)
       ? `【待回收伏笔（前面埋下的线索，本章如未回收也须自然呼应或保持存在感，不可遗忘）】\n${formatForeshadowList(openFores)}`
       : '';
@@ -1493,15 +2071,16 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       ? `【世界观设定（创作时须严格遵守，不得与既定设定冲突）】\n${formatWorldSettings(getWorldSettings(novel.id))}`
       : '';
 
-    // 关键剧情事实锚点：长期连载中防设定冲突与关键信息遗忘
-    const kmItems = getKeyMoments(novel.id, 80);
+    // 关键剧情事实锚点：长期连载中防设定冲突与关键信息遗忘（仅取本章之前确立的）
+    const kmItems = getKeyMoments(novel.id, 80, idx);
     const kmBlock = formatKeyMoments(kmItems)
       ? `【本书已确立的关键剧情事实（长期记忆锚点，创作时必须遵循，不得与已发生事实矛盾，也不要重复叙述已明确交代过的事）】\n${formatKeyMoments(kmItems)}`
       : '';
 
-    // 阶段记忆（卷快照）：超长连载中早期剧情不丢，注入最近阶段快照
-    const stageBlock = formatStageMemories(getStageMemories(novel.id), 3)
-      ? `【前情阶段摘要（更早章节的长效记忆浓缩，供把握历史走向；创作时须与之一致，可自然延续其局势）】\n${formatStageMemories(getStageMemories(novel.id), 3)}`
+    // 阶段记忆（卷快照）：超长连载中早期剧情不丢，注入最近阶段快照（仅取本章之前封存的阶段）
+    const stageMemoriesBefore = getStageMemories(novel.id, idx);
+    const stageBlock = formatStageMemories(stageMemoriesBefore, 3)
+      ? `【前情阶段摘要（更早章节的长效记忆浓缩，供把握历史走向；创作时须与之一致，可自然延续其局势）】\n${formatStageMemories(stageMemoriesBefore, 3)}`
       : '';
 
     // 角色档案：性格核心与言行习惯，创作时必须保持，防角色性格突变
@@ -1515,7 +2094,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     // P0-2: RAG 检索 — 根据本章概要检索相关历史片段
     let ragBlock = '';
     try {
-      const ragChunks = retrieveRelevant(novel.id, existing?.summary || title, 5);
+      const ragChunks = retrieveRelevant(novel.id, existing?.summary || title, 5, idx);
       ragBlock = formatRagBlock(ragChunks);
     } catch { /* RAG 检索失败不阻塞 */ }
 
@@ -1526,14 +2105,102 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     const knowledgeIds = getNovelKnowledgeIds(novel);
     const knowledgeBlock = formatKnowledgeBlock(knowledgeIds);
     let knowledgeSamples = '';
+    let plotReferenceBlock = '';
     if (knowledgeIds.length) {
-      knowledgeSamples = knowledgeIds.map((id) => getSampleSnippets(id, 3000)).filter(Boolean).join('\n\n').slice(0, 8000);
+      knowledgeSamples = knowledgeIds.map((id) => getSampleSnippets(id, 5000)).filter(Boolean).join('\n\n---\n\n').slice(0, 12000);
+      // 汇总剧情参考：从各知识库提取可借鉴的剧情结构信息
+      const plotRefs = knowledgeIds.map((id) => {
+        const snippets = getSampleSnippets(id, 2000);
+        if (!snippets) return null;
+        const firstScene = snippets.split('\n\n')[0] || '';
+        return firstScene.slice(0, 300);
+      }).filter(Boolean);
+      if (plotRefs.length) {
+        plotReferenceBlock = `\n\n【已导入同类小说的剧情结构参考（参考其开场方式、悬念设置、冲突推进节奏，不要抄袭具体情节）】\n${plotRefs.join('\n\n---\n\n')}`;
+      }
     }
     const chapterSysOpts = {
       constitution: constitution || '',
       characterVoices: charVoices || '',
-      knowledgeBlock: (knowledgeBlock + (knowledgeSamples ? KNOWLEDGE_SAMPLE_INTRO + knowledgeSamples : '')).trim()
+      knowledgeBlock: (knowledgeBlock + (knowledgeSamples ? KNOWLEDGE_SAMPLE_INTRO + knowledgeSamples : '') + plotReferenceBlock).trim()
     };
+
+    // 场景节拍（beats）：优先使用方案阶段生成的细纲，否则运行时生成
+    let beatsBlock = '';
+    try {
+      const storedBeats = existing?.beats ? (() => { try { return JSON.parse(existing.beats); } catch { return null; } })() : null;
+      if (Array.isArray(storedBeats) && storedBeats.length) {
+        const lines = storedBeats.map((b, i) => {
+          return `场景${i + 1}「${b.scene || ''}」（${b.location || ''}）
+- 出场：${b.characters || ''}
+- 发生：${b.action || ''}
+- 细节：${b.sensory_detail || ''}
+- 作用：${b.purpose || ''}${b.tone ? `｜情绪：${b.tone}` : ''}`;
+        }).filter(Boolean).join('\n\n');
+        beatsBlock = lines ? `【本章场景规划（细纲，按此结构组织正文，场景之间自然过渡，最后要有钩子）】\n${lines}` : '';
+      } else {
+        send({ type: 'status', message: '正在规划本章场景…' });
+        const btRes = await chat({
+          config,
+          task: 'writing',
+          messages: [
+            { role: 'system', content: CHAPTER_BEAT_SYSTEM },
+            { role: 'user', content: `小说：《${novel.title}》题材：${novel.genre}\n第${idx}章 ${title}\n本章剧情概要：${existing?.summary || '承接前文继续推进'}\n本章情绪基调：${existing?.emotion || '（由你判断）'}\n本章推进：${existing?.arc_hint || '推进主线'}\n\n出场角色参考：${characters.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、') || '（由你判断）'}\n\n请将本章拆解为场景级 beat。` }
+          ],
+          maxTokens: 2000
+        });
+        const beats = extractJson(btRes.content);
+        if (Array.isArray(beats) && beats.length) {
+          // 保存到数据库以供后续章节引用
+          try {
+            db.prepare('UPDATE chapters SET beats = ? WHERE id = ?').run(JSON.stringify(beats), existing?.id || 0);
+          } catch { /* 保存失败不阻塞 */ }
+          const lines = beats.map((b, i) => {
+            return `场景${i + 1}「${b.scene || ''}」（${b.location || ''}）
+- 出场：${b.characters || ''}
+- 发生：${b.action || ''}
+- 细节：${b.sensory_detail || ''}
+- 作用：${b.purpose || ''}${b.tone ? `｜情绪：${b.tone}` : ''}`;
+          }).filter(Boolean).join('\n\n');
+          beatsBlock = lines ? `【本章场景规划（按此结构组织正文，场景之间自然过渡，最后要有钩子）】\n${lines}` : '';
+        }
+      }
+    } catch { /* beats 失败不阻塞，直接进入正文创作 */ }
+
+    // 联网参考同类小说
+    let referenceBlock = '';
+    if (useReference) {
+      try {
+        send({ type: 'status', message: '正在搜索同类热门小说参考…' });
+        const refResp = await fetch(`http://localhost:${req.socket.localPort}/api/novels/${novel.id}/reference-search`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }
+        }).catch(() => null);
+        if (refResp && refResp.ok) {
+          const refData = await refResp.json();
+          if (refData.formatted) {
+            referenceBlock = '\n\n' + refData.formatted;
+            send({ type: 'status', message: '已加载同类小说参考，将在创作中借鉴其节奏与手法' });
+          }
+        }
+      } catch { /* 参考搜索失败不阻塞 */ }
+    }
+
+    // 上一章结尾片段：强制本章从它续写，防止跑题（模型易忽略模糊的前情）
+    const prevChapter = db.prepare("SELECT title, content, summary, beats FROM chapters WHERE novel_id = ? AND chapter_index = ? AND content != ''").get(novel.id, idx - 1);
+    const prevChapterSummary = prevChapter?.summary ? `\n上一章概要：${prevChapter.summary}` : '';
+    let prevBeatsBlock = '';
+    if (prevChapter?.beats) {
+      try {
+        const prevBeats = JSON.parse(prevChapter.beats);
+        if (Array.isArray(prevBeats) && prevBeats.length) {
+          const lines = prevBeats.map((b, i) => `场景${i + 1}「${b.scene || ''}」：${b.action || ''}`).join('\n');
+          prevBeatsBlock = `\n上一章细纲：\n${lines}`;
+        }
+      } catch { /* 解析失败不阻塞 */ }
+    }
+    const prevTailBlock = prevChapter
+      ? `【上一章结尾（本章必须从上一章结尾的场面直接续写，严格延续时间/地点/人物/悬念，不得倒回上一章开头重新描写同一场景，不得重复已经发生过的事件）】\n上一章《${prevChapter.title}》${prevChapterSummary}${prevBeatsBlock}\n上一章结尾：…${String(prevChapter.content).slice(-800)}`
+      : '';
 
     const userPrompt = `${context}
  ${foresBlock}
@@ -1543,52 +2210,227 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
  ${profileBlock}
  ${enhancedMemBlock}
  ${ragBlock}
+ ${beatsBlock}
+ ${referenceBlock}
+ ${prevTailBlock}
  
  本章信息：
 - 章节序号：第 ${idx} 章
+- 全书共 ${novel.target_chapters || '?'} 章，当前处于 ${chapterStageLabel(idx, novel.target_chapters)}
 - 章节标题：${title}
 - 本章剧情概要：${existing?.summary || ''}
+${existing?.emotion ? `- 本章情绪基调：${existing.emotion}（全章要有意识地营造该情绪氛围，但不能全程紧绷——情绪要有起伏，以该基调为底色）` : ''}
+${existing?.arc_hint ? `- 本章推进的剧情线：${existing.arc_hint}（本章的戏份应优先围绕这条线展开，其余线索以呼应/推进伏笔为主）` : ''}
+${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水到渠成地导向这个结尾，收尾时落实到具体场景/物件/对话，让读者想翻下一章）` : ''}
+- 小说类型：${novel.genre || '未设定'}，本章的题材基调必须严格符合该类型（恐怖小说要有恐怖氛围与惊悚逻辑，玄幻要有修炼体系，都市要有现实感，不得脱离类型写走样）
 - 目标字数：约 ${targetWordsN} 字
 
 请开始创作本章正文。`;
 
+    send({ type: 'status', message: '上下文准备完成，正在生成正文…' });
+    send({ type: 'progress', progress: 20, message: `正在生成第 ${idx} 章正文…` });
+
+    // 整章生成 + 自动质检循环：每版生成后自动检查（跑题/AI 味/剧情一致性），凡检出问题一律整章重新生成，最多重试 MAX_AUTO_REGENERATE 次
     let full = '';
     let finishReason = 'stop';
-    const perMax = Math.max(4000, Math.min(32000, targetWordsN * 4));
-    // 自动续写：单次输出被 max_tokens 截断（finish_reason=length）时继续往下写，直到达到目标字数或模型自然收尾
-    for (let round = 0; round < 8; round++) {
-      const msgs = round === 0
-        ? [
-            { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), chapterSysOpts) },
-            { role: 'user', content: userPrompt }
-          ]
-        : [
-            { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), chapterSysOpts) },
-            { role: 'user', content: buildContinuePrompt(full, targetWordsN) }
-          ];
-      if (round > 0) {
-        send({ type: 'status', message: `正在续写第 ${idx} 章剩余部分…` });
-        const contPct = Math.min(70, 15 + round * 8);
-        send({ type: 'progress', progress: contPct, message: `正在续写第 ${idx} 章（第 ${round + 1} 轮）…` });
+    let finalDetect = { score: 0, issues: [] };
+    let finalBlacklist = [];
+    let finalRounds = [];
+    let lastProblems = [];
+    const perMax = Math.max(2000, Math.min(16000, Math.round(targetWordsN * 1.8)));
+
+    const buildRegenFeedback = (problems) => `【上一版未通过自动检查，本次整章重新生成必须修正的问题】
+${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
+
+请按上述问题整体重写本章：修正这些错误，其余内容保持人类写作风格，剧情与人设不变。`;
+
+    for (let attempt = 0; attempt <= MAX_AUTO_REGENERATE; attempt++) {
+      const isRegen = attempt > 0;
+      if (isRegen) {
+        send({ type: 'reset' });
+        send({ type: 'status', message: `第 ${idx} 章检出 ${lastProblems.length} 处问题，正在整章重新生成（第 ${attempt + 1} 版）…` });
+        send({ type: 'progress', progress: 60, message: `整章重新生成（第 ${attempt + 1} 版）…` });
       }
-      const r = await runLLMStream(config, msgs, {
-        ctrl,
-        task: 'writing',
-        maxTokens: perMax,
-        onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
-      });
-      finishReason = r?.finishReason || 'stop';
-      if (finishReason !== 'length' || countWords(full) >= targetWordsN) break;
+
+      full = '';
+      finishReason = 'stop';
+      const attemptPrompt = isRegen ? userPrompt + '\n\n' + buildRegenFeedback(lastProblems) : userPrompt;
+      // 自动续写：单次输出被 max_tokens 截断（finish_reason=length）时继续往下写，直到达到目标字数或模型自然收尾
+      for (let round = 0; round < 8; round++) {
+        const msgs = round === 0
+          ? [
+              { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), chapterSysOpts) },
+              { role: 'user', content: attemptPrompt }
+            ]
+          : [
+              { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), chapterSysOpts) },
+              { role: 'user', content: buildContinuePrompt(full, targetWordsN) }
+            ];
+        if (round > 0) {
+          send({ type: 'status', message: `正在续写第 ${idx} 章剩余部分…` });
+          const contPct = Math.min(70, 15 + round * 8);
+          send({ type: 'progress', progress: contPct, message: `正在续写第 ${idx} 章（第 ${round + 1} 轮）…` });
+        }
+        let deltaCount = 0;
+        const r = await runLLMStream(config, msgs, {
+          ctrl,
+          task: 'writing',
+          maxTokens: perMax,
+          onDelta: (d) => {
+            full += d;
+            send({ type: 'delta', content: d });
+            deltaCount += d.length;
+            if (deltaCount >= 500) {
+              deltaCount = 0;
+              const wc = countWords(full);
+              const pct = Math.min(55, 25 + Math.round((wc / targetWordsN) * 30));
+              send({ type: 'progress', progress: pct, message: `正在生成第 ${idx} 章（${wc}/${targetWordsN} 字）…` });
+            }
+          }
+        });
+        finishReason = r?.finishReason || 'stop';
+        const wordsSoFar = countWords(full);
+        const prematureStop = (finishReason === 'stop' && wordsSoFar < Math.min(targetWordsN * 0.6, targetWordsN - 200));
+        if (finishReason === 'length') {
+          // 正常截断，继续续写
+        } else if (prematureStop && round < 7) {
+          send({ type: 'status', message: `检测到输出提前结束（${wordsSoFar} 字），正在继续补写…` });
+        } else {
+          break;
+        }
+        if (wordsSoFar >= targetWordsN) break;
+        if (wordsSoFar > targetWordsN * 1.3) {
+          send({ type: 'status', message: `字数已超过目标 ${targetWordsN} 字（当前 ${wordsSoFar} 字），结束续写` });
+          break;
+        }
+      }
+
+      if (!full.trim()) {
+        updateJob(job.id, { status: 'failed', error: 'AI 未返回内容' });
+        return end({ type: 'error', message: 'AI 未返回内容，请重试。' });
+      }
+
+      // 续写指令残留检测：若模型把"续写占位符话术"当成正文输出（如"请把【末尾节选】的实际文字发给我"），判定为生成失败，不落库
+      const resumeResidue = String(full).match(/(请|需要|把|提供).{0,12}(末尾节选|已写部分|实际文字|正文内容|粘贴|发给我).{0,20}/);
+      const pureResume = /^(请|麻烦)(把|将|提供|粘贴)/.test(String(full).trim()) || /^您把写作要求/.test(String(full).trim());
+      if ((resumeResidue && String(full).length < 300) || pureResume) {
+        updateJob(job.id, { status: 'failed', error: 'AI 输出续写占位话术' });
+        return end({ type: 'error', message: 'AI 输出了续写占位话术而非正文，请重试。' });
+      }
+
+      // 规则化清污（标点全角化、省略号归一、叹号压缩、空行折叠）。幂等，润色后也安全。
+      full = cleanAiText(full);
+      // 移除 AI 可能在正文开头输出的"第N章"标记（标题由系统独立管理）
+      full = full.replace(/^第[一二三四五六七八九十百千\d]+章\s*\n*/g, '').trim();
+
+      send({ type: 'progress', progress: 60, message: `正在检查第 ${idx} 章质量…` });
+
+      // ---- 自动质检：跑题 + AI 味 + 剧情一致性 ----
+      const problems = [];
+
+      // 重复内容检测：本章开头与上一章开头高度相似则判定为重复
+      if (prevChapter && String(prevChapter.content).length > 200) {
+        const prevStart = String(prevChapter.content).slice(0, 200).replace(/\s+/g, '');
+        const currStart = full.slice(0, 200).replace(/\s+/g, '');
+        const overlap = longestCommonSubstring(prevStart, currStart);
+        if (overlap.length > 60) {
+          problems.push({ desc: `本章开头与上一章开头高度相似（重复${overlap.length}字），疑似重复上一章内容，须从上一章结尾之后的时间点续写，不得倒退重写` });
+        }
+      }
+
+      // 1) 题材跑题检测
+      try {
+        const drift = scanTopicDrift(full, novel.genre);
+        if (drift.length) {
+          problems.push({ desc: `题材跑题（${drift.map((d) => d.word).join('、')}），与「${novel.genre}」题材不符` });
+        }
+      } catch { /* 跑题检测失败不阻塞 */ }
+
+      // 2) AI 味检测（含黑名单硬过滤）
+      let det = { score: 0, issues: [] };
+      let bl = [];
+      try {
+        det = await runDetection(config, full);
+        const hits = scanAiPatterns(full);
+        bl = blacklistFlagWords(hits);
+        const total = Math.min(100, det.score + blacklistPenalty(hits));
+        if (total > AI_SCORE_PASS || bl.length > 0) {
+          problems.push({ desc: `AI 味明显（${total} 分，阈值 ${AI_SCORE_PASS}${bl.length ? '；命中高频词：' + bl.join('、') : ''}）` });
+        }
+        finalDetect = det;
+        finalBlacklist = bl;
+        finalRounds = [{ round: 1, detectScore: det.score, blacklistPenalty: blacklistPenalty(hits), score: total, blacklist: bl }];
+      } catch { /* 检测失败不阻塞 */ }
+
+      // 2b) 故事可读性检测：文笔干净但平铺直叙、无张力、无欲望尖点也判 rewrite
+      let rd = { average: 0, verdict: 'pass', issues: [] };
+      try {
+        rd = await runReadability(config, full);
+        if (rd.verdict === 'rewrite') {
+          const rdIssues = (rd.issues || []).slice(0, 4)
+            .map((i) => `[${i.dimension || '可读性'}] ${i.suggestion || i.problem || ''}`)
+            .join('；');
+          problems.push({ desc: `故事可读性不达标（平均 ${rd.average}/10${rdIssues ? '，' + rdIssues : ''}）：章节平铺直叙、缺乏冲突与欲望钩子，须重写注入戏剧张力` });
+        }
+      } catch { /* 可读性检测失败不阻塞 */ }
+
+      // 3) 剧情一致性校验
+      try {
+        const consistency = await checkPlotConsistency(novel.id, idx, full, config);
+        const cs = consistency?.overall_consistency;
+        if (cs && cs !== 'consistent') {
+          const issueLines = (consistency.issues || []).slice(0, 6).map((i) => `【${i.type || '逻辑'}】${i.description || ''}`).join('；');
+          problems.push({ desc: `剧情逻辑问题（${cs}）${issueLines ? '：' + issueLines : ''}` });
+        }
+      } catch { /* 校验失败不阻塞 */ }
+
+      // 4) 行为逻辑规则检查（轻量级，不调 LLM，用正则匹配常见行为逻辑矛盾）
+      try {
+        const behaviorIssues = [];
+        const txt = full;
+        // 深可见骨/骨折/贯穿伤/大出血 + 创可贴/简单包扎/贴个创口贴 = 伤害与处理不匹配
+        const severeWound = /[深可]见骨|骨折|贯穿|骨裂|大出血|血流如注|伤口翻|皮肉翻开|露骨/;
+        const trivialTreatment = /创可贴|创口贴|贴个|简单包扎|随便包了|止血贴/;
+        if (severeWound.test(txt) && trivialTreatment.test(txt)) {
+          const woundMatch = txt.match(severeWound);
+          const treatMatch = txt.match(trivialTreatment);
+          behaviorIssues.push(`行为逻辑：出现重度伤害（${woundMatch[0]}）后仅用${treatMatch[0]}处理，严重违反常识——重伤必须缝合/包扎止血/就医，不能贴个创可贴了事`);
+        }
+        // 致命伤/重伤后角色立即若无其事（同一段内从受伤跳到正常行动，无缓冲描写）
+        const severeInjury = /[深可]见骨|骨折|贯穿|骨裂|大出血|血流如注|伤口翻|皮肉翻开|吐血|浑身是血|重伤|致命/;
+        const normalAction = /掏出手机|刷了?[一几]?下|点开微信|编辑|收起手机|嘴角抽了抽|自言自语|语气平淡/;
+        if (severeInjury.test(txt)) {
+          const injuryIdx = txt.search(severeInjury);
+          const after = txt.slice(injuryIdx, injuryIdx + 500);
+          if (normalAction.test(after) && !after.includes('包扎') && !after.includes('缝合') && !after.includes('止血') && !after.includes('上药') && !after.includes('缠') && !after.includes('绷带')) {
+            behaviorIssues.push('行为逻辑：角色受重伤后立即若无其事地做其他事（刷手机/自言自语），中间缺少伤口处理与情绪缓冲描写');
+          }
+        }
+        // 角色在公共场合使用超自然/暴力行为，周围无旁观者反应
+        const publicPlace = /医院|警察局|学校|商场|街道|饭馆|地铁|公交|广场|小区|楼道|走廊|大厅/;
+        const obviousAction = /掐诀|念咒|画符|施法|飞剑|法术|灵光|血气|黑雾|阴气|鬼气|爆炸|打斗|踢飞|撞飞|砸/;
+        if (publicPlace.test(txt) && obviousAction.test(txt)) {
+          const hasWitness = /围观|尖叫|报警|逃跑|喊|惊叫|骚动|惊呼|吓|愣住|尖叫|躲避|众人|周围|路人|有人|群众|人群/;
+          const placeMatch = txt.match(publicPlace);
+          if (!hasWitness.test(txt)) {
+            behaviorIssues.push(`行为逻辑：角色在${placeMatch[0]}等公共场合使用超自然/暴力能力，但周围没有任何旁观者反应——公共场合发生异常事件，必须有围观/尖叫/报警等反应`);
+          }
+        }
+        for (const desc of behaviorIssues) {
+          problems.push({ desc });
+        }
+      } catch { /* 行为规则检查失败不阻塞 */ }
+
+      lastProblems = problems;
+      if (problems.length === 0) break; // 全部通过
+
+      if (attempt < MAX_AUTO_REGENERATE) continue; // 整章重新生成
+
+      // 已达重试上限：保存当前版本并提示，允许用户后续再手动修改
+      send({ type: 'status', message: `已自动重试 ${MAX_AUTO_REGENERATE} 次仍有 ${problems.length} 处问题，先保存当前版本，可在章节操作中继续修改。` });
     }
 
-    if (!full.trim()) {
-      return end({ type: 'error', message: 'AI 未返回内容，请重试。' });
-    }
-
-    // 规则化清污（标点全角化、省略号归一、叹号压缩、空行折叠）。幂等，润色后也安全。
-    full = cleanAiText(full);
-
-    // 保存章节
+    // 保存章节（质检通过或达上限后的最终版）
     let chapterId = existing ? existing.id : null;
     const wc = countWords(full);
     if (existing) {
@@ -1605,39 +2447,46 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       await writeChapterTxt(novel, { chapter_index: idx, title, content: full });
     } catch { /* 文件写入失败不阻塞 */ }
 
-    // 强制质量门：先检测 AI 味 → 超标(>30分或有黑名单词)才润色 → 润色后复检 → 达标为止
+    // 记录最终 AI 味检测
     try {
-      send({ type: 'status', message: '正在检测 AI 味…' });
-      send({ type: 'progress', progress: 75, message: '正在检测 AI 味…' });
-      let preScore = 0;
-      let preIssues = [];
-      let preBlacklist = [];
-      try {
-        const det = await runDetection(config, full);
-        preScore = det.score;
-        preIssues = det.issues;
-        const hits = scanAiPatterns(full);
-        preBlacklist = blacklistFlagWords(hits);
-        preScore = Math.min(100, preScore + blacklistPenalty(hits));
-      } catch { /* 检测失败不阻塞 */ }
+      saveDetection(novel.id, idx, finalRounds.at(-1)?.score ?? finalDetect.score ?? 0, finalDetect.issues, finalBlacklist, 'quality_gate');
+      send({ type: 'status', message: `第 ${idx} 章已完成自动检查并保存${lastProblems.length ? `（残留 ${lastProblems.length} 处问题待处理）` : '（全部通过）'}` });
+    } catch { /* 记录失败不阻塞 */ }
 
-      if (preScore > AI_SCORE_PASS || preBlacklist.length > 0) {
-        const iter = await iteratePolish(config, novel, full, {
-          onStatus: (m) => send({ type: 'status', message: m })
-        });
-        full = iter.text;
-        saveDetection(novel.id, idx, iter.rounds.at(-1)?.score ?? preScore, iter.lastDetect.issues, iter.blacklist, 'quality_gate');
-        db.prepare('UPDATE chapters SET content = ?, word_count = ? WHERE id = ?')
-          .run(full, countWords(full), chapterId);
-        send({ type: 'status', message: `第 ${idx} 章已通过质量门（${iter.rounds.length} 轮润色，终评 ${iter.rounds.at(-1)?.score ?? preScore} 分）` });
-        try {
-          await writeChapterTxt(novel, { chapter_index: idx, title, content: full });
-        } catch { /* 文件写入失败不阻塞 */ }
-      } else {
-        saveDetection(novel.id, idx, preScore, preIssues, preBlacklist, 'quality_gate');
-        send({ type: 'status', message: `第 ${idx} 章 AI 味检测通过（${preScore} 分）` });
+    // 文笔质量检查（非阻塞，仅记录不触发重生成）
+    try {
+      const wqRes = await chat({
+        config,
+        task: 'quality',
+        messages: [
+          { role: 'system', content: WRITING_QUALITY_SYSTEM },
+          { role: 'user', content: `第${idx}章 标题：${title}\n\n${full.slice(0, 3000)}` }
+        ],
+        maxTokens: 1500
+      });
+      const wq = extractJson(wqRes.content);
+      if (wq && wq.overall && wq.overall.score < 6) {
+        const wqTips = [];
+        for (const k of ['fluency', 'vocabulary', 'sentence', 'description', 'dialogue']) {
+          const d = wq[k];
+          if (d && d.issues && d.issues.length && d.suggestions && d.suggestions.length) {
+            wqTips.push(`${d.suggestions[0]}`);
+          }
+        }
+        const weak = (wq.overall.weaknesses || []).slice(0, 2).join('、');
+        send({ type: 'status', message: `文笔提示：总体${wq.overall.score}/10分（${weak ? '短板：' + weak + '；' : ''}${wqTips.slice(0, 2).join('；')}），可在后续润色中优化` });
       }
-    } catch { /* 质量门失败不阻塞 */ }
+    } catch { /* 文笔检查失败不阻塞 */ }
+
+    // ★ 正文 + 去AI味已完成：立即回完成信号，避免后处理拖慢 SSE（后处理在下方继续后台消化，send 已有连接保护）
+    try {
+      const doneNovel = getNovel(novel.id);
+      doneNovel.chapters = getChapters(novel.id);
+      doneNovel.total_words = doneNovel.chapters.reduce((s, c) => s + c.word_count, 0);
+      send({ type: 'progress', progress: 100, message: `第 ${idx} 章创作完成` });
+      updateJob(job.id, { status: 'done', progress: 100, word_count: (getChapter(novel.id, idx)?.word_count || 0), result_ref: String(idx) });
+      end({ type: 'done', data: { novel: doneNovel, chapter: getChapter(novel.id, idx), autoPolished: !!config.autoPolish, foreshadowings: getForeshadowings(novel.id), jobId: job.id } });
+    } catch { /* 完成信号发送失败不阻塞后处理 */ }
 
     // 生成章节摘要（用于长篇小说记忆）
     try {
@@ -1989,17 +2838,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       }
     } catch { /* 角色语音提取失败不阻塞 */ }
 
-    // 剧情一致性校验：检查本章是否与已确立事实/角色设定矛盾
-    try {
-      send({ type: 'status', message: '正在校验剧情一致性…' });
-      const consistency = await checkPlotConsistency(novel.id, idx, full, config);
-      if (consistency && consistency.overall_consistency === 'major_issues') {
-        const issues = (consistency.issues || []).filter((i) => i.severity === 'high');
-        if (issues.length) {
-          send({ type: 'status', message: `检测到 ${issues.length} 处严重剧情矛盾：${issues.slice(0, 3).map((i) => i.description).join('；')}` });
-        }
-      }
-    } catch { /* 一致性校验失败不阻塞 */ }
+    // 剧情一致性校验已在生成循环中前置完成（有问题→整章重生成），此处无需重复修复式校验
 
     // 小说宪法重建：每 20 章重新生成一次，吸收最新事实/角色变化
     if (idx % 20 === 0) {
@@ -2037,12 +2876,7 @@ ${full.slice(0, 4000)}` }],
       }
     } catch { /* 角色提取失败不阻塞 */ }
 
-    const updatedNovel = getNovel(novel.id);
-    updatedNovel.chapters = getChapters(novel.id);
-    updatedNovel.total_words = updatedNovel.chapters.reduce((s, c) => s + c.word_count, 0);
-    send({ type: 'progress', progress: 100, message: `第 ${idx} 章创作完成` });
-    updateJob(job.id, { status: 'done', progress: 100, word_count: (getChapter(novel.id, idx)?.word_count || 0), result_ref: String(idx) });
-    end({ type: 'done', data: { novel: updatedNovel, chapter: getChapter(novel.id, idx), autoPolished: !!config.autoPolish, foreshadowings: getForeshadowings(novel.id), jobId: job.id } });
+    // 完成信号已在正文落库+去AI味后提前发送（见上方★），此处仅做记忆后处理收尾
   } catch (e) {
     if (e.name === 'AbortError') {
       updateJob(job.id, { status: 'aborted', error: e.message });
@@ -2195,6 +3029,76 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
     }
   } catch (e) {
     if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止润色' });
+    return end({ type: 'error', message: e.message });
+  }
+});
+
+// ---------- 按作者要求修改章节 ----------
+router.post('/novels/:id/chapters/:idx/revise', async (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const { config, error } = requireLLM();
+  if (error) return res.status(400).json({ error: error.message });
+
+  const idx = Number(req.params.idx);
+  const chapter = getChapter(novel.id, idx);
+  if (!chapter) return res.status(404).json({ error: '章节不存在' });
+  if (!chapter.content) return res.status(400).json({ error: '本章还没有内容可修改' });
+
+  const instructions = String(req.body?.instructions || '').trim();
+  if (!instructions) return res.status(400).json({ error: '请填写修改要求' });
+
+  const { ctrl, send, end } = startSSE(req, res);
+  send({ type: 'status', message: `正在按您的要求修改「${chapter.title}」…` });
+  send({ type: 'progress', progress: 5, message: `正在按您的要求修改「${chapter.title}」…` });
+
+  backupChapter(novel.id, idx, '按作者要求修改');
+
+  try {
+    let full = '';
+    await runLLMStream(config, [
+      { role: 'system', content: buildReviseSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel)) },
+      { role: 'user', content: `以下是第 ${idx} 章《${chapter.title}》原稿与作者的修改要求。请只按修改要求改写，未被要求的段落保持原样，输出改写后的完整正文。
+
+【作者的修改要求】
+${instructions}
+
+【原稿】
+${chapter.content}` }
+    ], {
+      ctrl,
+      task: 'writing',
+      maxTokens: Math.max(4000, Math.min(32000, (chapter.content.length + 3000) * 2)),
+      onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
+    });
+
+    if (!full.trim()) return end({ type: 'error', message: 'AI 未返回内容，请重试。' });
+
+    full = cleanAiText(full.trim());
+    db.prepare('UPDATE chapters SET content = ?, word_count = ?, status = ? WHERE id = ?')
+      .run(full, countWords(full), 'draft', chapter.id);
+    touchNovel(novel.id);
+    try {
+      await writeChapterTxt(novel, { chapter_index: idx, title: chapter.title, content: full });
+    } catch { /* 文件写入失败不阻塞 */ }
+
+    // 改写后附带一次 AI 味检测报告（仅提示，不阻塞）
+    let detect = { score: 0, issues: [] };
+    let blacklist = [];
+    try {
+      const det = await runDetection(config, full);
+      detect = det;
+      const hits = scanAiPatterns(full);
+      blacklist = blacklistFlagWords(hits);
+      const total = Math.min(100, det.score + blacklistPenalty(hits));
+      saveDetection(novel.id, idx, total, det.issues, blacklist, 'revise');
+      send({ type: 'status', message: `修改完成，AI 味检测 ${total} 分${total > AI_SCORE_PASS ? '（略有残留，可再次润色）' : '（达标）'}` });
+    } catch { /* 检测失败不阻塞 */ }
+
+    send({ type: 'progress', progress: 100, message: '修改完成' });
+    end({ type: 'done', data: { chapter: getChapter(novel.id, idx), detect, passed: detect.score <= AI_SCORE_PASS } });
+  } catch (e) {
+    if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止修改' });
     return end({ type: 'error', message: e.message });
   }
 });
@@ -2788,7 +3692,7 @@ router.get('/settings', (req, res) => {
 router.put('/settings', async (req, res) => {
   const { llm_config, novels_root, migrate_novels, strict_ai_mode, managerSendBy } = req.body || {};
   if (llm_config && typeof llm_config === 'object') {
-    setSetting('llm_config', JSON.stringify(llm_config));
+    setSetting('llm_config', JSON.stringify(normalizeLLMConfig(llm_config)));
   }
   if (strict_ai_mode !== undefined) {
     setSetting('strict_ai_mode', strict_ai_mode ? '1' : '0');
@@ -2817,9 +3721,9 @@ router.post('/settings/llm-presets', (req, res) => {
   if (!name || !llm_config) return res.status(400).json({ error: '缺少预设名称或配置' });
   const presets = getLLMPresets();
   const id = Date.now().toString();
-  presets.push({ id, name: String(name), llm_config, created_at: new Date().toISOString() });
+  presets.push({ id, name: String(name), llm_config: normalizeLLMConfig(llm_config), created_at: new Date().toISOString() });
   setLLMPresets(presets);
-  res.json({ ok: true, preset: { id, name: String(name), llm_config } });
+  res.json({ ok: true, preset: { id, name: String(name), llm_config: normalizeLLMConfig(llm_config) } });
 });
 
 router.put('/settings/llm-presets/:pid', (req, res) => {
@@ -2842,8 +3746,9 @@ router.delete('/settings/llm-presets/:pid', (req, res) => {
 router.post('/settings/llm-presets/:pid/apply', (req, res) => {
   const preset = getLLMPresets().find((p) => p.id === req.params.pid);
   if (!preset) return res.status(404).json({ error: '预设不存在' });
-  setSetting('llm_config', JSON.stringify(preset.llm_config));
-  res.json({ ok: true, llm_config: preset.llm_config });
+  const cfg = normalizeLLMConfig(preset.llm_config);
+  setSetting('llm_config', JSON.stringify(cfg));
+  res.json({ ok: true, llm_config: cfg });
 });
 
 // ---------- 多 AI 大模型管理（同时启用多个模型，按任务路由） ----------
@@ -2991,6 +3896,15 @@ router.get('/novels/:id/job', (req, res) => {
 
 router.get('/jobs/active', (req, res) => {
   res.json({ jobs: listActiveJobs() });
+});
+
+// 停止/清理任务：把该小说当前 running 的 job 标记为 aborted。
+// 用于前端「停止生成」以及清理服务器重启后残留的僵尸任务。
+router.post('/novels/:id/job/abort', (req, res) => {
+  const job = getActiveJobByNovel(req.params.id);
+  if (!job) return res.json({ ok: true, job: null });
+  const updated = abortJob(job.id);
+  res.json({ ok: true, job: updated });
 });
 
 // ---------- 方案版本化（REQ-01 / REQ-02 / 待采纳修订） ----------
@@ -4206,6 +5120,43 @@ router.get('/search/settings', (req, res) => {
     bing_api_key: getSetting('bing_api_key', ''),
     bing_endpoint: getSetting('bing_endpoint', '')
   });
+});
+
+// 同类小说参考搜索：自动搜索网络热门同类小说供创作参考
+function formatSearchReference(results, genre) {
+  if (!results || !results.length) return '';
+  const lines = [`【同类小说参考（${genre}题材热门作品）】`];
+  for (const r of results) {
+    if (r.title) lines.push(`- 《${r.title}》：${r.snippet || '（暂无简介）'}`);
+  }
+  lines.push('\n参考以上作品的节奏、冲突设置和人物关系手法，但不要抄袭具体情节。');
+  return lines.join('\n');
+}
+
+router.post('/novels/:id/reference-search', async (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const genre = novel.genre || '';
+  const title = novel.title || '';
+  const keywords = `${genre}小说 热门推荐 排行榜 ${title}`;
+  try {
+    const data = await webSearch(keywords, {
+      engine: getSetting('search_engine', 'duckduckgo'),
+      searxUrl: getSetting('searx_url', ''),
+      bingApiKey: getSetting('bing_api_key', ''),
+      bingEndpoint: getSetting('bing_endpoint', ''),
+      count: 5,
+      fetchContent: true
+    });
+    const results = (data.results || []).slice(0, 5).map((r) => ({
+      title: r.title,
+      snippet: r.snippet || r.content?.slice(0, 200) || '',
+      url: r.url
+    }));
+    res.json({ ok: true, results, formatted: formatSearchReference(results, genre) });
+  } catch (e) {
+    res.json({ ok: false, error: e.message, results: [], formatted: '' });
+  }
 });
 
 router.put('/search/settings', (req, res) => {
