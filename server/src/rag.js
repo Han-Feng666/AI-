@@ -170,7 +170,9 @@ export function retrieveRelevant(novelId, query, topK = 5, beforeIndex = null) {
 export function formatRagBlock(chunks) {
   if (!chunks || !chunks.length) return '';
   const lines = chunks.map((c) => `【第${c.chapter_index}章片段】${String(c.text).slice(0, 300)}`);
-  return `【相关历史片段回忆（RAG 检索，根据本章概要匹配的历史剧情片段）】\n${lines.join('\n')}`;
+  return `【已发生的历史片段（RAG 检索，按与上一章结尾/本章概要的相关度匹配）】
+以下均为已经发生过的剧情节选，仅供人物关系、设定与前后呼应保持一致时参考。严禁把它们当作"本章即将发生的情节"直接照抄；本章剧情必须紧接上一章结尾的场面往后推进。
+${lines.join('\n')}`;
 }
 
 // ====================================================================

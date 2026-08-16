@@ -2091,10 +2091,18 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     // P0-P3 增强记忆块：分层摘要树 + 结构化事实 + 角色时间线 + 故事时间线 + 逾期伏笔 + 文笔漂移
     const enhancedMemBlock = buildEnhancedMemoryBlock(novel.id, idx);
 
-    // P0-2: RAG 检索 — 根据本章概要检索相关历史片段
+    // P0-2: RAG 检索 — 检索与"上一章结尾 + 本章概要"最相关的历史片段，作为设定背景参考
+    // 注意：query 若用占位符概要（自动生成占位）会导致检索结果随机、污染正文，须优先用上一章结尾兜底
     let ragBlock = '';
     try {
-      const ragChunks = retrieveRelevant(novel.id, existing?.summary || title, 5, idx);
+      const ragQueryParts = [];
+      const prevTailForRag = db.prepare("SELECT content FROM chapters WHERE novel_id = ? AND chapter_index = ? AND content != ''").get(novel.id, idx - 1)?.content || '';
+      if (prevTailForRag) ragQueryParts.push(String(prevTailForRag).slice(-200));
+      if (existing?.summary && !String(existing.summary).includes('自动生成占位') && !String(existing.summary).includes('根据大纲推进剧情')) {
+        ragQueryParts.push(existing.summary);
+      }
+      if (!ragQueryParts.length) ragQueryParts.push(title);
+      const ragChunks = retrieveRelevant(novel.id, ragQueryParts.join(' '), 4, idx);
       ragBlock = formatRagBlock(ragChunks);
     } catch { /* RAG 检索失败不阻塞 */ }
 
@@ -2203,6 +2211,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       : '';
 
     const userPrompt = `${context}
+${prevTailBlock}
  ${foresBlock}
  ${worldBlock}
  ${kmBlock}
@@ -2212,13 +2221,12 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
  ${ragBlock}
  ${beatsBlock}
  ${referenceBlock}
- ${prevTailBlock}
  
  本章信息：
 - 章节序号：第 ${idx} 章
 - 全书共 ${novel.target_chapters || '?'} 章，当前处于 ${chapterStageLabel(idx, novel.target_chapters)}
 - 章节标题：${title}
-- 本章剧情概要：${existing?.summary || ''}
+- 本章剧情概要：${existing?.summary && !String(existing.summary).includes('自动生成占位') && !String(existing.summary).includes('根据大纲推进剧情') ? existing.summary : '（未提供）——一切情节以衔接上方【上一章结尾】的场面为准'}
 ${existing?.emotion ? `- 本章情绪基调：${existing.emotion}（全章要有意识地营造该情绪氛围，但不能全程紧绷——情绪要有起伏，以该基调为底色）` : ''}
 ${existing?.arc_hint ? `- 本章推进的剧情线：${existing.arc_hint}（本章的戏份应优先围绕这条线展开，其余线索以呼应/推进伏笔为主）` : ''}
 ${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水到渠成地导向这个结尾，收尾时落实到具体场景/物件/对话，让读者想翻下一章）` : ''}
