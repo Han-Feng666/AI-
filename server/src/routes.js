@@ -339,15 +339,35 @@ function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task } = {})
 }
 
 // 续写提示：截取已写末尾，要求紧接续写至自然收尾，不重复内容
-function buildContinuePrompt(full, targetWordsN) {
+// 注入本书角色身份锚点，防止续写时张冠李戴（谁死谁活、谁受伤、谁在场必须与已写正文严格一致）
+function buildCharacterAnchor(chars) {
+  const list = (chars || []).filter((c) => c && c.name).slice(0, 12);
+  if (!list.length) return '';
+  const lines = list.map((c) => `- ${c.name}（${c.role_type || '角色'}）${c.personality ? '：' + c.personality : ''}`);
+  const protagonists = list.filter((c) => String(c.role_type || '').includes('主角')).map((c) => c.name);
+  return `【本书关键角色（续写时严格保持身份，不得张冠李戴）】
+${lines.join('\n')}
+${
+  protagonists.length
+    ? `\n本书主角：${protagonists.join('、')}。正文中角色的生死、伤势、在场状态一律以已写正文为准——谁死谁活、谁受伤、谁做了什么，必须严格对应该角色，严禁把 A 的遭遇写到 B 头上，尤其不得把 NPC 的死亡错写成主角死亡。`
+    : '\n正文中角色的生死、伤势、在场状态一律以已写正文为准，严禁张冠李戴。'
+}`;
+}
+
+function buildContinuePrompt(full, targetWordsN, characters) {
   const tail = String(full).slice(-1200);
+  const anchor = buildCharacterAnchor(characters);
   return `你是本章小说的作者。下面是本章已经写好的正文末尾，你正在一贯地继续往下写，绝无其他人会插入或提供内容——请直接从最后一句话的最后一个字往后接，用同样的人称、视角和文风继续铺陈剧情。
 
 要求：
 - 只写正文，不要写"请提供""【末尾节选】""已写部分未完"之类的说明、不要输出标题、不要总结、不要空行占位、不要回复用户。
 - 承接上一句的语感和情境，自然往下推进，不要重复已经写过的句子。
+- 严格保持角色身份与生死一致性：谁死谁活、谁受伤、谁在场，一律沿用已写正文，不得张冠李戴、不得让已死角色复活、不得把死亡安错到角色头上。
+- 禁止编造不存在的对话回忆：角色"回想起""想起""记得"的对话或事件，必须是本章前面已经明确写过的内容，不得编造本章未出现的对话或事件。如果记不清前面写了什么，就不要写回忆。
+- 角色之间的基本关系（师徒、住所、相识与否等）必须以角色设定为准，不要自行猜测或编造。角色不知道的信息，不要写"他不知道"——而是直接避免涉及该信息。
 - 写到接近目标字数（本章目标约 ${targetWordsN} 字，目前正文已有 ${countWords(full)} 字）后，给本章一个自然的收尾。
 
+${anchor}
 本章当前正文末尾：
 ${tail}`;
 }
@@ -451,6 +471,68 @@ function longestCommonSubstring(a, b) {
     }
   }
   return best;
+}
+
+// 标题是否为"第一章/第2章"式占位（未真正生成标题）
+function isPlaceholderTitle(t) {
+  const s = String(t || '').trim();
+  if (!s) return true;
+  if (/^第[一二三四五六七八九十百千\d零]+章$/.test(s)) return true;
+  if (/^第[一二三四五六七八九十百千\d零]+回$/.test(s)) return true;
+  if (/^(prologue|chapter)\s*\d+$/i.test(s)) return true;
+  return false;
+}
+
+// 正文与知识库/风格库样本原文的重复检测：防止模型把参考作品原文照抄进本书正文
+// 返回：抽样 5 段样本，统计与正文的公共子串长度，任一 ≥ copyThreshold 判定照抄
+function detectSampleCopy(full, samplesText, copyThreshold = 25) {
+  const text = String(full || '');
+  const samples = String(samplesText || '');
+  if (!text || !samples || text.length < 40) return { copied: false, quote: '' };
+  const cleanText = (t) => t.replace(/\s+/g, '');
+  const ct = cleanText(text);
+  const cs = cleanText(samples);
+  // 分块取样，避免整段比对超时
+  const chunks = [];
+  const step = Math.max(200, Math.floor(cs.length / 5));
+  for (let i = 0; i < cs.length; i += step) {
+    chunks.push(cs.slice(i, i + step));
+    if (chunks.length >= 5) break;
+  }
+  let bestLen = 0;
+  let bestQuote = '';
+  for (const chunk of chunks) {
+    if (chunk.length < copyThreshold) continue;
+    const common = longestCommonSubstring(ct, chunk);
+    if (common.length > bestLen) {
+      bestLen = common.length;
+      bestQuote = common;
+    }
+  }
+  if (bestLen >= copyThreshold) return { copied: true, quote: bestQuote.slice(0, 60), len: bestLen };
+  return { copied: false, quote: '' };
+}
+
+// 英文指令/系统提示泄漏检测：模型把"内部话术"当成正文输出
+const LEAK_PATTERNS = [
+  /\bThe user wants me to[\s\S]{0,24}/i,
+  /\bAs an AI[\s\S]{0,40}/i,
+  /\bI (?:am|will|should|need to|cannot|can't|must|am going to|would like to)[\u4e00-\u9fff\s]{0,24}/i,
+  /\b(?:system|user|assistant)\s*[:：]/i,
+  /(?:以下是|以下为|下面是|下面为)[\s\S]{0,10}(?:正文|内容|本章|章节|小说|故事|片段)/,
+  /(?:让我来|我来为你|我为您|为您|为你)[\s\S]{0,10}(?:生成|创作|写一|写作|完成|输出|提供|展开|续写)/,
+  /(?:好的|没问题)[，,：:\s]{0,5}(?:下面|接下来|现在|那么|我|让)[\s\S]{0,24}(?:生成|创作|写|完成|输出|提供|正文)/,
+  /^(?:我将|我要|我来)(?:继续|开始|接着)(?:为你|为您)?(?:生成|创作|写|完成)/,
+  /(?:本章|本段|以下|上面|上述)(?:正文|内容|文字)(?:如下|为：|为:|如下所示)/
+];
+function detectEnglishLeak(full) {
+  const text = String(full || '').trim();
+  if (!text) return { leaked: false, quote: '' };
+  for (const re of LEAK_PATTERNS) {
+    const m = text.match(re);
+    if (m) return { leaked: true, quote: m[0].slice(0, 60) };
+  }
+  return { leaked: false, quote: '' };
 }
 
 // 新增伏笔去重：与已存在的 open 伏笔高度相似则不重复插入，返回是否插入
@@ -1139,7 +1221,7 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
         return s ? `【片段】${s.slice(0, 500)}` : null;
       }).filter(Boolean).join('\n');
     }
-    const planKnowledgeBlock = knowledgeBlock + (planSamples ? `\n\n【已导入小说剧情参考（参考其节奏与冲突设置，不抄袭）】\n${planSamples}` : '');
+    const planKnowledgeBlock = knowledgeBlock + (planSamples ? `\n\n【已导入小说剧情参考（仅借鉴其节奏与冲突设置，禁止照抄剧情、禁止使用其中任何人物名/地名/情节）】\n${planSamples}` : '');
     if (planKnowledgeBlock) {
       send({ type: 'status', message: '已加载知识学习库参考，正在生成方案…' });
     }
@@ -2007,7 +2089,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 
   // 章节标题：优先级 覆盖标题 > 已有标题 > 大纲占位 > AI 生成
   let title = overrideTitle && String(overrideTitle).trim() ? String(overrideTitle).trim()
-    : (existing && existing.title && !existing.content ? existing.title : null);
+    : (existing && existing.title && !existing.content && !isPlaceholderTitle(existing.title) ? existing.title : null);
 
   try {
     if (!title) {
@@ -2015,7 +2097,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       send({ type: 'progress', progress: 10, message: `正在构思第 ${idx} 章标题…` });
       const planned = novel.outline && Array.isArray(novel.outline) ? null : null;
       const planChapter = db.prepare('SELECT title, summary FROM chapters WHERE novel_id = ? AND chapter_index = ?').get(novel.id, idx);
-      if (planChapter?.title) {
+      if (planChapter?.title && !isPlaceholderTitle(planChapter.title)) {
         title = planChapter.title;
       } else {
         const prevChapterTitle = db.prepare("SELECT title FROM chapters WHERE novel_id = ? AND chapter_index = ? AND content != ''").get(novel.id, idx - 1);
@@ -2033,7 +2115,25 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         let rawTitle = (tRes.content || '').trim();
         // 清理标题：去掉引号、书名号、章节前缀（中文数字和阿拉伯数字）
         rawTitle = rawTitle.replace(/["'《》「」『』]/g, '').replace(/^第[一二三四五六七八九十百千\d]+章\s*/g, '').replace(/\n+/g, ' ').trim();
-        title = rawTitle.slice(0, 15) || `第${idx}章`;
+        title = rawTitle.slice(0, 15);
+        if (!title || isPlaceholderTitle(title)) {
+          // 第一次标题生成失败或仍为占位（模型偷懒只输出"第N章"），带剧情概要重试一次
+          try {
+            const retryCtx = `小说：《${novel.title}》（${novel.genre}）\n\n第 ${idx} 章剧情概要：${planChapter?.summary || existing?.summary || '承接前文继续推进'}\n\n请为这一章拟一个 4-15 字的自然标题，像真人作者随手起的，只输出标题本身。`;
+            const tRes2 = await chat({
+              config,
+              messages: [
+                { role: 'system', content: CHAPTER_TITLE_SYSTEM },
+                { role: 'user', content: retryCtx }
+              ],
+              maxTokens: 100
+            });
+            let raw2 = (tRes2.content || '').trim();
+            raw2 = raw2.replace(/["'《》「」『』]/g, '').replace(/^第[一二三四五六七八九十百千\d]+章\s*/g, '').replace(/\n+/g, ' ').trim();
+            title = raw2.slice(0, 15);
+          } catch { title = ''; }
+        }
+        if (!title || isPlaceholderTitle(title)) title = ''; // 留空，正文生成后按内容补拟
       }
     }
 
@@ -2115,16 +2215,25 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     let knowledgeSamples = '';
     let plotReferenceBlock = '';
     if (knowledgeIds.length) {
-      knowledgeSamples = knowledgeIds.map((id) => getSampleSnippets(id, 5000)).filter(Boolean).join('\n\n---\n\n').slice(0, 12000);
-      // 汇总剧情参考：从各知识库提取可借鉴的剧情结构信息
+      knowledgeSamples = knowledgeIds.map((id) => getSampleSnippets(id, 1800)).filter(Boolean).join('\n\n---\n\n').slice(0, 5000);
+      // 汇总剧情参考：从各知识库提取可借鉴的剧情结构信息（只取结构描述，不注入含角色的原文片段）
       const plotRefs = knowledgeIds.map((id) => {
         const snippets = getSampleSnippets(id, 2000);
         if (!snippets) return null;
         const firstScene = snippets.split('\n\n')[0] || '';
-        return firstScene.slice(0, 300);
+        // 仅保留不含中文人名迹象的纯叙述句段，避免把其他作品角色名带进本书
+        const lines = firstScene.split('\n').filter((l) => {
+          const s = l.trim();
+          if (!s || s.length < 8) return false;
+          // 含典型对话引导词或常见人名用字比例高的行跳过
+          if (/[:：]"/.test(s) || /"[:：]/.test(s)) return false;
+          return true;
+        });
+        const brief = lines.slice(0, 3).join(' ').slice(0, 200);
+        return brief || null;
       }).filter(Boolean);
       if (plotRefs.length) {
-        plotReferenceBlock = `\n\n【已导入同类小说的剧情结构参考（参考其开场方式、悬念设置、冲突推进节奏，不要抄袭具体情节）】\n${plotRefs.join('\n\n---\n\n')}`;
+        plotReferenceBlock = `\n\n【已导入同类小说的剧情结构参考（仅概括其节奏特点，属其他作品——其中出现的人物/地名/情节一律不得用于本书正文）】\n${plotRefs.join('\n')}`;
       }
     }
     const chapterSysOpts = {
@@ -2212,6 +2321,14 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 
     const userPrompt = `${context}
 ${prevTailBlock}
+【角色隔离铁律（必须严格遵守）】
+- 本书能出现的角色，只限上方【主要角色】【角色档案】中列出的本书角色。
+- 任何参考作品/样本/搜索结果中出现的人物名、地名、组织名、势力名、物品名（即使眼熟），一律禁止写进本书正文。
+- 若记不清某角色是否属于本书，宁可不用，也不要冒用参考作品中的名字。
+【角色记忆铁律】
+- 禁止编造不存在的对话回忆：角色"回想起""想起""记得"的对话或事件，必须是本章前面已经明确写过的内容，不得编造本章未出现的对话或事件。
+- 角色之间的基本关系（师徒、住所、相识与否）必须以【角色档案】中的设定为准，角色不知道的信息不要写"他不知道"——直接避免涉及该信息。
+- 角色说过的每一句话必须在本章正文中有明确出处，不得让角色"想起"本章未发生过的对话。
  ${foresBlock}
  ${worldBlock}
  ${kmBlock}
@@ -2226,6 +2343,7 @@ ${prevTailBlock}
 - 章节序号：第 ${idx} 章
 - 全书共 ${novel.target_chapters || '?'} 章，当前处于 ${chapterStageLabel(idx, novel.target_chapters)}
 - 章节标题：${title}
+- 本书主角：${characters.filter((c) => String(c.role_type || '').includes('主角')).map((c) => c.name).join('、') || '（见【主要角色】中 role_type 为"主角"的角色）'}
 - 本章剧情概要：${existing?.summary && !String(existing.summary).includes('自动生成占位') && !String(existing.summary).includes('根据大纲推进剧情') ? existing.summary : '（未提供）——一切情节以衔接上方【上一章结尾】的场面为准'}
 ${existing?.emotion ? `- 本章情绪基调：${existing.emotion}（全章要有意识地营造该情绪氛围，但不能全程紧绷——情绪要有起伏，以该基调为底色）` : ''}
 ${existing?.arc_hint ? `- 本章推进的剧情线：${existing.arc_hint}（本章的戏份应优先围绕这条线展开，其余线索以呼应/推进伏笔为主）` : ''}
@@ -2263,16 +2381,23 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       full = '';
       finishReason = 'stop';
       const attemptPrompt = isRegen ? userPrompt + '\n\n' + buildRegenFeedback(lastProblems) : userPrompt;
+      // 若上一版因"照抄参考作品/英文泄漏"被拒，重生成时剔除知识库样本原文（只保留分析），避免模型再次照抄
+      let regenSysOpts = chapterSysOpts;
+      if (isRegen && lastProblems.some((p) => /照抄|参考作品|英文话术|内部指令|跑飞/.test(String(p.desc)))) {
+        try {
+          regenSysOpts = { ...chapterSysOpts, knowledgeBlock: formatKnowledgeBlock(knowledgeIds) };
+        } catch { /* 保持原样 */ }
+      }
       // 自动续写：单次输出被 max_tokens 截断（finish_reason=length）时继续往下写，直到达到目标字数或模型自然收尾
       for (let round = 0; round < 8; round++) {
         const msgs = round === 0
           ? [
-              { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), chapterSysOpts) },
+              { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), regenSysOpts) },
               { role: 'user', content: attemptPrompt }
             ]
           : [
-              { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), chapterSysOpts) },
-              { role: 'user', content: buildContinuePrompt(full, targetWordsN) }
+              { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), regenSysOpts) },
+              { role: 'user', content: buildContinuePrompt(full, targetWordsN, characters) }
             ];
         if (round > 0) {
           send({ type: 'status', message: `正在续写第 ${idx} 章剩余部分…` });
@@ -2345,6 +2470,28 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
           problems.push({ desc: `本章开头与上一章开头高度相似（重复${overlap.length}字），疑似重复上一章内容，须从上一章结尾之后的时间点续写，不得倒退重写` });
         }
       }
+
+      // 0) 参考作品照抄检测：正文与知识库/风格库样本原文大量重复，说明模型把参考作品当正文写了
+      try {
+        const copySources = [knowledgeSamples, plotReferenceBlock, referenceBlock, String(novel.style_samples || '')].filter((x) => x && String(x).trim().length > 30);
+        if (copySources.length) {
+          for (const src of copySources) {
+            const cp = detectSampleCopy(full, src, 30);
+            if (cp.copied) {
+              problems.push({ desc: `正文与已导入的参考作品/知识库原文重复 ${cp.len} 字（"${cp.quote}…"），疑似把参考样本当成本章正文照抄，须完全用自己的话重写，严禁沿用参考作品中的人物、场景与设定` });
+              break;
+            }
+          }
+        }
+      } catch { /* 照抄检测失败不阻塞 */ }
+
+      // 0b) 英文指令/系统话术泄漏检测：模型把内部指令当正文输出
+      try {
+        const leak = detectEnglishLeak(full);
+        if (leak.leaked) {
+          problems.push({ desc: `正文混入模型内部指令/英文话术（"${leak.quote}"），属生成跑飞，须整章重写，只保留纯小说正文` });
+        }
+      } catch { /* 泄漏检测失败不阻塞 */ }
 
       // 1) 题材跑题检测
       try {
@@ -2436,6 +2583,26 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
 
       // 已达重试上限：保存当前版本并提示，允许用户后续再手动修改
       send({ type: 'status', message: `已自动重试 ${MAX_AUTO_REGENERATE} 次仍有 ${problems.length} 处问题，先保存当前版本，可在章节操作中继续修改。` });
+    }
+
+    // 标题兜底：正文生成完毕后，若标题仍为空/占位（方案阶段偷懒生成"第N章"），用本章正文拟标题
+    if (!title || isPlaceholderTitle(title)) {
+      try {
+        send({ type: 'status', message: `正在根据本章内容补拟标题…` });
+        const headForTitle = full.replace(/^\s*第[一二三四五六七八九十百千\d]+章\s*/, '').trim().slice(0, 1200);
+        const tRes3 = await chat({
+          config,
+          messages: [
+            { role: 'system', content: CHAPTER_TITLE_SYSTEM },
+            { role: 'user', content: `小说：《${novel.title}》（${novel.genre}）\n\n第 ${idx} 章正文开头：\n${headForTitle}\n\n请根据本章内容拟一个 4-15 字的自然标题，像真人作者随手起的，只输出标题本身。` }
+          ],
+          maxTokens: 100
+        });
+        let raw3 = (tRes3.content || '').trim();
+        raw3 = raw3.replace(/["'《》「」『』]/g, '').replace(/^第[一二三四五六七八九十百千\d]+章\s*/g, '').replace(/\n+/g, ' ').trim();
+        const t3 = raw3.slice(0, 15);
+        if (t3 && !isPlaceholderTitle(t3)) title = t3;
+      } catch { /* 补拟失败不阻塞，落库用原占位 */ }
     }
 
     // 保存章节（质检通过或达上限后的最终版）
@@ -5133,11 +5300,11 @@ router.get('/search/settings', (req, res) => {
 // 同类小说参考搜索：自动搜索网络热门同类小说供创作参考
 function formatSearchReference(results, genre) {
   if (!results || !results.length) return '';
-  const lines = [`【同类小说参考（${genre}题材热门作品）】`];
+  const lines = [`【同类小说参考（${genre}题材热门作品）——仅供节奏与结构参考，属其他作品】`];
   for (const r of results) {
-    if (r.title) lines.push(`- 《${r.title}》：${r.snippet || '（暂无简介）'}`);
+    if (r.title) lines.push(`- 《${r.title}》（可在网上搜索该书名了解其节奏与题材热度，正文中严禁出现该书任何人物/情节）`);
   }
-  lines.push('\n参考以上作品的节奏、冲突设置和人物关系手法，但不要抄袭具体情节。');
+  lines.push('\n参考以上作品的节奏、冲突设置和人物关系手法。这些是其他作品，书中的人物、地名、组织、情节一律不得出现在本书正文中。');
   return lines.join('\n');
 }
 

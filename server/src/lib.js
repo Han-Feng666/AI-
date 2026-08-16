@@ -380,8 +380,9 @@ export function scanAiSentenceTemplates(text) {
 // 段落节奏检测：真人文字段落长短错落；AI 易连续多段同样长度（过短或过匀）
 export function scanParagraphRhythm(text) {
   const s = String(text || '');
-  // 按空行分段
-  const paras = s.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
+  // 按空行分段，并剥离纯对话段（对话短段是正常写法）
+  const paras = s.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0)
+    .filter((p) => !/^["""''「『【（][^""""''」』】）]*["""''」』】）]?$/.test(p));
   const hits = [];
   if (paras.length < 5) return hits;
   // 1) 连续 ≥5 段都 < 30 字（鸡零狗碎的碎片化）
@@ -404,7 +405,7 @@ export function scanParagraphRhythm(text) {
 // 句首重复检测：AI 极易连续多句以同一词/同一代词开头（"他…他…他…""然后…然后…"）
 export function scanSentenceOpeners(text) {
   const s = String(text || '');
-  const sentences = s.split(/[。！？!?；\n]+/).map((x) => x.trim()).filter((x) => x.length >= 2);
+  const sentences = stripDialogue(s).split(/[。！？!?；\n]+/).map((x) => x.trim()).filter((x) => x.length >= 2);
   if (sentences.length < 10) return [];
   const hits = [];
   // 连续 ≥5 句以相同 1-2 字开头
@@ -469,6 +470,99 @@ export function scanVerboseFrames(text) {
   return hits;
 }
 
+// 软副词堆砌检测：AI 爱给每个动作都套"缓缓/轻轻/微微/淡淡/悄悄"，真人只在关键处用。
+// 密度超过阈值才判定，避免误伤正常使用。
+export function scanSoftAdverbOveruse(text) {
+  const s = String(text || '');
+  const hits = [];
+  const countRe = (re) => { const m = s.match(re); return m ? m.length : 0; };
+  const wei = countRe(/微微/g);
+  const huan = countRe(/缓缓/g);
+  const qing = countRe(/轻轻/g);
+  const dan = countRe(/淡淡(?:地|的)?/g);
+  const qiao = countRe(/悄悄/g);
+  const total = wei + huan + qing + dan + qiao;
+  if (wei >= 5) hits.push({ word: `"微微"滥用(${wei} 处，AI 最爱用"微微一愣/微微点头/微微勾唇")`, count: wei, template: true });
+  if (huan >= 4) hits.push({ word: `"缓缓"滥用(${huan} 处，"缓缓开口/缓缓抬起/缓缓吐出一口气"AI 流水线）`, count: huan, template: true });
+  if (qing >= 5) hits.push({ word: `"轻轻"滥用(${qing} 处)`, count: qing, template: true });
+  if (dan >= 4) hits.push({ word: `"淡淡"滥用(${dan} 处，"淡淡地说/淡淡地扫了一眼")`, count: dan, template: true });
+  if (total >= 12) hits.push({ word: `软副词总量超限(全文 ${total} 处"微微/缓缓/轻轻/淡淡/悄悄"，动作过于"轻拿轻放")`, count: total, template: true });
+  return hits;
+}
+
+// 抽象情绪量词堆砌：AI 爱把情绪抽象成"一丝/一抹/一股+情绪词"（一丝慌乱、一抹冷笑、一股寒意）。
+// 真人更常写具体的身体反应。密度超限即判定。
+export function scanAbstractEmotionQuant(text) {
+  const s = String(text || '');
+  const hits = [];
+  const pats = [
+    { re: /一(?:丝|抹|缕|股|点|分|层)(?:紧张|慌乱|不安|恐惧|凉意|寒意|杀意|怒意|苦涩|酸楚|惊讶|错愕|尴尬|担忧|心虚|悔意|倦意|疲惫|笑意|讥诮|嘲讽|戏谑|温柔|暖意|窃喜)/g, label: '一丝XX式情绪抽象' },
+    { re: /(?:一丝|一抹|一股|一缕)(?:不易察觉|难以掩饰|若有若无|稍纵即逝|转瞬即逝)/g, label: '不易察觉式修饰' }
+  ];
+  for (const p of pats) {
+    const m = s.match(p.re);
+    if (m && m.length >= 3) hits.push({ word: `${p.label}堆砌(${m.length} 处，情绪应写成具体身体反应而非抽象量词)`, count: m.length, template: true });
+  }
+  // "眼里闪过一丝XX"整句式
+  const yanse = s.match(/(?:眼(?:中|里|底)|眸(?:中|里|底))闪过.{0,4}(?:一丝|一抹|一道)/g) || [];
+  if (yanse.length >= 2) hits.push({ word: `"眼里闪过一丝XX"句式(${yanse.length} 处，AI 高频套路)`, count: yanse.length, template: true });
+  return hits;
+}
+
+// 排比/对仗堆砌：AI 爱连续三连/四连排比（"不是…而是…""既…又…""没有…也没有…"），
+// 一页内出现 3 组以上即判定。
+export function scanParallelOveruse(text) {
+  const s = String(text || '');
+  const hits = [];
+  const countRe = (re) => { const m = s.match(re); return m ? m.length : 0; };
+  const buShi = countRe(/不是[^。！？]{2,16}[，,]\s*(?:而是|不是)[^。！？]{2,16}(?:[，,]|。)/g);
+  const jiYou = countRe(/(?:既|又|也|还|更)[^。！？]{2,10}[，,]\s*(?:又|也|还|更)[^。！？]{2,10}/g);
+  const meiYou = countRe(/没有[^。！？]{2,14}[，,]\s*没有[^。！？]{2,14}/g);
+  const run = countRe(/似乎[^。！？]{2,12}[，,]\s*(?:似乎|好像)[^。！？]{2,12}/g);
+  const total = buShi + jiYou + meiYou + run;
+  if (total >= 4) hits.push({ word: `排比对仗堆砌(全文 ${total} 组"不是…而是/既…又…/没有…没有…"，真人不会连用)`, count: total, template: true });
+  return hits;
+}
+
+// 段落尾"总结句/升华句"：AI 爱在段落或章节末突然拔高（"从这一刻起…""这注定…""仿佛一切都…"）。
+export function scanElevationClosers(text) {
+  const s = String(text || '');
+  const hits = [];
+  const pats = [
+    { re: /(?:从)?(?:这|那)一刻起[^。！？]{0,20}/g, label: '"从这一刻起"升华' },
+    { re: /(?:这|那|此)时[^。！？]{0,6}(?:注定|终将|终于|再也)?[^。！？]{0,4}(?:一切|命运|人生)/g, label: '"此时…一切/命运"拔高' },
+    { re: /仿佛(?:整个|一切|整个世界|所有的)[^。！？]{0,16}/g, label: '"仿佛整个世界"式' },
+    { re: /(?:他|她|我)?(?:知道|明白)[^。！？]{0,8}(?:再也|终将|终究|迟早)[^。！？]{0,12}/g, label: '"知道…再也/终将"预判' }
+  ];
+  for (const p of pats) {
+    const m = s.match(p.re);
+    if (m && m.length >= 2) hits.push({ word: `${p.label}句式(${m.length} 处，段落末/章末不宜拔高总结)`, count: m.length, template: true });
+  }
+  return hits;
+}
+
+// 语气感叹句堆砌：AI 爱用"啊/呀/吧/呢"配合感叹号制造情绪，真人只在真激动处用。
+export function scanExclamationFlavor(text) {
+  const s = String(text || '');
+  const hits = [];
+  const countRe = (re) => { const m = s.match(re); return m ? m.length : 0; };
+  const excl = countRe(/[^。！？]！/g);
+  const softExcl = countRe(/(?:啊|呀|吧|呢|哦|噢)[！!]/g);
+  if (excl >= 15) hits.push({ word: `感叹号过密(全文 ${excl} 个"！"，情绪在尖叫不克制)`, count: excl, template: true });
+  if (softExcl >= 5) hits.push({ word: `语气词+叹号堆砌(${softExcl} 处"啊!/呀!/吧!"，口语情绪被 AI 加满)`, count: softExcl, template: true });
+  return hits;
+}
+
+// 叙述句"我看见/他看到/她发现"引导过多：AI 爱用"他看到…""他发现…"把每件事都过一遍眼睛。
+export function scanPerceptionLed(text) {
+  const s = String(text || '');
+  const hits = [];
+  const countRe = (re) => { const m = s.match(re); return m ? m.length : 0; };
+  const kan = countRe(/(?:他|她|我|它)(?:一?眼)?(?:看到|看见|瞥见|瞧见|望见|发觉|发现)/g);
+  if (kan >= 6) hits.push({ word: `"他看到/她发现"引导句过密(${kan} 处，视角透出太多"眼睛")`, count: kan, template: true });
+  return hits;
+}
+
 // 年代/题材串戏意象检测：AI 生成长篇时易在非古代题材中顽固混入市井古代元素
 const TOPIC_DRIFT_WORDS = ['老六', '烟锅', '烟杆', '门槛', '铜钱', '镖局', '镖师', '客栈', '青石板', '扁担', '水缸', '红绳', '布衫', '当铺', '账房', '前清', '抽屉凳', '油灯芯', '纺车', '租子', '佃户'];
 // 现代/都市/悬疑/恐怖等题材不应出现这些元素；玄幻/仙侠/都市修仙等题材的"老江湖"意象判断交给 prompt 与人工
@@ -512,15 +606,28 @@ export function scanAiPatterns(text) {
   hits.push(...scanSentenceOpeners(text));
   hits.push(...scanTransitionOveruse(text));
   hits.push(...scanVerboseFrames(text));
+  hits.push(...scanSoftAdverbOveruse(text));
+  hits.push(...scanAbstractEmotionQuant(text));
+  hits.push(...scanParallelOveruse(text));
+  hits.push(...scanElevationClosers(text));
+  hits.push(...scanExclamationFlavor(text));
+  hits.push(...scanPerceptionLed(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
+  // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
-  if (allParas.length >= 4) {
-    const avgLen = allParas.reduce((s, p) => s + p.length, 0) / allParas.length;
-    if (avgLen < 50) {
-      hits.push({ word: `段落碎片化(平均每段${Math.round(avgLen)}字，共${allParas.length}段，应合并短段)`, count: Math.round(50 / avgLen) });
+  const narrParas = allParas.filter((p) => !/^["""''「『【（][^""""''」』】）]*["""''」』】）]?$/.test(p));
+  if (narrParas.length >= 6) {
+    const avgLen = narrParas.reduce((s, p) => s + p.length, 0) / narrParas.length;
+    if (avgLen < 40) {
+      hits.push({ word: `段落碎片化(叙述段平均每段${Math.round(avgLen)}字，共${narrParas.length}段，应合并短段)`, count: Math.round(50 / avgLen) });
     }
   }
   return hits.sort((a, b) => b.count - a.count);
+}
+
+// 剥离引号内对话内容，避免"对话短句/短段"干扰短句切割与碎片化检测（对话短句是正常写作）
+function stripDialogue(text) {
+  return String(text || '').replace(/["""''「『【（][^""""''」』】）]*["""''」』】）]/g, '');
 }
 
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
@@ -540,7 +647,8 @@ export function scanAiPunctuation(text) {
   const half = s.match(/[\u4e00-\u9fff][,.!?][\u4e00-\u9fff]/g) || [];
   if (half.length) hits.push({ word: '半角标点混入', count: half.length });
   // 句号过度切割短句（网文标点规范硬检测）：连续 ≥3 句超短句（<8字）都落在<10字的片段内
-  const sentLike = s.split(/[。！？!?\n]+/).map((x) => x.trim()).filter((x) => x.length > 2);
+  // 先剥离引号对话，对话短句（"好。""嗯。""走吧。"）是正常写法，不算碎片
+  const sentLike = stripDialogue(s).split(/[。！？!?\n]+/).map((x) => x.trim()).filter((x) => x.length > 2);
   let shortRun = 0;
   let startIdx = -1;
   let bestStart = -1;

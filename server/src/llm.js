@@ -29,8 +29,8 @@ const PROVIDER_PRESETS = {
   deepseek: {
     name: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com',
-    model: 'deepseek-chat',
-    note: '推理能力强，性价比高，适合长文创作'
+    model: 'deepseek-v4-pro',
+    note: '推理能力强，性价比高，适合长文创作（deepseek-chat 已停用，改用 v4 系列）'
   },
   moonshot: {
     name: 'Moonshot (Kimi)',
@@ -182,19 +182,29 @@ export async function chat(opts) {
 
   // 思考功能：按 provider/模型注入对应参数（不支持的环境静默忽略，避免 400）
   const reasoning = String(cfg.reasoning || 'off').toLowerCase();
+  const model = String(cfg.model || '').toLowerCase();
+  // DeepSeek V4 系列（deepseek-v4-pro / deepseek-v4-flash）：思考参数为 extra_body.thinking + reasoning_effort
+  const isDeepSeekV4 = /deepseek[-._]?v4[-._]?(pro|flash)?/.test(model);
+  // 旧版模型名：deepseek-chat（非思考）/ deepseek-reasoner（思考）
+  const isDeepSeekLegacy = /deepseek-chat|deepseek[-._]?reasoner/.test(model);
   if (reasoning !== 'off') {
-    const model = String(cfg.model || '').toLowerCase();
     if (cfg.provider === 'ollama') {
       body.think = true;
     } else if (cfg.provider === 'qwen') {
       body.enable_thinking = true;
+    } else if (isDeepSeekV4) {
+      // DeepSeek V4 思考模式：官方参数
+      body.thinking = { type: 'enabled' };
+      body.reasoning_effort = reasoning;
     } else if (/o1|o3|o4|gpt-5|thinking/.test(model)) {
       body.reasoning_effort = reasoning;
     }
   } else {
     // reasoning=off 时，对支持思考的模型显式关闭，防止默认思考吞掉 max_tokens
-    const model = String(cfg.model || '').toLowerCase();
-    if (/deepseek.*r|reasoner|deepseek-chat/.test(model)) {
+    if (isDeepSeekV4) {
+      body.thinking = { type: 'disabled' };
+      body.enable_thinking = false; // 兼容旧网关/中转
+    } else if (isDeepSeekLegacy) {
       body.enable_thinking = false;
     }
   }
