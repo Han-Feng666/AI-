@@ -3940,17 +3940,16 @@ router.post('/styles', async (req, res) => {
     chunks.push(text.slice(i, i + chunkSize));
   }
 
-  send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析写作风格（全文 ${text.length} 字，${chunks.length} 块，每块约 ${chunkSize} 字，每批 5 块并发）…` });
+  send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析写作风格（全文 ${text.length} 字，${chunks.length} 块，每块约 ${chunkSize} 字，每批 5 块并发处理）…` });
 
   try {
     const partialResults = [];
     const concurrency = 5;
+    let doneChunks = 0;
 
     for (let batchStart = 0; batchStart < chunks.length; batchStart += concurrency) {
       const batchEnd = Math.min(batchStart + concurrency, chunks.length);
       const batch = chunks.slice(batchStart, batchEnd);
-      const pct = 5 + Math.round((batchEnd / chunks.length) * 70);
-      send({ type: 'progress', progress: pct, message: `分析中（第 ${batchStart + 1}-${batchEnd}/${chunks.length} 块）…` });
 
       const tasks = batch.map((chunk, idx) =>
         (async () => {
@@ -3989,6 +3988,8 @@ router.post('/styles', async (req, res) => {
         }
         if (result.value) partialResults.push(result.value);
       }
+      doneChunks += batch.length;
+      send({ type: 'progress', progress: 5 + Math.round((doneChunks / chunks.length) * 70), message: `分析中（${doneChunks}/${chunks.length} 块完成）…` });
     }
 
     if (!partialResults.length) {
@@ -4809,16 +4810,15 @@ router.post('/knowledge/import', async (req, res) => {
       return end({ type: 'done', data: { corpus, analysis: report, offline: true } });
     }
 
-    send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析（全文 ${text.length} 字，${chunks.length} 块，每批 5 块并发）…` });
+    send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析（全文 ${text.length} 字，${chunks.length} 块，每批 5 块并发处理）…` });
 
     const partialResults = [];
     const concurrency = 5;
+    let doneChunks = 0;
 
     for (let batchStart = 0; batchStart < chunks.length; batchStart += concurrency) {
       const batchEnd = Math.min(batchStart + concurrency, chunks.length);
       const batch = chunks.slice(batchStart, batchEnd);
-      const pct = Math.round((batchEnd / chunks.length) * 70);
-      send({ type: 'progress', progress: pct, message: `分析中（第 ${batchStart + 1}-${batchEnd}/${chunks.length} 块）…` });
 
       const tasks = batch.map((chunk, idx) =>
         (async () => {
@@ -4857,6 +4857,8 @@ router.post('/knowledge/import', async (req, res) => {
         }
         if (result.value) partialResults.push(result.value);
       }
+      doneChunks += batch.length;
+      send({ type: 'progress', progress: 5 + Math.round((doneChunks / chunks.length) * 70), message: `分析中（${doneChunks}/${chunks.length} 块完成）…` });
     }
 
     if (!partialResults.length) {
