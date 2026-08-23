@@ -316,7 +316,10 @@ export async function chat(opts) {
       throw new Error(`接口不存在（HTTP 404）：请检查 Base URL 与模型名是否拼写正确。${detail}`);
     }
     if (resp.status === 429) {
-      throw new Error(`请求过于频繁或额度不足（HTTP 429）：请稍后重试或检查余额。${detail}`);
+      const err = new Error(`请求过于频繁或额度不足（HTTP 429）：请稍后重试或检查余额。${detail}`);
+      const retryAfter = Number(resp.headers?.get?.('retry-after'));
+      if (Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfter = retryAfter;
+      throw err;
     }
     if (resp.status === 503 && /model_not_found|no available channel/i.test(detail)) {
       throw new Error(`模型不可用（HTTP 503）：当前 API 网关没有渠道提供「${cfg.model}」这个模型。模型名大小写敏感、且中转站模型名可能与官方不同（如 Kimi-K2.6 / DeepSeek-V4-Flash）。请到设置页点击“获取模型列表”，选择列表中的准确名称。${detail}`);
