@@ -40,7 +40,8 @@
     "win": {
       "target": [
         { "target": "nsis", "arch": ["x64"] }
-      ]
+      ],
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": false,
