@@ -224,6 +224,26 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_novel ON generation_jobs(novel_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON generation_jobs(status);
 
+-- 生成资源观测：每次章节生成记录续写轮数与触发分布，用于调阈值/成本观测
+CREATE TABLE IF NOT EXISTS generation_stats (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  novel_id INTEGER,
+  chapter_index INTEGER,
+  stage TEXT DEFAULT '',
+  rounds INTEGER DEFAULT 0,
+  state TEXT DEFAULT '',
+  pipe_reason TEXT DEFAULT '',
+  rs_model TEXT DEFAULT '',
+  start_words INTEGER DEFAULT 0,
+  target_words INTEGER DEFAULT 0,
+  seamless_words INTEGER DEFAULT 0,
+  ms_connecting INTEGER DEFAULT 0,
+  duration_ms INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_gen_stats_time ON generation_stats(created_at);
+CREATE INDEX IF NOT EXISTS idx_gen_stats_novel ON generation_stats(novel_id);
+
 CREATE TABLE IF NOT EXISTS manager_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   novel_id INTEGER,
@@ -395,11 +415,11 @@ ensureColumn('novels', 'style_samples', "style_samples TEXT DEFAULT ''");
 ensureColumn('novels', 'style_presets', "style_presets TEXT DEFAULT ''");
 ensureColumn('chapters', 'ai_score', 'ai_score INTEGER DEFAULT NULL');
 ensureColumn('chapters', 'beats', "beats TEXT DEFAULT ''");
+ensureColumn('styles', 'style_samples', "style_samples TEXT DEFAULT ''");
 ensureColumn('novels', 'length_class', "length_class TEXT DEFAULT 'long'");
 ensureColumn('novels', 'constitution', "constitution TEXT DEFAULT ''");
 ensureColumn('characters', 'shared_id', 'shared_id INTEGER DEFAULT NULL');
 ensureColumn('foreshadowings', 'expected_recall_chapter', "expected_recall_chapter INTEGER");
-ensureColumn('adaptation_jobs', 'plans', "plans TEXT DEFAULT ''");
 
 // ===== 知识学习库（导入小说学习文笔/剧情/逻辑） =====
 db.exec(`
@@ -428,6 +448,75 @@ CREATE TABLE IF NOT EXISTS knowledge_samples (
 CREATE INDEX IF NOT EXISTS idx_knowledge_samples ON knowledge_samples(corpus_id, chunk_index);
 `);
 ensureColumn('novels', 'knowledge_corpus_ids', "knowledge_corpus_ids TEXT DEFAULT ''");
+ensureColumn('novels', 'skill_ids', "skill_ids TEXT DEFAULT '[]'");
+
+// ===== 技能库 =====
+db.exec(`
+CREATE TABLE IF NOT EXISTS skills (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'technique',
+  description TEXT DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  tags TEXT DEFAULT '',
+  usage_count INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+`);
+
+// 预设技能种子数据
+const skillCount = db.prepare('SELECT COUNT(*) as c FROM skills').get().c;
+if (skillCount === 0) {
+  const seedSkills = [
+    {
+      name: '悬念设置技巧',
+      type: 'technique',
+      description: '章末钩子、信息揭露节奏、伏笔回收，让读者欲罢不能',
+      content: '每章结尾必须留一个具体的悬念钩子——不是"他发现了真相"，而是"他拆开包裹，里面躺着一枚刻着他名字的铜牌"。信息揭露遵循"先露一角→逐步展开→反转"的节奏，每个悬念在 3-5 章内要有推进或回应。钩子可以是危机降临、新谜团出现、关键人物登场或一个惊人发现，但不能为制造悬念而违背逻辑。',
+      tags: '悬念,剧情,节奏,钩子'
+    },
+    {
+      name: '对话写作技法',
+      type: 'technique',
+      description: '让角色对话自然生动、符合人物性格，告别工具化对白',
+      content: '每个角色的说话方式由其性格、身份和情绪决定，不能千人一面。对话有潜台词——角色真正想说的往往不是字面意思。紧张场景对话短促有力，舒缓场景允许长句慢节奏。对话必须有冲突或目的，纯寒暄的对话应该删掉。通过动作描写来标识说话者，不要每句都加"他说""她道"。',
+      tags: '对话,人物,台词'
+    },
+    {
+      name: '环境描写技法',
+      type: 'technique',
+      description: '五感描写、氛围渲染、环境叙事，让场景立体鲜活',
+      content: '场景切换时用 2-3 个感官细节快速建立氛围，视觉加听觉加嗅觉或触觉就够了。环境描写反映角色心理——焦虑时看到的是墙上的裂缝，平静时注意到的是窗外的光线。战斗场景的环境描写简洁有力，用短句切换焦点。每个环境细节最好有叙事功能，不要为描写而描写。',
+      tags: '环境,描写,氛围,感官'
+    },
+    {
+      name: '节奏控制技巧',
+      type: 'technique',
+      description: '张弛有度的叙事节奏，让读者在紧张与舒缓间获得最佳阅读体验',
+      content: '高潮之后必须有舒缓段落让读者消化，舒缓段落不宜超过一章。紧张时短句短段，舒缓时长句细腻。每 3-5 章设一个小转折，每 10-15 章一个重大转折。战斗追逐中插入瞬间的"时间膨胀"描写增强张力。多线叙事时在每条线的悬念处切换，保持读者对所有线的关注。',
+      tags: '节奏,张弛,结构,高潮'
+    },
+    {
+      name: '人物塑造技法',
+      type: 'technique',
+      description: '通过行动、选择、细节塑造立体人物，而非贴标签',
+      content: '人物的性格通过行动和选择展示，不用旁白贴标签。每个主要角色应有至少一个矛盾特质，比如勇敢但怕高，聪明但不自信。配角要有自己的动机，不能只为推动剧情而存在。人物成长要有触发事件和渐进过程，不能突变。反派的行为逻辑在其自身视角下应该是合理的。用小细节——习惯、口头禅、随身物品——让角色鲜活。',
+      tags: '人物,角色,塑造,成长'
+    },
+    {
+      name: '打斗场面写作',
+      type: 'technique',
+      description: '紧张刺激、画面感强的打斗场面，让读者身临其境',
+      content: '打斗前要有心理铺垫，让读者期待冲突。打斗时用短句短段，节奏越快句子越短。聚焦两三个关键感官——动作加声音加触感，不用面面俱到。每个动作有明确的目的和后果，不是"你来我往"的回合制。打斗中插入角色心理活动，让读者了解策略和情绪变化。打斗结果要推动剧情或人物成长，打完了就完了等于白写。',
+      tags: '打斗,动作,战斗,场面'
+    }
+  ];
+  const insertSkill = db.prepare('INSERT INTO skills (name, type, description, content, tags) VALUES (?,?,?,?,?)');
+  for (const s of seedSkills) {
+    insertSkill.run(s.name, s.type, s.description, s.content, s.tags);
+  }
+}
 
 // ===== 势力/组织系统 =====
 db.exec(`
@@ -462,6 +551,7 @@ CREATE TABLE IF NOT EXISTS adaptation_jobs (
   novel_id INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
   intent TEXT DEFAULT '',
   plan TEXT DEFAULT '',
+  plans TEXT DEFAULT '',
   status TEXT DEFAULT 'drafting_plan',
   current_index INTEGER DEFAULT 0,
   total_chapters INTEGER DEFAULT 0,
@@ -490,6 +580,7 @@ CREATE TABLE IF NOT EXISTS adaptation_candidates (
 CREATE INDEX IF NOT EXISTS idx_adapt_cand_job ON adaptation_candidates(job_id, chapter_index);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_adapt_cand_unique ON adaptation_candidates(job_id, chapter_index);
 `);
+ensureColumn('adaptation_jobs', 'plans', "plans TEXT DEFAULT ''");
 
 function getSetting(key, fallback = '') {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);

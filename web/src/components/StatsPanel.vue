@@ -1,6 +1,7 @@
 <script setup>
-import { computed } from 'vue';
+import { computed, ref, onMounted } from 'vue';
 import { useEditorStore } from '../stores/editor';
+import { api } from '../api';
 import { formatWords, splitGenres } from '../utils/format';
 
 const store = useEditorStore();
@@ -50,6 +51,43 @@ const updated = computed(() => {
   if (!t) return '';
   try { return new Date(t).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); } catch { return ''; }
 });
+
+const genStats = ref(null);
+const detectStats = ref(null);
+const loadingGen = ref(false);
+
+async function loadGenStats() {
+  loadingGen.value = true;
+  try {
+    const [g, d] = await Promise.all([api.getGenerationStats(), api.getAiDetectStats()]);
+    genStats.value = g;
+    detectStats.value = d;
+  } catch { genStats.value = null; detectStats.value = null; }
+  finally { loadingGen.value = false; }
+}
+
+const passRate = computed(() => detectStats.value?.passRate ?? null);
+const detectBuckets = computed(() => detectStats.value?.buckets || []);
+const genTotal = computed(() => genStats.value?.total?.n || 0);
+const genAvgRounds = computed(() => genStats.value?.total?.avg_rounds ?? null);
+const genTotalMs = computed(() => genStats.value?.total?.duration_ms || 0);
+const genRecent = computed(() => genStats.value?.recent || []);
+const passBucket = computed(() => {
+  if (!detectStats.value?.total) return null;
+  return (detectStats.value.buckets[0]?.n || 0) + (detectStats.value.buckets[1]?.n || 0);
+});
+const roundLabel = (r) => ['生成', '1 轮润色', '2 轮润色', '3 轮润色'][r] || `${r} 轮润色`;
+
+const PIPE_LABELS = {
+  generate_chapter: '章节生成',
+  plan: '方案生成',
+  plan_revise: '方案修订',
+  chapter_revise: '章节修订',
+  polish: '润色',
+  manager: 'AI总管'
+};
+
+onMounted(loadGenStats);
 </script>
 
 <template>
@@ -176,6 +214,60 @@ const updated = computed(() => {
         </div>
       </div>
 
+      <div class="stats-block">
+        <div class="block-head">
+          <span class="block-label">生成质量观测</span>
+          <span class="block-value" v-if="detectStats?.total">{{ passRate }}% 达标</span>
+        </div>
+        <div v-if="loadingGen" class="loading-hint">加载中…</div>
+        <div v-else-if="!genTotal && !detectStats?.total" class="empty-hint">尚无生成记录，写完一章后此处会展示 AI 味达标率、润色轮次与耗时。</div>
+        <template v-else>
+          <div class="q-grid">
+            <div class="q-item">
+              <div class="q-num">{{ genTotal }}<span class="q-unit"> 次</span></div>
+              <div class="q-label">累计生成</div>
+            </div>
+            <div class="q-item">
+              <div class="q-num">{{ genAvgRounds ?? '—' }}</div>
+              <div class="q-label">平均润色轮次</div>
+            </div>
+            <div class="q-item">
+              <div class="q-num">{{ genTotalMs ? Math.round(genTotalMs / 1000) + 's' : '—' }}</div>
+              <div class="q-label">累计耗时</div>
+            </div>
+            <div class="q-item">
+              <div class="q-num">{{ passBucket ?? '—' }}<span v-if="passBucket != null" class="q-unit"> 次</span></div>
+              <div class="q-label">达标次数</div>
+            </div>
+          </div>
+
+          <div v-if="detectBuckets.length && detectStats?.total" class="q-block">
+            <div class="q-sub">AI 味分数分布（≤20 达标）</div>
+            <div class="bucket-list">
+              <div v-for="b in detectBuckets" :key="b.label" class="bucket-row">
+                <span class="bucket-label">{{ b.label }}</span>
+                <div class="bucket-track">
+                  <div class="bucket-bar" :class="{ ok: b.label === '0-10' || b.label === '11-20' }"
+                       :style="{ width: Math.max(b.n ? 4 : 0, Math.round((b.n / detectStats.total) * 100)) + '%' }"></div>
+                </div>
+                <span class="bucket-n">{{ b.n }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="genRecent.length" class="q-block">
+            <div class="q-sub">最近生成</div>
+            <div class="recent-list">
+              <div v-for="r in genRecent" :key="r.id" class="recent-row">
+                <span class="recent-pipe">{{ PIPE_LABELS[r.pipe_reason] || r.pipe_reason }}</span>
+                <span class="recent-mid">第 {{ r.chapter_index ?? '—' }} 章{{ r.rounds ? ' · ' + roundLabel(r.rounds) : '' }}</span>
+                <span class="recent-time">{{ (r.created_at || '').slice(5, 16).replace('T', ' ') }}</span>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+
       <div class="stats-meta">
         <div class="meta-row" v-if="store.novel?.genre"><span class="meta-k">类型</span><span class="meta-v">{{ splitGenres(store.novel.genre).join('、') }}</span></div>
         <div class="meta-row" v-if="store.novel?.style_presets?.length"><span class="meta-k">风格</span><span class="meta-v">{{ store.novel.style_presets.join('、') }}</span></div>
@@ -294,6 +386,43 @@ const updated = computed(() => {
   transition: width .3s;
 }
 .dist-words { width: 56px; flex-shrink: 0; font-size: 11.5px; color: #6b7280; text-align: right; }
+.q-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.q-item {
+  background: #f9fafb;
+  border-radius: 8px;
+  padding: 10px 8px;
+  text-align: center;
+}
+.q-num { font-size: 17px; font-weight: 700; color: #1f2937; }
+.q-unit { font-size: 11px; color: #9ca3af; font-weight: 500; }
+.q-label { font-size: 11px; color: #9ca3af; margin-top: 3px; }
+.q-block { margin-top: 12px; }
+.q-sub { font-size: 12px; font-weight: 700; color: #1e1b4b; margin-bottom: 8px; }
+.bucket-list { display: flex; flex-direction: column; gap: 5px; }
+.bucket-row { display: flex; align-items: center; gap: 8px; }
+.bucket-label { width: 42px; flex-shrink: 0; font-size: 11.5px; color: #9ca3af; text-align: right; }
+.bucket-track { flex: 1; height: 8px; background: #f1f3f9; border-radius: 4px; overflow: hidden; }
+.bucket-bar { height: 100%; border-radius: 4px; background: #f87171; transition: width .3s; }
+.bucket-bar.ok { background: #34d399; }
+.bucket-n { width: 22px; flex-shrink: 0; font-size: 11.5px; color: #6b7280; }
+.recent-list { max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.recent-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0; border-bottom: 1px dashed #f1f3f9; }
+.recent-pipe {
+  flex-shrink: 0;
+  font-size: 11px;
+  background: #eef2ff;
+  color: #4f46e5;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.recent-mid { flex: 1; color: #4b5563; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-time { flex-shrink: 0; font-size: 11px; color: #9ca3af; }
+.loading-hint, .empty-hint { font-size: 12.5px; color: #9ca3af; padding: 6px 0; line-height: 1.7; }
 .stats-meta {
   margin-top: 20px;
   padding: 14px;

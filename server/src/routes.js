@@ -36,7 +36,8 @@ import {
   ADAPTATION_PLAN_SYSTEM, ADAPTATION_CHAPTER_SYSTEM, LYRICS_TO_NOVEL_SYSTEM,
   IDEAS_SYSTEM,
   buildNovelContext, buildChapterSystem, buildPolishSystem,
-  buildPolishWithIssues, buildPlotFixSystem, extractJson, buildReviseSystem
+  buildPolishWithIssues, buildPlotFixSystem, extractJson, buildReviseSystem,
+getGenreGuide, getGenreGuides
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
@@ -67,7 +68,8 @@ import {
   getKnowledgeByGenres, formatKnowledgeBlock, getSampleSnippets,
   getNovelKnowledgeIds
 } from './knowledge_store.js';
-import { KNOWLEDGE_LEARN_SYSTEM, KNOWLEDGE_SAMPLE_INTRO } from './prompts.js';
+import { getNovelSkillIds, getSkills, formatSkillsBlock, parseSkillFile, recommendSkillsForGenre } from './skill_store.js';
+import { KNOWLEDGE_LEARN_SYSTEM, KNOWLEDGE_SAMPLE_INTRO, PER_CHUNK_ANALYSIS_SYSTEM, FINAL_SYNTHESIS_SYSTEM } from './prompts.js';
 import {
   detectOllama, ollamaListModels, getLocalModelStatus,
   localChat, shouldUseLocal, autoLearnInBackground
@@ -129,9 +131,15 @@ function startSSE(req, res) {
 }
 
 // ---------- AI 味检测与质量门（铁律模式） ----------
-const AI_SCORE_PASS = 30; // 达标阈值：30 以下视为合格的人类文风
+const AI_SCORE_PASS_DEFAULT = 15; // 达标阈值（原 20，进一步调严）：该分以下视为合格的人类文风
 const AI_MAX_ROUNDS = 3;  // 质量门最多迭代轮数
 const MAX_AUTO_REGENERATE = 2; // 整章重生成最多额外重试次数（共生成 1+2=3 版）
+
+// 质量门评分阈值（可配置，设置页 ai_score_pass 覆盖默认值）
+function aiScorePass() {
+  const v = Number(getSetting('ai_score_pass', String(AI_SCORE_PASS_DEFAULT)));
+  return Number.isFinite(v) && v > 0 ? v : AI_SCORE_PASS_DEFAULT;
+}
 
 // 铁律模式开关（设置项 strict_ai_mode，默认开启）
 function strictMode() {
@@ -196,7 +204,7 @@ async function runReadability(config, text) {
 }
 
 // 质量门核心：润色 → 检测 → 未达标再润色（带上轮 issues + 黑名单），直到达标或达轮次上限
-async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX_ROUNDS } = {}) {
+async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX_ROUNDS, opts = {} } = {}) {
   let current = String(text || '').trim();
   let lastDetect = { score: 0, issues: [] };
   let blacklist = [];
@@ -204,11 +212,11 @@ async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX
 
   for (let round = 0; round < maxRounds; round++) {
     const hitsBefore = scanAiPatterns(current);
-    const flagWords = blacklistFlagWords(hitsBefore);
+    const flagWords = blacklistFlagWords(hitsBefore, current.length);
 
     if (onStatus) {
       onStatus(round === 0 ? '正在去除 AI 味…' : `检测到 AI 味，正在再润色（第 ${round + 1} 轮）…`);
-      if (flagWords.length) onStatus(`命中 AI 高频词：${flagWords.join('、')}，将强制改写…`);
+      if (flagWords.length) onStatus(`高频复用 AI 腔词：${flagWords.join('、')}，将改写冗余复用处…`);
     }
 
     const pRes = await chat({
@@ -221,7 +229,8 @@ async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX
           novel.style_samples,
           round === 0 ? [] : lastDetect.issues,
           flagWords,
-          parseStylePresets(novel)
+          parseStylePresets(novel),
+          opts
         ) },
         { role: 'user', content: `以下是一章小说原稿。请按人类写作风格整体改写，彻底去除一切 AI 痕迹，保留剧情与人设。\n\n原稿：\n${current}` }
       ],
@@ -236,12 +245,12 @@ async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX
     try { det = await runDetection(config, current); } catch { /* 检测失败不阻塞 */ }
     lastDetect = det;
     const hitsAfter = scanAiPatterns(current);
-    blacklist = blacklistFlagWords(hitsAfter);
-    const total = Math.min(100, det.score + blacklistPenalty(hitsAfter));
-    rounds.push({ round: round + 1, detectScore: det.score, blacklistPenalty: blacklistPenalty(hitsAfter), score: total, blacklist });
-    if (onStatus && blacklist.length) onStatus(`仍命中 AI 高频词：${blacklist.join('、')}…`);
+    blacklist = blacklistFlagWords(hitsAfter, current.length);
+    const total = Math.min(100, det.score + blacklistPenalty(hitsAfter, current.length));
+    rounds.push({ round: round + 1, detectScore: det.score, blacklistPenalty: blacklistPenalty(hitsAfter, current.length), score: total, blacklist });
+    if (onStatus && blacklist.length) onStatus(`仍高频复用 AI 腔词：${blacklist.join('、')}…`);
 
-    if (total <= AI_SCORE_PASS && blacklist.length === 0) break;
+    if (total <= aiScorePass() && blacklist.length === 0) break;
   }
   return { text: current, lastDetect, blacklist, rounds };
 }
@@ -314,7 +323,9 @@ function requireLLM() {
   return { config, error: null };
 }
 
-function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task } = {}) {
+function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, timeout, streamIdleTimeout } = {}) {
+  // 流式调用默认给更长空闲阈值（10 分钟）：思考型模型开头可能长时间无流式输出，300s 会被误杀
+  const idleTimeout = Number(streamIdleTimeout) > 0 ? streamIdleTimeout : 600000;
   if (config?.forceNonStreaming) {
     return chat({
       config,
@@ -322,7 +333,7 @@ function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task } = {})
       messages,
       maxTokens,
       signal: ctrl?.signal,
-      timeout: 300000
+      timeout: timeout || 600000
     }).then((r) => {
       if (r?.content && onDelta) onDelta(r.content);
       return r;
@@ -334,7 +345,8 @@ function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task } = {})
     messages,
     maxTokens,
     signal: ctrl?.signal,
-    onDelta
+    onDelta,
+    streamIdleTimeout: idleTimeout
   });
 }
 
@@ -572,12 +584,13 @@ router.get('/novels', (req, res) => {
   for (const r of rows) {
     try { r.style_ids = JSON.parse(r.style_ids || '[]'); } catch { r.style_ids = []; }
     try { r.style_presets = parseStylePresets(r); } catch { r.style_presets = []; }
+    try { r.skill_ids = JSON.parse(r.skill_ids || '[]'); } catch { r.skill_ids = []; }
   }
   res.json(rows);
 });
 
 router.post('/novels', async (req, res) => {
-  const { title = '', genre = '', concept = '', chapterWordCount = 2000, targetChapters = 20, stylePresets = [], styleIds = [], knowledgeCorpusIds = [] } = req.body || {};
+  const { title = '', genre = '', concept = '', chapterWordCount = 2000, targetChapters = 20, stylePresets = [], styleIds = [], knowledgeCorpusIds = [], skillIds = [] } = req.body || {};
   const stylePresetsStr = Array.isArray(stylePresets)
     ? stylePresets.map((s) => String(s).trim()).filter(Boolean).join(',')
     : '';
@@ -587,9 +600,12 @@ router.post('/novels', async (req, res) => {
   const knowledgeIdsStr = Array.isArray(knowledgeCorpusIds)
     ? knowledgeCorpusIds.map((id) => Number(id)).filter(Boolean).join(',')
     : '';
+  const skillIdsStr = Array.isArray(skillIds)
+    ? JSON.stringify(skillIds.map(Number).filter(Boolean))
+    : '[]';
   const info = db.prepare(
-    'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, style_ids, knowledge_corpus_ids) VALUES (?,?,?,?,?,?,?,?)'
-  ).run(title, genre, concept, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr);
+    'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, style_ids, knowledge_corpus_ids, skill_ids) VALUES (?,?,?,?,?,?,?,?,?)'
+  ).run(title, genre, concept, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr, skillIdsStr);
   const novel = getNovel(info.lastInsertRowid);
   // 创建独立作品文件夹（以小说名命名）
   try {
@@ -812,6 +828,10 @@ router.put('/novels/:id', async (req, res) => {
         ? req.body.knowledge_corpus_ids.map((id) => Number(id)).filter(Boolean).join(',')
         : String(req.body.knowledge_corpus_ids || '')
     );
+  }
+  if (req.body.skill_ids !== undefined) {
+    sets.push('skill_ids = ?');
+    vals.push(JSON.stringify(Array.isArray(req.body.skill_ids) ? req.body.skill_ids : []));
   }
   if (sets.length) {
     vals.push(req.params.id);
@@ -1080,14 +1100,16 @@ router.post('/novels/:id/plan', async (req, res) => {
     ? stylePresets.map((s) => String(s).trim()).filter(Boolean)
     : parseStylePresets(novel);
 
-  const userPrompt = `用户的灵感想法：${concept || novel.concept || ''}
-类型：${genre || novel.genre || '不限（请根据内容判断）'}
-创作风格：${presets.length ? presets.join('、') : '由你判断，选择适合该题材的风格基调'}
-计划章节数：${target} 章
-每章目标字数：${words} 字
-${protagonistName || novel.protagonist_name ? `\n男主角名字：${protagonistName || novel.protagonist_name}（方案中男主必须用这个名字）` : ''}
-${heroineName || novel.heroine_name ? `\n女主角名字：${heroineName || novel.heroine_name}（方案中女主必须用这个名字）` : ''}
-${referenceNotes ? `\n同类小说参考（借鉴其题材套路与节奏，但不要抄袭情节）：\n${referenceNotes}` : ''}
+const userPrompt = `用户的灵感想法：${concept || novel.concept || ''}
+ 类型：${genre || novel.genre || '不限（请根据内容判断）'}
+ 创作风格：${presets.length ? presets.join('、') : '由你判断，选择适合该题材的风格基调'}
+ 计划章节数：${target} 章
+ 每章目标字数：${words} 字
+ ${protagonistName || novel.protagonist_name ? `\n男主角名字：${protagonistName || novel.protagonist_name}（方案中男主必须用这个名字）` : ''}
+ ${heroineName || novel.heroine_name ? `\n女主角名字：${heroineName || novel.heroine_name}（方案中女主必须用这个名字）` : ''}
+ ${referenceNotes ? `\n同类小说参考（借鉴其题材套路与节奏，但不要抄袭情节）：\n${referenceNotes}` : ''}
+  
+【题材边界强调】所选类型为：${genre || novel.genre || '未指定'}。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等超凡标签，则本书为现实向，力量体系只能是武功谋略，严禁把"学习/修炼"写成玄幻修仙境界（灵气、金丹、元婴、御剑等等一概禁止）；意外死亡穿越也不是获得超凡能力的理由。
  
 请输出创作方案骨架 JSON。`;
 
@@ -1127,11 +1149,11 @@ ${referenceNotes ? `\n同类小说参考（借鉴其题材套路与节奏，但�
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // 流式生成 + 解析 JSON，最多重试 5 次（流式 + 非流式交替 + 指数退避）
-  // 重试时追加格式强化提示，降低格式出错率
+  // 重试时追加格式强化提示，降低格式出错率。重试时递增 max_tokens 防止截断
   const FORMAT_REMINDER = '\n\n【重要提醒】你之前的输出无法被解析为 JSON。请严格只输出一个 JSON 对象或数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
 const jsonFrom = async (messages, label, mt = maxOut) => {
     let lastText = '';
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= 5; attempt++) {
       if (attempt > 1) {
         const waitSec = Math.pow(2, attempt - 1);
         send({ type: 'status', message: `AI 返回格式异常，第 ${attempt} 次重试（等待 ${waitSec}s 后重试）…` });
@@ -1164,8 +1186,9 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
           } else {
             throw e; // 用户主动中止，直接终止
           }
-        } else if (/HTTP\s+4\d\d/.test(e.message)) {
+        } else if (/HTTP\s+4\d\d/.test(e.message) && !/429/.test(e.message)) {
           // 4xx 确定性错误（余额不足/Key 无效/接口不存在等），重试不会成功，立即终止
+          // 429 除外（限流/配额超限），应继续重试
           throw e;
         } else {
           send({ type: 'status', message: `流式请求失败，正在用非流式重试（第 ${attempt} 次）…` });
@@ -1184,10 +1207,15 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
       }
       const obj = extractJson(lastText);
       if (obj) return obj;
-      if (attempt < 3) {
+      if (attempt < 5) {
         const preview = lastText.slice(0, 120).replace(/\n/g, ' ');
         send({ type: 'status', message: `解析失败（返回内容开头：${preview}…），将重试…` });
       }
+    }
+    if (lastText.trim()) {
+      // 5 次重试后仍失败但至少返回了文本，尝试解析最后一段
+      const obj = extractJson(lastText.slice(-2000));
+      if (obj) return obj;
     }
     return null;
   };
@@ -1211,8 +1239,12 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
     send({ type: 'status', message: `开始生成方案（目标 ${target} 章，预计 ${estimatedBatches} 批，无总超时限制，逐批完成）…` });
     send({ type: 'progress', progress: 8, message: '正在构思世界观、角色与剧情大纲…' });
 
-    // 注入知识学习库分析
-    const knowledgeIds = getNovelKnowledgeIds(novel);
+    // 注入知识学习库分析（手动关联 + 按题材自动匹配）
+    const manualIds = getNovelKnowledgeIds(novel);
+    const autoIds = getKnowledgeByGenres([novel.genre || ''], 2)
+      .map((k) => k.id)
+      .filter((id) => !manualIds.includes(id));
+    const knowledgeIds = [...manualIds, ...autoIds];
     const knowledgeBlock = formatKnowledgeBlock(knowledgeIds);
     let planSamples = '';
     if (knowledgeIds.length) {
@@ -1225,6 +1257,10 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
     if (planKnowledgeBlock) {
       send({ type: 'status', message: '已加载知识学习库参考，正在生成方案…' });
     }
+
+    // 注入技能库（题材联动：tags 匹配题材的技能自动带入选）
+    const planSkillIds = [...getNovelSkillIds(novel), ...recommendSkillsForGenre(novel.genre)];
+    const planSkillsBlock = formatSkillsBlock(planSkillIds);
 
     // 注入风格库分析：方案骨架里的角色设定、情节节奏、叙述基调应贴合所选文风
     const planStyles = getStyles(parseStyleIds(novel));
@@ -1239,10 +1275,23 @@ ${parts.join('\n\n')}
       send({ type: 'status', message: `已加载 ${planStyles.length} 项写作风格参考，正在生成方案…` });
     }
 
+    // 注入题材指南（合并注入全部匹配的相关指南，如历史+武侠+重生各自的精神都要保留）
+    const planGenreBlock = novel.genre ? (() => {
+      const guides = getGenreGuides(novel.genre);
+      return guides.length ? `\n\n${guides.join('\n\n')}` : '';
+    })() : '';
+
     // 阶段 1：作品骨架
+    // 预算裁剪：防止系统提示词超限导致模型输出乱码/垃圾
+    const sysContent = PLAN_SKELETON_SYSTEM + planKnowledgeBlock + planSkillsBlock + planGenreBlock + planStyleBlock;
+    const sysTokens = estimateTokens(sysContent);
+    const budget = contextBudget(config);
+    const trimmedSys = sysTokens > budget - estimateTokens(userPrompt) - 1024
+      ? sysContent.slice(0, Math.max(2000, Math.floor((budget - estimateTokens(userPrompt) - 1024) * 1.5)))
+      : sysContent;
     let skeleton = await jsonFrom(
       [
-        { role: 'system', content: PLAN_SKELETON_SYSTEM + planKnowledgeBlock + planStyleBlock },
+        { role: 'system', content: trimmedSys },
         { role: 'user', content: userPrompt }
       ],
       '正在构思世界观、角色与剧情大纲…',
@@ -1429,6 +1478,8 @@ ${snapshot}${anchor}
 
 用户提出的修改意见（请据此修订；除用户明确指明的改动外，其他字段 MUST 保持原样，绝不让角色改名或主线错位）：
 ${feedback}
+
+【题材边界提醒】本书类型为「${novel.genre || '未注明'}」。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等标签，则本书为现实向：世界观与角色的"修炼/能力"只能是武术、谋略、医术等现实可及的能力，严禁引入修炼境界、灵气、金丹、御剑、系统面板等玄幻修行元素。请仅依据用户意见修订，不要顺手把现实向设定改成玄幻修行。
 
 请输出修订后的完整创作方案 JSON，字段与结构必须与当前方案完全一致：{"title": "...", "genre": "...", "world_view": "...", "outline": "...", "characters": [{"name": "...", "role_type": "...", "personality": "...", "background": "...", "description": "...", "faction": "...", "goal": "...", "ability": "..."}], "factions": [{"name": "...", "type": "...", "description": "..."}], "relationships": [{"a": "角色名", "b": "角色名", "relation_type": "朋友", "description": "..."}], "chapters": [{"title": "...", "summary": "..."}]}`;
 
@@ -2209,8 +2260,12 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     // 小说宪法 + 角色语音档案（跨模型一致性锚点）
     const constitution = getConstitution(novel.id);
     const charVoices = formatCharacterVoices(novel.id);
-    // 知识学习库注入
-    const knowledgeIds = getNovelKnowledgeIds(novel);
+    // 知识学习库注入：用户手动关联 + 按题材自动匹配
+    const manualIds = getNovelKnowledgeIds(novel);
+    const autoIds = getKnowledgeByGenres([novel.genre || ''], 2)
+      .map((k) => k.id)
+      .filter((id) => !manualIds.includes(id));
+    const knowledgeIds = [...manualIds, ...autoIds];
     const knowledgeBlock = formatKnowledgeBlock(knowledgeIds);
     let knowledgeSamples = '';
     let plotReferenceBlock = '';
@@ -2236,10 +2291,16 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         plotReferenceBlock = `\n\n【已导入同类小说的剧情结构参考（仅概括其节奏特点，属其他作品——其中出现的人物/地名/情节一律不得用于本书正文）】\n${plotRefs.join('\n')}`;
       }
     }
+    const skillIds = getNovelSkillIds(novel);
+    // 题材联动：技能 tags 含小说题材关键词的自动带入选，降低手动配置成本
+    const autoSkillIds = recommendSkillsForGenre(novel.genre).filter((id) => !skillIds.includes(id));
+    const skillsBlock = formatSkillsBlock([...skillIds, ...autoSkillIds]);
     const chapterSysOpts = {
       constitution: constitution || '',
       characterVoices: charVoices || '',
-      knowledgeBlock: (knowledgeBlock + (knowledgeSamples ? KNOWLEDGE_SAMPLE_INTRO + knowledgeSamples : '') + plotReferenceBlock).trim()
+      knowledgeBlock: (knowledgeBlock + (knowledgeSamples ? KNOWLEDGE_SAMPLE_INTRO + knowledgeSamples : '') + plotReferenceBlock).trim(),
+      skillsBlock,
+      genre: novel.genre
     };
 
     // 场景节拍（beats）：优先使用方案阶段生成的细纲，否则运行时生成
@@ -2315,8 +2376,16 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         }
       } catch { /* 解析失败不阻塞 */ }
     }
+    const prevTailLen = mode === 'regenerate' ? 2000 : 800;
     const prevTailBlock = prevChapter
-      ? `【上一章结尾（本章必须从上一章结尾的场面直接续写，严格延续时间/地点/人物/悬念，不得倒回上一章开头重新描写同一场景，不得重复已经发生过的事件）】\n上一章《${prevChapter.title}》${prevChapterSummary}${prevBeatsBlock}\n上一章结尾：…${String(prevChapter.content).slice(-800)}`
+      ? `【上一章结尾（本章必须从上一章结尾的场面直接续写，严格延续时间/地点/人物/悬念，不得倒回上一章开头重新描写同一场景，不得重复已经发生过的事件）】\n上一章《${prevChapter.title}》${prevChapterSummary}${prevBeatsBlock}\n上一章结尾：…${String(prevChapter.content).slice(-prevTailLen)}`
+      : '';
+
+const regenNote = mode === 'regenerate'
+      ? '\n【本章为重新生成——请基于剧情大纲和上一章结尾重新创作本章，严格遵循本章的剧情概要/场景规划/情绪基调/剧情线，确保与前文剧情一致，不得偏离既定故事走向】'
+      : '';
+    const ch1Note = idx === 1 && mode === 'regenerate'
+      ? '\n【重要：本章是全书第一章，必须从故事开头写起，只写开篇引子/初始场景/主角登场，禁止提前引入中后期剧情、势力、角色或冲突。大纲中的中后期内容全部跳过，不要提前使用】'
       : '';
 
     const userPrompt = `${context}
@@ -2340,6 +2409,8 @@ ${prevTailBlock}
  ${referenceBlock}
  
  本章信息：
+${regenNote}
+${ch1Note}
 - 章节序号：第 ${idx} 章
 - 全书共 ${novel.target_chapters || '?'} 章，当前处于 ${chapterStageLabel(idx, novel.target_chapters)}
 - 章节标题：${title}
@@ -2380,6 +2451,9 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
 
       full = '';
       finishReason = 'stop';
+      // 生成资源观测：本轮生成累积了多少轮、触发原因分布
+      const genTrack = { rounds: 0, reasons: { length: 0, early_stop: 0, done: 0 } };
+      const genStartAt = Date.now();
       const attemptPrompt = isRegen ? userPrompt + '\n\n' + buildRegenFeedback(lastProblems) : userPrompt;
       // 若上一版因"照抄参考作品/英文泄漏"被拒，重生成时剔除知识库样本原文（只保留分析），避免模型再次照抄
       let regenSysOpts = chapterSysOpts;
@@ -2388,8 +2462,8 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
           regenSysOpts = { ...chapterSysOpts, knowledgeBlock: formatKnowledgeBlock(knowledgeIds) };
         } catch { /* 保持原样 */ }
       }
-      // 自动续写：单次输出被 max_tokens 截断（finish_reason=length）时继续往下写，直到达到目标字数或模型自然收尾
-      for (let round = 0; round < 8; round++) {
+      // 自动续写：单次输出被 max_tokens 截断（finish_reason=length）或模型提前停止时继续往下写，直到达到目标字数
+      for (let round = 0; round < 12; round++) {
         const msgs = round === 0
           ? [
               { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), regenSysOpts) },
@@ -2401,7 +2475,7 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
             ];
         if (round > 0) {
           send({ type: 'status', message: `正在续写第 ${idx} 章剩余部分…` });
-          const contPct = Math.min(70, 15 + round * 8);
+          const contPct = Math.min(70, 15 + round * 6);
           send({ type: 'progress', progress: contPct, message: `正在续写第 ${idx} 章（第 ${round + 1} 轮）…` });
         }
         let deltaCount = 0;
@@ -2421,22 +2495,44 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
             }
           }
         });
-        finishReason = r?.finishReason || 'stop';
+        // finishReason 为空/undefined/null 时视为 length（继续续写），不默认回退到 'stop'
+        const rawFinish = r?.finishReason;
+        finishReason = (rawFinish && (rawFinish === 'stop' || rawFinish === 'length')) ? rawFinish : 'length';
+        genTrack.rounds = round + 1;
+        genTrack.reasons[finishReason === 'length' ? 'length' : 'early_stop'] += 1;
         const wordsSoFar = countWords(full);
-        const prematureStop = (finishReason === 'stop' && wordsSoFar < Math.min(targetWordsN * 0.6, targetWordsN - 200));
+        const needsMore = wordsSoFar < Math.min(targetWordsN * 0.95, targetWordsN - 100);
         if (finishReason === 'length') {
-          // 正常截断，继续续写
-        } else if (prematureStop && round < 7) {
+          // 正常截断或未知原因中断，继续续写
+        } else if (finishReason === 'stop' && needsMore && round < 11) {
           send({ type: 'status', message: `检测到输出提前结束（${wordsSoFar} 字），正在继续补写…` });
         } else {
+          genTrack.reasons.done += 1;
           break;
         }
-        if (wordsSoFar >= targetWordsN) break;
+        if (wordsSoFar >= targetWordsN) {
+          genTrack.reasons.done += 1;
+          break;
+        }
         if (wordsSoFar > targetWordsN * 1.3) {
+          genTrack.reasons.done += 1;
           send({ type: 'status', message: `字数已超过目标 ${targetWordsN} 字（当前 ${wordsSoFar} 字），结束续写` });
           break;
         }
       }
+
+      // 落一条生成统计：观察续写轮数与触发分布，为调阈值提供数据
+      try {
+        db.prepare(`INSERT INTO generation_stats
+          (novel_id, chapter_index, stage, rounds, state, pipe_reason, rs_model, start_words, target_words, seamless_words, ms_connecting, duration_ms)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(
+            novel.id, idx, 'chapter', genTrack.rounds,
+            finishReason, genTrack.reasons.length ? 'length' : 'stop',
+            String(config?.model || ''), countWords(full), targetWordsN,
+            countWords(full), 0, Date.now() - genStartAt
+          );
+      } catch { /* 统计写入失败不阻塞生成 */ }
 
       if (!full.trim()) {
         updateJob(job.id, { status: 'failed', error: 'AI 未返回内容' });
@@ -2507,14 +2603,14 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       try {
         det = await runDetection(config, full);
         const hits = scanAiPatterns(full);
-        bl = blacklistFlagWords(hits);
-        const total = Math.min(100, det.score + blacklistPenalty(hits));
-        if (total > AI_SCORE_PASS || bl.length > 0) {
-          problems.push({ desc: `AI 味明显（${total} 分，阈值 ${AI_SCORE_PASS}${bl.length ? '；命中高频词：' + bl.join('、') : ''}）` });
+        bl = blacklistFlagWords(hits, full.length);
+        const total = Math.min(100, det.score + blacklistPenalty(hits, full.length));
+        if (total > aiScorePass() || bl.length > 0) {
+          problems.push({ desc: `AI 味明显（${total} 分，阈值 ${aiScorePass()}${bl.length ? '；高频复用词语：' + bl.join('、') : ''}）` });
         }
         finalDetect = det;
         finalBlacklist = bl;
-        finalRounds = [{ round: 1, detectScore: det.score, blacklistPenalty: blacklistPenalty(hits), score: total, blacklist: bl }];
+        finalRounds = [{ round: 1, detectScore: det.score, blacklistPenalty: blacklistPenalty(hits, full.length), score: total, blacklist: bl }];
       } catch { /* 检测失败不阻塞 */ }
 
       // 2b) 故事可读性检测：文笔干净但平铺直叙、无张力、无欲望尖点也判 rewrite
@@ -2603,6 +2699,27 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
         const t3 = raw3.slice(0, 15);
         if (t3 && !isPlaceholderTitle(t3)) title = t3;
       } catch { /* 补拟失败不阻塞，落库用原占位 */ }
+    }
+
+    // 自动去除 AI 味（autoPolish 开关）：质量门通过后，若开启则再跑一轮 iteratePolish，
+    // 从机制上进一步压低 AI 分，此时只要求不再命中高频词即为收敛（避免与质量门双重过头）
+    if (strictMode() && config.autoPolish) {
+      try {
+        send({ type: 'status', message: `正在按开关自动去除 AI 味…` });
+        const iter = await iteratePolish(config, novel, full, {
+          onStatus: (m) => send({ type: 'status', message: m }),
+          maxRounds: AI_MAX_ROUNDS,
+          opts: { knowledgeBlock, skillsBlock, genre: novel.genre }
+        });
+        if (iter.text && iter.text.trim()) {
+          full = iter.text.trim();
+          finalDetect = iter.lastDetect;
+          finalBlacklist = iter.blacklist;
+          finalRounds = iter.rounds;
+          lastProblems = iter.blacklist.length ? [{ desc: `去 AI 味后仍命中高频词：${iter.blacklist.join('、')}` }] : [];
+          send({ type: 'status', message: `自动去 AI 味完成，最终评分 ${iter.rounds.at(-1)?.score ?? iter.lastDetect.score ?? 0}${lastProblems.length ? '，仍有少量高频词残留' : '，全部达标'}` });
+        }
+      } catch { /* 自动去 AI 味失败不阻塞，保存质量门通过后的版本 */ }
     }
 
     // 保存章节（质检通过或达上限后的最终版）
@@ -3150,9 +3267,15 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
   try {
     if (strictMode()) {
       // 质量门模式：润色 → 检测 → 未达标再润色（带上轮 issues + 黑名单），达标才写入
+      const knowledgeIds = getNovelKnowledgeIds(novel);
+      const knowledgeBlock = formatKnowledgeBlock(knowledgeIds);
+      const skillIds = getNovelSkillIds(novel);
+      const autoSkills = recommendSkillsForGenre(novel.genre).filter((id) => !skillIds.includes(id));
+      const skillsBlock = formatSkillsBlock([...skillIds, ...autoSkills]);
       const iter = await iteratePolish(config, novel, chapter.content, {
         onStatus: (m) => send({ type: 'status', message: m }),
-        maxRounds: AI_MAX_ROUNDS
+        maxRounds: AI_MAX_ROUNDS,
+        opts: { knowledgeBlock, skillsBlock, genre: novel.genre }
       });
       if (!iter.text.trim()) return end({ type: 'error', message: 'AI 未返回内容，请重试。' });
       const finalText = cleanAiText(iter.text.trim());
@@ -3163,7 +3286,7 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
         await writeChapterTxt(novel, { chapter_index: idx, title: chapter.title, content: finalText });
       } catch { /* 文件写入失败不阻塞 */ }
       const finalScore = iter.rounds.at(-1)?.score ?? 0;
-      const passed = finalScore <= AI_SCORE_PASS && iter.blacklist.length === 0;
+      const passed = finalScore <= aiScorePass() && iter.blacklist.length === 0;
       saveDetection(novel.id, idx, finalScore, iter.lastDetect.issues, iter.blacklist, 'polish');
       send({ type: 'progress', progress: 100, message: '润色完成' });
       end({
@@ -3178,8 +3301,13 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
     } else {
       // 铁律模式关闭时的单轮旧行为
       let full = '';
+      const knowledgeIds = getNovelKnowledgeIds(novel);
+      const knowledgeBlock = formatKnowledgeBlock(knowledgeIds);
+      const skillIds = getNovelSkillIds(novel);
+      const autoSkills = recommendSkillsForGenre(novel.genre).filter((id) => !skillIds.includes(id));
+      const skillsBlock = formatSkillsBlock([...skillIds, ...autoSkills]);
       await runLLMStream(config, [
-        { role: 'system', content: buildPolishSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel)) },
+        { role: 'system', content: buildPolishSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), { knowledgeBlock, skillsBlock, genre: novel.genre }) },
         { role: 'user', content: `以下是一章小说原稿。请按人类写作风格整体改写，彻底去除一切 AI 痕迹，保留剧情与人设。\n\n原稿：\n${chapter.content}` }
       ], {
         ctrl,
@@ -3197,10 +3325,10 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
       } catch { /* 文件写入失败不阻塞 */ }
       let detect = { score: 0, issues: [] };
       try { detect = await runDetection(config, full); } catch { /* 检测失败不阻塞 */ }
-      const bl = blacklistFlagWords(scanAiPatterns(full));
+      const bl = blacklistFlagWords(scanAiPatterns(full), full.length);
       saveDetection(novel.id, idx, detect.score, detect.issues, bl, 'polish');
       send({ type: 'progress', progress: 100, message: '润色完成' });
-      end({ type: 'done', data: { chapter: getChapter(novel.id, idx), detect, rounds: [], passed: detect.score <= AI_SCORE_PASS } });
+      end({ type: 'done', data: { chapter: getChapter(novel.id, idx), detect, rounds: [], passed: detect.score <= aiScorePass() } });
     }
   } catch (e) {
     if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止润色' });
@@ -3231,8 +3359,13 @@ router.post('/novels/:id/chapters/:idx/revise', async (req, res) => {
 
   try {
     let full = '';
+    const knowledgeIds = getNovelKnowledgeIds(novel);
+    const knowledgeBlock = formatKnowledgeBlock(knowledgeIds);
+    const skillIds = getNovelSkillIds(novel);
+    const autoSkills = recommendSkillsForGenre(novel.genre).filter((id) => !skillIds.includes(id));
+    const skillsBlock = formatSkillsBlock([...skillIds, ...autoSkills]);
     await runLLMStream(config, [
-      { role: 'system', content: buildReviseSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel)) },
+      { role: 'system', content: buildReviseSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), { knowledgeBlock, skillsBlock, genre: novel.genre }) },
       { role: 'user', content: `以下是第 ${idx} 章《${chapter.title}》原稿与作者的修改要求。请只按修改要求改写，未被要求的段落保持原样，输出改写后的完整正文。
 
 【作者的修改要求】
@@ -3264,14 +3397,14 @@ ${chapter.content}` }
       const det = await runDetection(config, full);
       detect = det;
       const hits = scanAiPatterns(full);
-      blacklist = blacklistFlagWords(hits);
-      const total = Math.min(100, det.score + blacklistPenalty(hits));
+      blacklist = blacklistFlagWords(hits, full.length);
+      const total = Math.min(100, det.score + blacklistPenalty(hits, full.length));
       saveDetection(novel.id, idx, total, det.issues, blacklist, 'revise');
-      send({ type: 'status', message: `修改完成，AI 味检测 ${total} 分${total > AI_SCORE_PASS ? '（略有残留，可再次润色）' : '（达标）'}` });
+      send({ type: 'status', message: `修改完成，AI 味检测 ${total} 分${total > aiScorePass() ? '（略有残留，可再次润色）' : '（达标）'}` });
     } catch { /* 检测失败不阻塞 */ }
 
     send({ type: 'progress', progress: 100, message: '修改完成' });
-    end({ type: 'done', data: { chapter: getChapter(novel.id, idx), detect, passed: detect.score <= AI_SCORE_PASS } });
+    end({ type: 'done', data: { chapter: getChapter(novel.id, idx), detect, passed: detect.score <= aiScorePass() } });
   } catch (e) {
     if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止修改' });
     return end({ type: 'error', message: e.message });
@@ -3688,8 +3821,8 @@ router.post('/novels/:id/chapters/:idx/detect', async (req, res) => {
   try {
     const det = await runDetection(config, chapter.content);
     const hits = scanAiPatterns(chapter.content);
-    const bl = blacklistFlagWords(hits);
-    const total = Math.min(100, det.score + blacklistPenalty(hits));
+    const bl = blacklistFlagWords(hits, chapter.content.length);
+    const total = Math.min(100, det.score + blacklistPenalty(hits, chapter.content.length));
     saveDetection(novel.id, idx, total, det.issues, bl, 'detect');
     res.json({
       ok: true,
@@ -3698,7 +3831,7 @@ router.post('/novels/:id/chapters/:idx/detect', async (req, res) => {
       detectScore: det.score,
       blacklist: bl,
       issues: det.issues,
-      passed: total <= AI_SCORE_PASS && bl.length === 0
+      passed: total <= aiScorePass() && bl.length === 0
     });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -3793,26 +3926,111 @@ router.post('/styles', async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   const { ctrl, send, end } = startSSE(req, res);
-  send({ type: 'status', message: '正在抽样文本并分析写作风格…' });
+  send({ type: 'progress', progress: 2, message: '正在分块处理全文…' });
 
-  const sample = sampleText(String(sourceText), 60000);
+  const text = String(sourceText);
+
+  // 全书平均分成 10 段，逐段分析覆盖全部内容
+  const numSegments = 10;
+  const segments = [];
+  const segLen = Math.ceil(text.length / numSegments);
+  for (let i = 0; i < numSegments; i++) {
+    const start = i * segLen;
+    if (start >= text.length) break;
+    segments.push(text.slice(start, Math.min(start + segLen, text.length)));
+  }
+
+  send({ type: 'progress', progress: 5, message: `正在用 AI 逐段分析风格（全文 ${text.length} 字，${segments.length} 段）…` });
 
   try {
-    const r = await chat({
-      config,
-      messages: [
-        { role: 'system', content: STYLE_ANALYZE_SYSTEM },
-        { role: 'user', content: `请分析以下小说文本的写作风格，输出风格分析 JSON。\n\n【文本开始】\n${sample}\n【文本结束】` }
-      ],
-      maxTokens: 8192
-    });
-    const analysis = extractJson(r.content);
-    if (!analysis) {
-      return end({ type: 'error', message: '风格分析失败：AI 返回内容无法解析，请重试或更换模型。' });
+    const partialResults = [];
+    const totalSegments = segments.length;
+
+    for (let i = 0; i < segments.length; i++) {
+      const pct = Math.round(5 + ((i + 1) / totalSegments) * 70);
+      send({ type: 'progress', progress: pct, message: `逐段分析中（第 ${i + 1}/${totalSegments} 段）…` });
+
+      let r = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          r = await chat({
+            config,
+            messages: [
+              { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
+              { role: 'user', content: `以下是小说《${String(name).trim()}》的第 ${i + 1} 段文本：\n\n${segments[i]}` }
+            ],
+            maxTokens: 1500,
+            signal: ctrl?.signal,
+            timeout: 600000
+          });
+          break;
+        } catch (e) {
+          const is429 = /429|quota|too many|rate limit/i.test(e.message);
+          const isTimeout = /超时|timeout|请求超时|网络请求失败|连接中断/i.test(e.message);
+          if ((is429 || isTimeout) && attempt < 3) {
+            const waitSec = Math.pow(2, attempt) * 2;
+            send({ type: 'status', message: `${isTimeout ? '请求超时' : '请求限流'}（第 ${i + 1} 段），${waitSec} 秒后重试…` });
+            await new Promise((r) => setTimeout(r, waitSec * 1000));
+            continue;
+          }
+          const userAborted = ctrl?.signal?.aborted;
+          if (userAborted) throw new Error('AbortError');
+          send({ type: 'status', message: `第 ${i + 1} 段分析失败，跳过（${e.message}）` });
+          break;
+        }
+      }
+
+      const parsed = r ? extractJson(r.content) : null;
+      if (parsed) partialResults.push(parsed);
     }
 
-    const info = db.prepare('INSERT INTO styles (name, notes, analysis, source_text) VALUES (?,?,?,?)')
-      .run(String(name).trim(), notes || '', JSON.stringify(analysis), sample.slice(0, 20000));
+    if (!partialResults.length) {
+      return end({ type: 'error', message: '所有段落分析均失败，请稍后重试或更换模型。' });
+    }
+
+    send({ type: 'progress', progress: 78, message: '正在综合各段分析结果…' });
+
+    let r = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        r = await runLLMStream(config, [
+          { role: 'system', content: STYLE_ANALYZE_SYSTEM },
+          { role: 'user', content: `以下是对同一部小说《${String(name).trim()}》不同段落的分析结果，请综合为一份统一的风格分析 JSON：\n\n${JSON.stringify(partialResults, null, 2)}` }
+        ], {
+          ctrl,
+          task: 'research',
+          maxTokens: 4000,
+          streamIdleTimeout: 600000,
+          onDelta: (d) => send({ type: 'delta', content: d })
+        });
+        break;
+      } catch (e) {
+        const is429 = /429|quota|too many|rate limit/i.test(e.message);
+        if (is429 && attempt < 3) {
+          const waitSec = Math.pow(2, attempt) * 2;
+          send({ type: 'status', message: `综合合成请求限流，${waitSec} 秒后重试…` });
+          await new Promise((r) => setTimeout(r, waitSec * 1000));
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    const rawAnalysis = extractJson(r?.content || '');
+    if (!rawAnalysis) {
+      return end({ type: 'error', message: '风格分析综合失败：AI 返回内容无法解析，请重试或更换模型。' });
+    }
+
+    send({ type: 'progress', progress: 100, message: '分析完成！' });
+
+    // 从分析结果中提取 example 句段作为 style_samples 独立存储
+    const examples = Array.isArray(rawAnalysis.example) ? rawAnalysis.example.join('\n') : '';
+    const analysis = { ...rawAnalysis };
+    delete analysis.example;
+
+    const sampleText = text.slice(0, 20000);
+    const info = db.prepare('INSERT INTO styles (name, notes, analysis, source_text, style_samples) VALUES (?,?,?,?,?)')
+      .run(String(name).trim(), notes || '', JSON.stringify(analysis), sampleText, examples);
     end({ type: 'done', data: { style: normalizeStyle(getStyle(info.lastInsertRowid)) } });
   } catch (e) {
     if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止' });
@@ -3844,6 +4062,78 @@ router.delete('/styles/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- 技能库 ----------
+router.get('/skills', (req, res) => {
+  res.json(db.prepare('SELECT * FROM skills ORDER BY updated_at DESC').all());
+});
+
+router.get('/skills/:id', (req, res) => {
+  const s = db.prepare('SELECT * FROM skills WHERE id = ?').get(req.params.id);
+  if (!s) return res.status(404).json({ error: '技能不存在' });
+  res.json(s);
+});
+
+router.post('/skills', (req, res) => {
+  const { name, type, description, content, tags } = req.body || {};
+  if (!name || !String(name).trim()) return res.status(400).json({ error: '请填写技能名称' });
+  if (!content || !String(content).trim()) return res.status(400).json({ error: '请填写技能内容' });
+  const info = db.prepare(
+    'INSERT INTO skills (name, type, description, content, tags) VALUES (?,?,?,?,?)'
+  ).run(String(name).trim(), type || 'technique', description || '', content, tags || '');
+  const skill = db.prepare('SELECT * FROM skills WHERE id = ?').get(info.lastInsertRowid);
+  res.json(skill);
+});
+
+router.put('/skills/:id', (req, res) => {
+  const s = db.prepare('SELECT * FROM skills WHERE id = ?').get(req.params.id);
+  if (!s) return res.status(404).json({ error: '技能不存在' });
+  const sets = [];
+  const vals = [];
+  for (const f of ['name', 'type', 'description', 'content', 'tags']) {
+    if (req.body[f] !== undefined) { sets.push(`${f} = ?`); vals.push(req.body[f]); }
+  }
+  if (sets.length) {
+    vals.push(s.id);
+    db.prepare(`UPDATE skills SET ${sets.join(', ')}, updated_at = datetime('now','localtime') WHERE id = ?`).run(...vals);
+  }
+  res.json(db.prepare('SELECT * FROM skills WHERE id = ?').get(s.id));
+});
+
+router.delete('/skills/:id', (req, res) => {
+  db.prepare('DELETE FROM skills WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// 批量导入技能（SKILL.md 格式：YAML frontmatter 的 name/description + 正文）
+router.post('/skills/import', (req, res) => {
+  const files = req.body?.files;
+  if (!Array.isArray(files) || !files.length) return res.status(400).json({ error: '请提供要导入的技能文件' });
+
+  const results = [];
+  const insertSkill = db.prepare(
+    'INSERT INTO skills (name, type, description, content, tags) VALUES (?,?,?,?,?)'
+  );
+
+  for (const f of files) {
+    const parsed = parseSkillFile({ name: f?.name, content: f?.content });
+    if (parsed.error) { results.push({ file: f?.name, ok: false, error: parsed.error }); continue; }
+
+    // 同名不重复导入
+    const existing = db.prepare('SELECT id FROM skills WHERE name = ?').get(parsed.name);
+    if (existing) {
+      db.prepare(`UPDATE skills SET description = ?, content = ?, tags = ?, type = ?, updated_at = datetime('now','localtime') WHERE id = ?`)
+        .run(parsed.description, parsed.content, parsed.tags, 'technique', existing.id);
+      results.push({ file: f?.name, ok: true, name: parsed.name, updated: true });
+      continue;
+    }
+
+    const info = insertSkill.run(parsed.name, 'technique', parsed.description, parsed.content, parsed.tags);
+    results.push({ file: f?.name, ok: true, name: parsed.name, id: info.lastInsertRowid, updated: false });
+  }
+
+  res.json({ results, ok: results.length, fail: results.filter((r) => !r.ok).length });
+});
+
 // ---------- 设置 ----------
 function getLLMPresets() {
   try { return JSON.parse(getSetting('llm_presets', '[]')) || []; } catch { return []; }
@@ -3860,17 +4150,22 @@ router.get('/settings', (req, res) => {
     llm_presets: getLLMPresets(),
     novels_root: getNovelsRoot(),
     strict_ai_mode: getSetting('strict_ai_mode', '1'),
+    ai_score_pass: Number(getSetting('ai_score_pass', String(AI_SCORE_PASS_DEFAULT))),
     managerSendBy: getSetting('manager_send_by', 'enter')
   });
 });
 
 router.put('/settings', async (req, res) => {
-  const { llm_config, novels_root, migrate_novels, strict_ai_mode, managerSendBy } = req.body || {};
+  const { llm_config, novels_root, migrate_novels, strict_ai_mode, ai_score_pass, managerSendBy } = req.body || {};
   if (llm_config && typeof llm_config === 'object') {
     setSetting('llm_config', JSON.stringify(normalizeLLMConfig(llm_config)));
   }
   if (strict_ai_mode !== undefined) {
     setSetting('strict_ai_mode', strict_ai_mode ? '1' : '0');
+  }
+  if (ai_score_pass !== undefined) {
+    const n = Number(ai_score_pass);
+    setSetting('ai_score_pass', String(Number.isFinite(n) && n > 0 ? Math.round(n) : AI_SCORE_PASS_DEFAULT));
   }
   if (managerSendBy !== undefined) {
     const mode = String(managerSendBy) === 'ctrlEnter' ? 'ctrlEnter' : 'enter';
@@ -3883,7 +4178,7 @@ router.put('/settings', async (req, res) => {
       return res.status(400).json({ error: e.message });
     }
   }
-  res.json({ ok: true, novels_root: getNovelsRoot(), strict_ai_mode: getSetting('strict_ai_mode', '1'), managerSendBy: getSetting('manager_send_by', 'enter') });
+  res.json({ ok: true, novels_root: getNovelsRoot(), strict_ai_mode: getSetting('strict_ai_mode', '1'), ai_score_pass: Number(getSetting('ai_score_pass', String(AI_SCORE_PASS_DEFAULT))), managerSendBy: getSetting('manager_send_by', 'enter') });
 });
 
 // ---------- LLM 预设管理 ----------
@@ -4064,6 +4359,50 @@ router.post('/settings/test', async (req, res) => {
 });
 
 // ---------- 生成任务 Job（多本并行状态恢复） ----------
+// 生成资源观测汇总：续写轮数分布 + AI 检测分数分布，供调整阈值/观测成本
+router.get('/stats/generation', (req, res) => {
+  try {
+    const total = db.prepare('SELECT COUNT(*) n, COALESCE(SUM(rounds),0) rounds, COALESCE(ROUND(AVG(rounds),2),0) avg_rounds, COALESCE(SUM(duration_ms),0) duration_ms FROM generation_stats').get();
+    const byReason = db.prepare('SELECT pipe_reason, COUNT(*) n FROM generation_stats GROUP BY pipe_reason').all();
+    const roundDist = db.prepare('SELECT rounds, COUNT(*) n FROM generation_stats GROUP BY rounds ORDER BY rounds').all();
+    const recent = db.prepare('SELECT * FROM generation_stats ORDER BY id DESC LIMIT 10').all();
+    res.json({ total, byReason, roundDist, recent });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// AI 味检测分数分布：观察达标率，判断 aiScorePass() 阈值是否合理
+router.get('/stats/ai-detect', (req, res) => {
+  try {
+    const all = db.prepare('SELECT score, source FROM ai_detections').all();
+    if (!all.length) return res.json({ total: 0, passRate: null, buckets: [], bySource: [] });
+    const pass = all.filter((d) => d.score <= 20).length;
+    const buckets = [
+      { label: '0-10', n: 0 }, { label: '11-20', n: 0 }, { label: '21-30', n: 0 },
+      { label: '31-40', n: 0 }, { label: '41-60', n: 0 }, { label: '61+', n: 0 }
+    ];
+    for (const d of all) {
+      const s = Number(d.score) || 0;
+      if (s <= 10) buckets[0].n++;
+      else if (s <= 20) buckets[1].n++;
+      else if (s <= 30) buckets[2].n++;
+      else if (s <= 40) buckets[3].n++;
+      else if (s <= 60) buckets[4].n++;
+      else buckets[5].n++;
+    }
+    const bySource = db.prepare('SELECT source, COUNT(*) n, ROUND(AVG(score),1) avg_score FROM ai_detections GROUP BY source').all();
+    res.json({
+      total: all.length,
+      passRate: Math.round((pass / all.length) * 1000) / 10,
+      threshold: 20,
+      buckets,
+      bySource
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 router.get('/novels/:id/job', (req, res) => {
   const job = getActiveJobByNovel(req.params.id);
   res.json({ job });
@@ -4306,6 +4645,7 @@ router.post('/manager/chat', async (req, res) => {
       db.prepare('INSERT INTO manager_messages (novel_id, role, content, tool_name, tool_args, tool_call_id) VALUES (?,?,?,?,?,?)')
         .run(novelId, 'assistant', '', 'tool_request', JSON.stringify(r1.toolCalls.map((c) => c.name)), r1.toolCalls[0].id);
 
+      const executedResults = [];
       for (const tc of r1.toolCalls) {
         const reg = toolRegistry[tc.name];
         if (!reg) { pending.push({ tool_call_id: tc.id, name: tc.name, args: tc.args, error: '未知工具' }); continue; }
@@ -4315,6 +4655,7 @@ router.post('/manager/chat', async (req, res) => {
           const out = await reg.executor(parsed).catch((e) => ({ error: e.message }));
           db.prepare('INSERT INTO manager_messages (novel_id, role, content, tool_name, tool_call_id) VALUES (?,?,?,?,?)')
             .run(parsed.novel_id || novelId, 'tool', JSON.stringify(out), tc.name, tc.id);
+          executedResults.push({ name: tc.name, args: parsed, result: out });
         } else {
           const callId = randomUUID();
           try {
@@ -4342,6 +4683,14 @@ router.post('/manager/chat', async (req, res) => {
         { role: 'system', content: managerSystemContext(novelId) },
         ...cleanHistory2.map((m) => ({ role: m.role, content: m.content }))
       ];
+      // 把刚执行的读类工具结果喂给模型，让它能基于真实数据组织回答（避免模型编造进度）
+      if (executedResults.length) {
+        const toolSummary = executedResults.map((e) => {
+          const pretty = typeof e.result === 'string' ? e.result : JSON.stringify(e.result);
+          return `【${e.name}】${pretty}`;
+        }).join('\n\n');
+        msgs2.push({ role: 'user', content: `以下是刚才工具调用返回的真实结果，请以此为准回答作者，不要编造数据：\n\n${toolSummary}` });
+      }
       const r2 = await chat({ config, task: 'chat', messages: msgs2, maxTokens: Math.max(1024, Number(config.maxTokens) || 2048) }).catch((e) => ({ content: '', error: e.message }));
       const reply = String(r2.content || '').trim() || '操作已执行';
       db.prepare('INSERT INTO manager_messages (novel_id, role, content) VALUES (?, ?, ?)').run(novelId, 'assistant', reply);
@@ -4421,15 +4770,26 @@ router.post('/knowledge/import', async (req, res) => {
 
   try {
     const text = String(content);
-    const chunkSize = 4000;
-    const maxChunks = 30;
-    const chunks = [];
-    for (let i = 0; i < text.length && chunks.length < maxChunks; i += chunkSize) {
-      chunks.push(text.slice(i, i + chunkSize));
+
+    // 分块用于 RAG 样本存储（取前 30 段 4000 字块）
+    const sampleChunks = [];
+    for (let i = 0; i < text.length && sampleChunks.length < 30; i += 4000) {
+      sampleChunks.push(text.slice(i, i + 4000));
     }
-    saveSamples(corpusId, chunks);
+    saveSamples(corpusId, sampleChunks);
+
+    // 全书平均分成 12 段用于 LLM 逐段分析
+    const numSegments = 12;
+    const segments = [];
+    const segLen = Math.ceil(text.length / numSegments);
+    for (let i = 0; i < numSegments; i++) {
+      const start = i * segLen;
+      if (start >= text.length) break;
+      segments.push(text.slice(start, Math.min(start + segLen, text.length)));
+    }
+
     updateCorpusStatus(corpusId, 'learning', { totalWords: text.length });
-    send({ type: 'status', message: `已分块 ${chunks.length} 段，共 ${text.length} 字。` });
+    send({ type: 'status', message: `已分块 ${sampleChunks.length} 段，全书分成 ${segments.length} 段逐段分析，共 ${text.length} 字。` });
 
     // 无云端 LLM 时用离线统计分析
     if (useOffline) {
@@ -4442,24 +4802,84 @@ router.post('/knowledge/import', async (req, res) => {
       return end({ type: 'done', data: { corpus, analysis: report, offline: true } });
     }
 
-    send({ type: 'status', message: '正在用 AI 深度学习分析…' });
+    send({ type: 'progress', progress: 5, message: `正在用 AI 逐段分析（全文 ${text.length} 字，${segments.length} 段）…` });
 
-    const sample1 = chunks[0] || '';
-    const midIdx = Math.floor(chunks.length / 2);
-    const sample2 = chunks[midIdx] || '';
-    const sample3 = chunks[chunks.length - 1] || '';
-    const sampleText = `【开头片段】\n${sample1.slice(0, 3000)}\n\n【中段片段】\n${sample2.slice(0, 3000)}\n\n【结尾片段】\n${sample3.slice(0, 3000)}`;
+    const totalSegments = segments.length;
+const partialResults = [];
 
-    const r = await runLLMStream(config, [
-      { role: 'system', content: KNOWLEDGE_LEARN_SYSTEM },
-      { role: 'user', content: `这是一部${genre}题材的小说《${title || '未命名'}》。请分析其写作经验：\n\n${sampleText}` }
-    ], {
-      ctrl,
-      task: 'research',
-      maxTokens: 4000,
-      onDelta: (d) => send({ type: 'delta', content: d })
-    });
+    for (let i = 0; i < segments.length; i++) {
+      const pct = Math.round(((i + 1) / totalSegments) * 70);
+      send({ type: 'progress', progress: pct, message: `逐段分析中（第 ${i + 1}/${totalSegments} 段）…` });
 
+      let r = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          r = await chat({
+            config,
+            task: 'research',
+            messages: [
+              { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
+              { role: 'user', content: `以下是${genre}题材小说《${title || '未命名'}》的第 ${i + 1} 段文本：\n\n${segments[i]}` }
+            ],
+            maxTokens: 1500,
+            signal: ctrl?.signal,
+            timeout: 600000
+          });
+          break;
+        } catch (e) {
+          const is429 = /429|quota|too many|rate limit/i.test(e.message);
+          const isTimeout = /超时|timeout|请求超时|网络请求失败|连接中断/i.test(e.message);
+          if ((is429 || isTimeout) && attempt < 3) {
+            const waitSec = Math.pow(2, attempt) * 2;
+            send({ type: 'status', message: `${isTimeout ? '请求超时' : '请求限流'}（第 ${i + 1} 段），${waitSec} 秒后重试…` });
+            await new Promise((r) => setTimeout(r, waitSec * 1000));
+            continue;
+          }
+          const userAborted = ctrl?.signal?.aborted;
+          if (userAborted) throw new Error('AbortError');
+          send({ type: 'status', message: `第 ${i + 1} 段分析失败，跳过（${e.message}）` });
+          break;
+        }
+      }
+      if (r) {
+        try { partialResults.push(JSON.parse(r)); } catch { partialResults.push({ raw: r }); }
+      }
+    }
+
+    if (!partialResults.length) {
+      updateCorpusStatus(corpusId, 'failed');
+      return end({ type: 'error', message: '所有段落分析均失败，请稍后重试或检查模型状态。' });
+    }
+
+    send({ type: 'progress', progress: 75, message: '正在综合各段分析结果…' });
+
+    let r = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        r = await runLLMStream(config, [
+          { role: 'system', content: FINAL_SYNTHESIS_SYSTEM },
+          { role: 'user', content: `以下是对同一部${genre}题材小说《${title || '未命名'}》不同段落的分析结果，请综合为一份完整报告：\n\n${JSON.stringify(partialResults, null, 2)}` }
+        ], {
+          ctrl,
+          task: 'research',
+          maxTokens: 4000,
+          streamIdleTimeout: 600000,
+          onDelta: (d) => send({ type: 'delta', content: d })
+        });
+        break;
+      } catch (e) {
+        const is429 = /429|quota|too many|rate limit/i.test(e.message);
+        if (is429 && attempt < 3) {
+          const waitSec = Math.pow(2, attempt) * 2;
+          send({ type: 'status', message: `综合合成请求限流，${waitSec} 秒后重试…` });
+          await new Promise((r) => setTimeout(r, waitSec * 1000));
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    send({ type: 'progress', progress: 100, message: '学习完成！' });
     const analysis = r?.content || '';
     const parsed = extractJson(analysis);
     const analysisText = parsed ? JSON.stringify(parsed, null, 2) : analysis;

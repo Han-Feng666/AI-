@@ -45,6 +45,8 @@ export const useEditorStore = defineStore('editor', {
 
     allStyles: [],
     stylesLoading: false,
+    allSkills: [],
+    skillsLoading: false,
 
     generationAsk: null,
 
@@ -256,6 +258,21 @@ export const useEditorStore = defineStore('editor', {
 
     async saveStyles(ids) {
       await api.updateNovel(this.novelId, { style_ids: ids });
+      await this.refresh();
+    },
+
+    // ---------- 技能 ----------
+    async loadSkills() {
+      this.skillsLoading = true;
+      try {
+        this.allSkills = await api.listSkills();
+      } finally {
+        this.skillsLoading = false;
+      }
+    },
+
+    async saveSkills(ids) {
+      await api.updateNovel(this.novelId, { skill_ids: ids });
       await this.refresh();
     },
 

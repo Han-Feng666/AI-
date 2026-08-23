@@ -16,6 +16,7 @@ import WorldSettingsPanel from '../components/WorldSettingsPanel.vue';
 import ForeshadowPanel from '../components/ForeshadowPanel.vue';
 import RelationshipPanel from '../components/RelationshipPanel.vue';
 import StylePanel from '../components/StylePanel.vue';
+import SkillsPanel from '../components/SkillsPanel.vue';
 import OutlinePanel from '../components/OutlinePanel.vue';
 import StatsPanel from '../components/StatsPanel.vue';
 import AdaptDialog from '../components/AdaptDialog.vue';
@@ -487,6 +488,7 @@ async function deleteNovel() {
             <ForeshadowPanel v-else-if="store.workspace === 'foreshadowings'" />
             <RelationshipPanel v-else-if="store.workspace === 'relationships'" />
             <StylePanel v-else-if="store.workspace === 'styles'" />
+            <SkillsPanel v-else-if="store.workspace === 'skills'" />
             <OutlinePanel v-else-if="store.workspace === 'outline'" />
             <StatsPanel v-else-if="store.workspace === 'stats'" />
           </div>

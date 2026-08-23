@@ -1,12 +1,14 @@
 {
   "name": "novel-studio-server",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "private": true,
   "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "node index.js"
+    "dev": "node index.js",
+    "test": "node --test test/*.test.js",
+    "test:db": "node scripts/db-smoke.js"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.7.6",

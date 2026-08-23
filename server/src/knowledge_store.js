@@ -104,6 +104,7 @@ export function formatKnowledgeBlock(corporaIds) {
         if (parsed.logic_rules) parts.push(`【逻辑规律】${parsed.logic_rules}`);
         if (parsed.worldview) parts.push(`【世界观构建】${parsed.worldview}`);
         if (parsed.character_craft) parts.push(`【人物塑造】${parsed.character_craft}`);
+        if (parsed.scene_patterns) parts.push(`【经典场景模式】${parsed.scene_patterns}`);
         if (parsed.replicable_techniques) parts.push(`【可复用技法】${parsed.replicable_techniques}`);
         analysis = parts.join('\n');
       }
@@ -135,3 +136,5 @@ export function getNovelKnowledgeIds(novel) {
   if (!raw) return [];
   return String(raw).split(',').filter(Boolean).map(Number);
 }
+
+

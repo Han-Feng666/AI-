@@ -56,6 +56,10 @@ onMounted(() => {
             <el-icon><Reading /></el-icon>
             <span>知识学习库</span>
           </el-menu-item>
+          <el-menu-item index="/skills">
+            <el-icon><Lightning /></el-icon>
+            <span>技能库</span>
+          </el-menu-item>
         </el-menu>
         <div class="sidebar-footer">
           <el-button link class="theme-toggle" @click="toggleTheme">

@@ -937,8 +937,13 @@ async function fetchModels(auto = false) {
               active-text="铁律模式（生成质量门）"
               inactive-text=""
             />
-            <span class="polish-tip">开启后，生成与「去 AI 味」都经过强制质量门：润色 → 检测 → 未达标自动再润色（最多 3 轮），检测通过或不再命中 AI 高频词才算完成，从机制上保证不残留 AI 味</span>
+            <span class="polish-tip">开启后，生成与「去 AI 味」都经过强制质量门：润色 → 检测 → 未达标自动再润色（最多 3 轮），检测通过或高频 AI 腔词全部替换才算完成，从机制上保证不残留 AI 味。AI 腔词偶尔出现一次属正常写作，只有反复高频复用（如「仿佛」「眸底」短词达密度阈值、长短语复用 2 次）才判定为 AI 味。质量门判定规则：AI 评分数 + 高频词复用惩罚分 的总分不超过右侧阈值即视为达标。</span>
           </div>
+        </el-form-item>
+
+        <el-form-item label="AI 味质量门阈值">
+          <el-input-number v-model="store.ai_score_pass" :min="5" :max="40" :step="1" style="width: 160px" />
+          <span class="polish-tip" style="margin-left: 10px">越小越严苛（默认 15）：归入 15 以内要求文风几乎无 AI 痕迹；若频繁触发整章重写导致生成过慢，可放宽到 20~25。</span>
         </el-form-item>
 
         <el-form-item label="总管发送方式">

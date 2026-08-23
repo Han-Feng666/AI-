@@ -19,6 +19,44 @@ export function unescapeUnicode(str) {
   return out;
 }
 
+// 部分模型/中转网关在支持 function-calling 但协议不完整时，会在 content 里以 XML 文本
+// 形式输出工具调用（<function_calls><invoke name="X"><parameter name="k">v</parameter>...</invoke></function_calls>），
+// 而非 OpenAI 结构化 message.tool_calls。此函数把这类文本解析成 {name,args} 列表，供上层当 toolCalls 使用。
+export function parseTextToolCalls(content) {
+  const s = String(content || '');
+  const out = [];
+  const invokeRe = /<invoke\s+name\s*=\s*"([^"]+)"([\s\S]*?)<\/invoke>/gi;
+  let m;
+  while ((m = invokeRe.exec(s)) !== null) {
+    const name = m[1].trim();
+    const body = m[2] || '';
+    const args = {};
+    const paramRe = /<parameter\s+name\s*=\s*"([^"]+)"\s*>([\s\S]*?)<\/parameter>/gi;
+    let pm;
+    let hasParam = false;
+    while ((pm = paramRe.exec(body)) !== null) {
+      hasParam = true;
+      const key = pm[1].trim();
+      let val = pm[2].trim();
+      try { val = JSON.parse(val); } catch { /* keep as string */ }
+      args[key] = val;
+    }
+    if (!hasParam) {
+      // 兜底：<invoke name="X">{json}</invoke> 或 body 里裸 JSON 参数
+      const jsonM = body.match(/(\{(?:[^{}]|\{[^{}]*\})*\}|\[(?:[^\[\]]|\[[^\[\]]*\])*\])/);
+      if (jsonM) {
+        try { Object.assign(args, JSON.parse(jsonM[1])); } catch { /* ignore */ }
+      }
+    }
+    out.push({
+      id: `txt_${out.length}_${Math.random().toString(36).slice(2, 8)}`,
+      name,
+      args: JSON.stringify(args)
+    });
+  }
+  return out;
+}
+
 const PROVIDER_PRESETS = {
   openai: {
     name: 'OpenAI',
@@ -294,10 +332,34 @@ export async function chat(opts) {
     // 响应头已收到，说明连接成功：释放仅用于「等待响应头」的 connect 超时定时器，
     // 避免它一直挂着，把整个流式会话也限制在 connectTimeout 内（慢速流式模型会因此被误杀）。
     if (timer) { clearTimeout(timer); timer = null; }
-    try {
+    const runStreamOnce = async () => {
       const streamIdleTimeout = Number(opts.streamIdleTimeout) || 300000;
-      const r = await consumeStream(resp, onDelta, combined, streamIdleTimeout);
-      return { ...r, content: unescapeUnicode(r.content) };
+      return consumeStream(resp, onDelta, combined, streamIdleTimeout);
+    };
+    try {
+      const r0 = await runStreamOnce();
+      const content0 = unescapeUnicode(r0.content);
+      // 启动即中断（没收到有效正文）且非用户主动取消 → 短时重试 1 次
+      const userCancelled = !!signal?.aborted;
+      const retriable = r0.finishReason === 'length' && !userCancelled && (!content0 || content0.trim().length < 10);
+      if (!retriable) {
+        return { ...r0, content: content0, finishReason: r0.finishReason || 'stop' };
+      }
+      // 重试：重新发起流式请求（丢弃本次空响应，先释放原连接）
+      try { resp.body && resp.body.cancel && resp.body.cancel(); } catch { /* ignore */ }
+      const retryResp = await fetch(endpoint, {
+        method: 'POST',
+        headers: buildHeaders(cfg),
+        body: JSON.stringify(body),
+        signal: signal ?? undefined
+      });
+      if (!retryResp.ok) {
+        // 重试仍失败：保留 original 标 length，交给上层续写兜底
+        return { ...r0, content: content0, finishReason: 'length' };
+      }
+      const r1 = await consumeStream(retryResp, onDelta, signal, streamIdleTimeout);
+      const content1 = unescapeUnicode(r1.content);
+      return { ...r1, content: content1, finishReason: r1.finishReason || 'length' };
     } finally {
       cleanup();
     }
@@ -336,6 +398,16 @@ export async function chat(opts) {
           name: tc.function?.name,
           args: tc.function?.arguments || '{}'
         })) : [];
+      }
+    }
+
+    // 兼容"XML 文本形式的工具调用"：模型没走结构化 tool_calls，而是把 <invoke> 写进 content。
+    // 此时把文本调用解析进 toolCalls，并从 content 中剥离，避免把调用片段当回答回显给用户。
+    if (!toolCalls.length && /<function_calls>|<invoke\s+name/i.test(content)) {
+      const txtCalls = parseTextToolCalls(content);
+      if (txtCalls.length) {
+        toolCalls = txtCalls;
+        content = content.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi, '').trim();
       }
     }
 
@@ -428,7 +500,8 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
     if (e.name === 'AbortError') throw e;
     // 网关在流中返回的明确错误（如 503 过载/限流/余额不足）原样抛出，不能静默吞掉
     if (e.message?.startsWith('模型流式响应出错')) throw e;
-    // 其他异常：流中断时尽量保留已生成内容
+    // 其他异常：流中断时尽量保留已生成内容，但标记为 length 防止调用方误认为模型已自然收尾
+    finishReason = 'length';
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
     if (signalAbortCleanup) signalAbortCleanup();

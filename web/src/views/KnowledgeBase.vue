@@ -2,13 +2,14 @@
 import { ref, onMounted, computed } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import api from '../api';
-import { formatDate, GENRES, formatNumber } from '../utils/format';
+import { formatDate, GENRES, formatNumber, readTxtFile } from '../utils/format';
 
 const corpora = ref([]);
 const loading = ref(false);
 const dialogOpen = ref(false);
 const importing = ref(false);
 const importStatus = ref('');
+const importProgress = ref(0);
 const detailOpen = ref(false);
 const current = ref(null);
 const currentAnalysis = ref(null);
@@ -47,7 +48,7 @@ function openImport() {
   dialogOpen.value = true;
 }
 
-function onFileChange(uploadFile) {
+async function onFileChange(uploadFile) {
   const raw = uploadFile.raw;
   if (!raw) return;
   if (!/\.(txt|md|text)$/i.test(raw.name) && raw.type !== 'text/plain') {
@@ -55,21 +56,22 @@ function onFileChange(uploadFile) {
     uploadRef.value?.clearFiles();
     return;
   }
-  const reader = new FileReader();
-  reader.onload = () => {
-    form.value.content = String(reader.result || '');
+  try {
+    form.value.content = await readTxtFile(raw);
     form.value.title = form.value.title || raw.name.replace(/\.(txt|md|text)$/i, '');
     ElMessage.success(`已读取「${raw.name}」（${formatNumber(form.value.content.length)} 字）`);
-    // 立即清空 upload 内部 fileList，否则 :limit 会阻止连续导入第二个文件
-    uploadRef.value?.clearFiles();
-  };
-  reader.readAsText(raw, 'utf-8');
+  } catch (e) {
+    ElMessage.error(`读取文件失败：${e.message}`);
+  }
+  // 立即清空 upload 内部 fileList，否则 :limit 会阻止连续导入第二个文件
+  uploadRef.value?.clearFiles();
 }
 
 async function doImport() {
   if (!form.value.content.trim()) return ElMessage.warning('请导入小说文本');
   if (!form.value.genre) return ElMessage.warning('请选择小说题材');
   importing.value = true;
+  importProgress.value = 0;
   importStatus.value = '正在解析文本并分块…';
   try {
     const data = await api.importKnowledge({
@@ -79,6 +81,7 @@ async function doImport() {
       content: form.value.content
     }, {
       onStatus: (m) => { importStatus.value = m; },
+      onProgress: (pct) => { importProgress.value = pct; },
       onError: (m) => { throw new Error(m); }
     });
     corpora.value.unshift(data.corpus);
@@ -210,7 +213,7 @@ onMounted(load);
           >
             <div class="upload-tip">
               <el-icon :size="34" color="#9ca3af"><UploadFilled /></el-icon>
-              <div class="upload-text">点击选择 .txt 文件（支持大文件，AI 从开头/中段/结尾三段采样学习）</div>
+              <div class="upload-text">点击选择 .txt 文件（支持大文件，AI 将全文逐段分析，不遗漏任何章节）</div>
             </div>
           </el-upload>
           <el-input
@@ -220,13 +223,14 @@ onMounted(load);
             placeholder="或直接粘贴小说原文（建议至少 1 万字，越多学习越充分）"
           />
           <div class="text-hint">
-            已输入 {{ formatNumber(form.content.length) }} 字
-            <template v-if="form.content.length > 30000">（文本较长，AI 将从开头、中间、结尾各取一段深度学习分析）</template>
+已输入 {{ formatNumber(form.content.length) }} 字
+            <template v-if="form.content.length > 10000">（文本较长，AI 将全文逐段分析，进度条实时展示处理进度）</template>
           </div>
         </el-form-item>
       </el-form>
       <div v-if="importing" class="import-status">
         <el-icon class="is-loading"><Loading /></el-icon> {{ importStatus }}
+        <el-progress v-if="importProgress > 0" :percentage="importProgress" :stroke-width="6" style="width:100%;margin-top:8px" />
       </div>
       <template #footer>
         <el-button @click="dialogOpen = false">取消</el-button>

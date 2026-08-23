@@ -22,6 +22,7 @@ export const useSettingsStore = defineStore('settings', {
     loaded: false,
     novels_root: '',
     strict_ai_mode: true,
+    ai_score_pass: 15,
     managerSendBy: 'enter'
   }),
   getters: {
@@ -42,6 +43,7 @@ export const useSettingsStore = defineStore('settings', {
         if (s.llm_tasks) this.llm_tasks = s.llm_tasks;
         if (s.novels_root) this.novels_root = s.novels_root;
         if (s.strict_ai_mode !== undefined) this.strict_ai_mode = String(s.strict_ai_mode) !== '0';
+        if (s.ai_score_pass !== undefined) this.ai_score_pass = Number(s.ai_score_pass) || 15;
         if (s.managerSendBy) this.managerSendBy = s.managerSendBy === 'ctrlEnter' ? 'ctrlEnter' : 'enter';
       } catch (e) {
         console.warn('加载设置失败', e);
@@ -69,7 +71,7 @@ export const useSettingsStore = defineStore('settings', {
       this.llm_models = r.models || this.llm_models;
     },
     async save() {
-      await api.saveSettings({ llm_config: this.llm_config, strict_ai_mode: this.strict_ai_mode, managerSendBy: this.managerSendBy });
+      await api.saveSettings({ llm_config: this.llm_config, strict_ai_mode: this.strict_ai_mode, ai_score_pass: this.ai_score_pass, managerSendBy: this.managerSendBy });
     },
     async saveProp(kv) {
       Object.assign(this.$state, kv);

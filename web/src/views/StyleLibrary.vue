@@ -2,13 +2,14 @@
 import { ref, onMounted } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import api from '../api';
-import { formatDate } from '../utils/format';
+import { formatDate, readTxtFile } from '../utils/format';
 
 const styles = ref([]);
 const loading = ref(false);
 const dialogOpen = ref(false);
 const analyzing = ref(false);
 const analyzeStatus = ref('');
+const analyzeProgress = ref(0);
 const detailOpen = ref(false);
 const current = ref(null);
 const editOpen = ref(false);
@@ -40,7 +41,8 @@ async function createStyle() {
   if (!form.value.name.trim()) return ElMessage.warning('请填写风格名称');
   if (!form.value.sourceText.trim()) return ElMessage.warning('请粘贴或上传要分析的小说文本');
   analyzing.value = true;
-  analyzeStatus.value = '正在分析写作风格…';
+  analyzeProgress.value = 0;
+  analyzeStatus.value = '正在分块处理全文…';
   try {
     const data = await api.createStyle({
       name: form.value.name,
@@ -48,6 +50,7 @@ async function createStyle() {
       sourceText: form.value.sourceText
     }, {
       onStatus: (m) => { analyzeStatus.value = m; },
+      onProgress: (pct) => { analyzeProgress.value = pct; },
       onError: (m) => { throw new Error(m); }
     });
     styles.value.unshift(data.style);
@@ -60,7 +63,7 @@ async function createStyle() {
   }
 }
 
-function onFileChange(uploadFile) {
+async function onFileChange(uploadFile) {
   const raw = uploadFile.raw;
   if (!raw) return;
   if (!/\.(txt|md|text)$/i.test(raw.name) && raw.type !== 'text/plain') {
@@ -68,14 +71,14 @@ function onFileChange(uploadFile) {
     uploadRef.value?.clearFiles();
     return;
   }
-  const reader = new FileReader();
-  reader.onload = () => {
-    form.value.sourceText = String(reader.result || '');
+  try {
+    form.value.sourceText = await readTxtFile(raw);
     ElMessage.success(`已读取「${raw.name}」`);
-    // 立即清空 upload 内部 fileList，否则 :limit 会阻止连续导入第二个文件
-    uploadRef.value?.clearFiles();
-  };
-  reader.readAsText(raw, 'utf-8');
+  } catch (e) {
+    ElMessage.error(`读取文件失败：${e.message}`);
+  }
+  // 立即清空 upload 内部 fileList，否则 :limit 会阻止连续导入第二个文件
+  uploadRef.value?.clearFiles();
 }
 
 function showDetail(s) {
@@ -189,7 +192,7 @@ onMounted(load);
           >
             <div class="upload-tip">
               <el-icon :size="34" color="#9ca3af"><UploadFilled /></el-icon>
-              <div class="upload-text">点击选择 .txt 文件（支持千万字级超大文本，自动抽样分析）</div>
+              <div class="upload-text">点击选择 .txt 文件（支持超大文本，AI 全文逐段分析，进度条实时展示）</div>
             </div>
           </el-upload>
           <el-input
@@ -200,12 +203,13 @@ onMounted(load);
           />
           <div class="text-hint">
             已输入 {{ formatNum(form.sourceText.length) }} 字
-            <template v-if="form.sourceText.length > 60000">（文本较长，AI 将自动从开头、中间、结尾抽样分析，千万字级长篇同样适用）</template>
+            <template v-if="form.sourceText.length > 10000">（文本较长，AI 将全文逐段分析，进度条实时展示处理进度）</template>
           </div>
         </el-form-item>
       </el-form>
       <div v-if="analyzing" class="analyze-status">
         <el-icon class="is-loading"><Loading /></el-icon> {{ analyzeStatus }}
+        <el-progress v-if="analyzeProgress > 0" :percentage="analyzeProgress" :stroke-width="6" style="width:100%;margin-top:8px" />
       </div>
       <template #footer>
         <el-button @click="dialogOpen = false">取消</el-button>

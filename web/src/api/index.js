@@ -14,7 +14,7 @@ http.interceptors.response.use(
 );
 
 // 流式请求：解析后端 SSE，返回 AbortController 以便取消
-export async function streamRequest(url, body, { onStatus, onDelta, onError, onProgress, onReset, idleTimeout = 120000 } = {}) {
+export async function streamRequest(url, body, { onStatus, onDelta, onError, onProgress, onReset, idleTimeout = 300000 } = {}) {
   const ctrl = new AbortController();
   let timer;
   let idleAborted = false;
@@ -77,7 +77,11 @@ export async function streamRequest(url, body, { onStatus, onDelta, onError, onP
         buffer = lines.pop();
         for (const line of lines) {
           const t = line.trim();
-          if (!t.startsWith('data:')) continue;
+          if (!t.startsWith('data:')) {
+            // 非 data 行（如 :keepalive 心跳注释）也重置定时器，避免 idle 超时误杀
+            resetTimer();
+            continue;
+          }
           let obj;
           try {
             obj = JSON.parse(t.slice(5).trim());
@@ -205,6 +209,10 @@ export const api = {
   getAiTrend: (id) => http.get(`/novels/${id}/ai-trend`),
   saveStyleSamples: (id, samples) => http.post(`/novels/${id}/style-samples`, { samples }),
 
+  // 生成质量观测（Phase 增强 3）
+  getGenerationStats: () => http.get('/stats/generation'),
+  getAiDetectStats: () => http.get('/stats/ai-detect'),
+
   // 世界观设定
   getWorldSettings: (id) => http.get(`/novels/${id}/world-settings`),
   createWorldSetting: (id, data) => http.post(`/novels/${id}/world-settings`, data),
@@ -248,6 +256,14 @@ export const api = {
   updateLLMModel: (mid, patch) => http.put(`/settings/llm-models/${mid}`, patch),
   deleteLLMModel: (mid) => http.delete(`/settings/llm-models/${mid}`),
   testLLMRoute: (task) => http.post('/settings/llm-models/route-test', { task }, { timeout: 180000 }),
+
+  // 技能库
+  listSkills: () => http.get('/skills'),
+  getSkill: (id) => http.get(`/skills/${id}`),
+  createSkill: (data) => http.post('/skills', data),
+  importSkills: (files) => http.post('/skills/import', { files }),
+  updateSkill: (id, data) => http.put(`/skills/${id}`, data),
+  deleteSkill: (id) => http.delete(`/skills/${id}`),
 
   // 知识学习库
   importKnowledge: (data, handlers) => streamRequest('/knowledge/import', data, handlers),

@@ -12,6 +12,7 @@ const items = computed(() => {
     { id: 'foreshadowings', label: '伏笔', icon: 'Link' },
     { id: 'relationships', label: '关系网', icon: 'Share' },
     { id: 'styles', label: '风格', icon: 'Brush' },
+    { id: 'skills', label: '技能', icon: 'Lightning' },
     { id: 'outline', label: '大纲', icon: 'Map' },
     { id: 'stats', label: '统计', icon: 'DataLine' },
     { id: 'setup', label: '创作设置', icon: 'MagicStick' }
