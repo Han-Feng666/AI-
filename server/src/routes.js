@@ -3953,15 +3953,13 @@ router.post('/styles', async (req, res) => {
       let r = null;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          r = await chat({
-            config,
-            messages: [
-              { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
-              { role: 'user', content: `以下是小说《${String(name).trim()}》的第 ${i + 1} 段文本：\n\n${segments[i]}` }
-            ],
+          r = await runLLMStream(config, [
+            { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
+            { role: 'user', content: `以下是小说《${String(name).trim()}》的第 ${i + 1} 段文本：\n\n${segments[i]}` }
+          ], {
+            ctrl,
             maxTokens: 1500,
-            signal: ctrl?.signal,
-            timeout: 600000
+            streamIdleTimeout: 600000
           });
           break;
         } catch (e) {
@@ -4814,16 +4812,13 @@ const partialResults = [];
       let r = null;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          r = await chat({
-            config,
-            task: 'research',
-            messages: [
-              { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
-              { role: 'user', content: `以下是${genre}题材小说《${title || '未命名'}》的第 ${i + 1} 段文本：\n\n${segments[i]}` }
-            ],
+          r = await runLLMStream(config, [
+            { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
+            { role: 'user', content: `以下是${genre}题材小说《${title || '未命名'}》的第 ${i + 1} 段文本：\n\n${segments[i]}` }
+          ], {
+            ctrl,
             maxTokens: 1500,
-            signal: ctrl?.signal,
-            timeout: 600000
+            streamIdleTimeout: 600000
           });
           break;
         } catch (e) {
