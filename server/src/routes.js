@@ -3930,63 +3930,72 @@ router.post('/styles', async (req, res) => {
 
   const text = String(sourceText);
 
-  // 全书平均分成 10 段，逐段分析覆盖全部内容
-  const numSegments = 10;
-  const segments = [];
-  const segLen = Math.ceil(text.length / numSegments);
-  for (let i = 0; i < numSegments; i++) {
-    const start = i * segLen;
-    if (start >= text.length) break;
-    segments.push(text.slice(start, Math.min(start + segLen, text.length)));
+  // 分块处理：将全文按固定大小分块，保证不遗漏任何内容
+  // 最多 50 块，每块至少 50K 字，超大文本自动增大块大小
+  const maxChunks = 50;
+  const minChunkSize = 50000;
+  const chunkSize = Math.max(minChunkSize, Math.ceil(text.length / maxChunks));
+  const chunks = [];
+  for (let i = 0; i < text.length; i += chunkSize) {
+    chunks.push(text.slice(i, i + chunkSize));
   }
 
-  send({ type: 'progress', progress: 5, message: `正在用 AI 逐段分析风格（全文 ${text.length} 字，${segments.length} 段）…` });
+  send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析写作风格（全文 ${text.length} 字，${chunks.length} 块，每块约 ${chunkSize} 字，每批 5 块并发）…` });
 
   try {
     const partialResults = [];
-    const totalSegments = segments.length;
+    const concurrency = 5;
 
-    for (let i = 0; i < segments.length; i++) {
-      const pct = Math.round(5 + ((i + 1) / totalSegments) * 70);
-      send({ type: 'progress', progress: pct, message: `逐段分析中（第 ${i + 1}/${totalSegments} 段）…` });
+    for (let batchStart = 0; batchStart < chunks.length; batchStart += concurrency) {
+      const batchEnd = Math.min(batchStart + concurrency, chunks.length);
+      const batch = chunks.slice(batchStart, batchEnd);
+      const pct = 5 + Math.round((batchEnd / chunks.length) * 70);
+      send({ type: 'progress', progress: pct, message: `分析中（第 ${batchStart + 1}-${batchEnd}/${chunks.length} 块）…` });
 
-      let r = null;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          r = await runLLMStream(config, [
-            { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
-            { role: 'user', content: `以下是小说《${String(name).trim()}》的第 ${i + 1} 段文本：\n\n${segments[i]}` }
-          ], {
-            ctrl,
-            maxTokens: 1500,
-            streamIdleTimeout: 600000
-          });
-          break;
-        } catch (e) {
-          const is429 = /429|quota|too many|rate limit/i.test(e.message);
-          const isTimeout = /超时|timeout|请求超时|网络请求失败|连接中断/i.test(e.message);
-          if ((is429 || isTimeout) && attempt < 3) {
-            const waitSec = Math.pow(2, attempt) * 2;
-            send({ type: 'status', message: `${isTimeout ? '请求超时' : '请求限流'}（第 ${i + 1} 段），${waitSec} 秒后重试…` });
-            await new Promise((r) => setTimeout(r, waitSec * 1000));
-            continue;
+      const tasks = batch.map((chunk, idx) =>
+        (async () => {
+          const chunkIndex = batchStart + idx;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              const r = await runLLMStream(config, [
+                { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
+                { role: 'user', content: `以下是小说《${String(name).trim()}》的第 ${chunkIndex + 1} 段文本：\n\n${chunk}` }
+              ], {
+                ctrl,
+                maxTokens: 1500,
+                streamIdleTimeout: 600000
+              });
+              return r ? extractJson(r.content) : null;
+            } catch (e) {
+              const is429 = /429|quota|too many|rate limit/i.test(e.message);
+              const isTimeout = /超时|timeout|请求超时|网络请求失败|连接中断/i.test(e.message);
+              if ((is429 || isTimeout) && attempt < 3) {
+                await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 2000));
+                continue;
+              }
+              if (ctrl?.signal?.aborted) throw new Error('AbortError');
+              return null;
+            }
           }
-          const userAborted = ctrl?.signal?.aborted;
-          if (userAborted) throw new Error('AbortError');
-          send({ type: 'status', message: `第 ${i + 1} 段分析失败，跳过（${e.message}）` });
-          break;
-        }
-      }
+          return null;
+        })()
+      );
 
-      const parsed = r ? extractJson(r.content) : null;
-      if (parsed) partialResults.push(parsed);
+      const results = await Promise.allSettled(tasks);
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          if (result.reason?.message === 'AbortError') throw result.reason;
+          continue;
+        }
+        if (result.value) partialResults.push(result.value);
+      }
     }
 
     if (!partialResults.length) {
-      return end({ type: 'error', message: '所有段落分析均失败，请稍后重试或更换模型。' });
+      return end({ type: 'error', message: '所有块分析均失败，请稍后重试或更换模型。' });
     }
 
-    send({ type: 'progress', progress: 78, message: '正在综合各段分析结果…' });
+    send({ type: 'progress', progress: 78, message: `分块分析完成（${partialResults.length}/${chunks.length} 块成功），正在综合结果…` });
 
     let r = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -4776,18 +4785,18 @@ router.post('/knowledge/import', async (req, res) => {
     }
     saveSamples(corpusId, sampleChunks);
 
-    // 全书平均分成 12 段用于 LLM 逐段分析
-    const numSegments = 12;
-    const segments = [];
-    const segLen = Math.ceil(text.length / numSegments);
-    for (let i = 0; i < numSegments; i++) {
-      const start = i * segLen;
-      if (start >= text.length) break;
-      segments.push(text.slice(start, Math.min(start + segLen, text.length)));
+    // 分块处理：将全文按固定大小分块，保证不遗漏任何内容
+    // 最多 50 块，每块至少 50K 字，超大文本自动增大块大小
+    const maxChunks = 50;
+    const minChunkSize = 50000;
+    const chunkSize = Math.max(minChunkSize, Math.ceil(text.length / maxChunks));
+    const chunks = [];
+    for (let i = 0; i < text.length; i += chunkSize) {
+      chunks.push(text.slice(i, i + chunkSize));
     }
 
     updateCorpusStatus(corpusId, 'learning', { totalWords: text.length });
-    send({ type: 'status', message: `已分块 ${sampleChunks.length} 段，全书分成 ${segments.length} 段逐段分析，共 ${text.length} 字。` });
+    send({ type: 'status', message: `已分块 ${sampleChunks.length} 段，全文 ${text.length} 字，分成 ${chunks.length} 块（每块约 ${chunkSize} 字），每批 5 块并发分析。` });
 
     // 无云端 LLM 时用离线统计分析
     if (useOffline) {
@@ -4800,44 +4809,53 @@ router.post('/knowledge/import', async (req, res) => {
       return end({ type: 'done', data: { corpus, analysis: report, offline: true } });
     }
 
-    send({ type: 'progress', progress: 5, message: `正在用 AI 逐段分析（全文 ${text.length} 字，${segments.length} 段）…` });
+    send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析（全文 ${text.length} 字，${chunks.length} 块，每批 5 块并发）…` });
 
-    const totalSegments = segments.length;
-const partialResults = [];
+    const partialResults = [];
+    const concurrency = 5;
 
-    for (let i = 0; i < segments.length; i++) {
-      const pct = Math.round(((i + 1) / totalSegments) * 70);
-      send({ type: 'progress', progress: pct, message: `逐段分析中（第 ${i + 1}/${totalSegments} 段）…` });
+    for (let batchStart = 0; batchStart < chunks.length; batchStart += concurrency) {
+      const batchEnd = Math.min(batchStart + concurrency, chunks.length);
+      const batch = chunks.slice(batchStart, batchEnd);
+      const pct = Math.round((batchEnd / chunks.length) * 70);
+      send({ type: 'progress', progress: pct, message: `分析中（第 ${batchStart + 1}-${batchEnd}/${chunks.length} 块）…` });
 
-      let r = null;
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          r = await runLLMStream(config, [
-            { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
-            { role: 'user', content: `以下是${genre}题材小说《${title || '未命名'}》的第 ${i + 1} 段文本：\n\n${segments[i]}` }
-          ], {
-            ctrl,
-            maxTokens: 1500,
-            streamIdleTimeout: 600000
-          });
-          break;
-        } catch (e) {
-          const is429 = /429|quota|too many|rate limit/i.test(e.message);
-          const isTimeout = /超时|timeout|请求超时|网络请求失败|连接中断/i.test(e.message);
-          if ((is429 || isTimeout) && attempt < 3) {
-            const waitSec = Math.pow(2, attempt) * 2;
-            send({ type: 'status', message: `${isTimeout ? '请求超时' : '请求限流'}（第 ${i + 1} 段），${waitSec} 秒后重试…` });
-            await new Promise((r) => setTimeout(r, waitSec * 1000));
-            continue;
+      const tasks = batch.map((chunk, idx) =>
+        (async () => {
+          const chunkIndex = batchStart + idx;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              const r = await runLLMStream(config, [
+                { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
+                { role: 'user', content: `以下是${genre}题材小说《${title || '未命名'}》的第 ${chunkIndex + 1} 段文本：\n\n${chunk}` }
+              ], {
+                ctrl,
+                maxTokens: 1500,
+                streamIdleTimeout: 600000
+              });
+              return r ? extractJson(r.content) : null;
+            } catch (e) {
+              const is429 = /429|quota|too many|rate limit/i.test(e.message);
+              const isTimeout = /超时|timeout|请求超时|网络请求失败|连接中断/i.test(e.message);
+              if ((is429 || isTimeout) && attempt < 3) {
+                await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 2000));
+                continue;
+              }
+              if (ctrl?.signal?.aborted) throw new Error('AbortError');
+              return null;
+            }
           }
-          const userAborted = ctrl?.signal?.aborted;
-          if (userAborted) throw new Error('AbortError');
-          send({ type: 'status', message: `第 ${i + 1} 段分析失败，跳过（${e.message}）` });
-          break;
+          return null;
+        })()
+      );
+
+      const results = await Promise.allSettled(tasks);
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          if (result.reason?.message === 'AbortError') throw result.reason;
+          continue;
         }
-      }
-      if (r) {
-        try { partialResults.push(JSON.parse(r)); } catch { partialResults.push({ raw: r }); }
+        if (result.value) partialResults.push(result.value);
       }
     }
 
