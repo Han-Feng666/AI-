@@ -3945,7 +3945,7 @@ router.post('/styles', async (req, res) => {
   try {
     const partialResults = [];
     const concurrency = 5;
-    let doneChunks = 0;
+    let totalDone = 0;
 
     for (let batchStart = 0; batchStart < chunks.length; batchStart += concurrency) {
       const batchEnd = Math.min(batchStart + concurrency, chunks.length);
@@ -3964,6 +3964,8 @@ router.post('/styles', async (req, res) => {
                 maxTokens: 1500,
                 streamIdleTimeout: 600000
               });
+              totalDone++;
+              send({ type: 'progress', progress: 5 + Math.round((totalDone / chunks.length) * 70), message: `正在分析（${totalDone}/${chunks.length} 块）…` });
               return r ? extractJson(r.content) : null;
             } catch (e) {
               const is429 = /429|quota|too many|rate limit/i.test(e.message);
@@ -3973,9 +3975,13 @@ router.post('/styles', async (req, res) => {
                 continue;
               }
               if (ctrl?.signal?.aborted) throw new Error('AbortError');
+              totalDone++;
+              send({ type: 'progress', progress: 5 + Math.round((totalDone / chunks.length) * 70), message: `正在分析（${totalDone}/${chunks.length} 块）…` });
               return null;
             }
           }
+          totalDone++;
+          send({ type: 'progress', progress: 5 + Math.round((totalDone / chunks.length) * 70), message: `正在分析（${totalDone}/${chunks.length} 块）…` });
           return null;
         })()
       );
@@ -3988,8 +3994,6 @@ router.post('/styles', async (req, res) => {
         }
         if (result.value) partialResults.push(result.value);
       }
-      doneChunks += batch.length;
-      send({ type: 'progress', progress: 5 + Math.round((doneChunks / chunks.length) * 70), message: `分析中（${doneChunks}/${chunks.length} 块完成）…` });
     }
 
     if (!partialResults.length) {
@@ -4814,7 +4818,7 @@ router.post('/knowledge/import', async (req, res) => {
 
     const partialResults = [];
     const concurrency = 5;
-    let doneChunks = 0;
+    let totalDone = 0;
 
     for (let batchStart = 0; batchStart < chunks.length; batchStart += concurrency) {
       const batchEnd = Math.min(batchStart + concurrency, chunks.length);
@@ -4833,6 +4837,8 @@ router.post('/knowledge/import', async (req, res) => {
                 maxTokens: 1500,
                 streamIdleTimeout: 600000
               });
+              totalDone++;
+              send({ type: 'progress', progress: 5 + Math.round((totalDone / chunks.length) * 70), message: `正在分析（${totalDone}/${chunks.length} 块）…` });
               return r ? extractJson(r.content) : null;
             } catch (e) {
               const is429 = /429|quota|too many|rate limit/i.test(e.message);
@@ -4842,9 +4848,13 @@ router.post('/knowledge/import', async (req, res) => {
                 continue;
               }
               if (ctrl?.signal?.aborted) throw new Error('AbortError');
+              totalDone++;
+              send({ type: 'progress', progress: 5 + Math.round((totalDone / chunks.length) * 70), message: `正在分析（${totalDone}/${chunks.length} 块）…` });
               return null;
             }
           }
+          totalDone++;
+          send({ type: 'progress', progress: 5 + Math.round((totalDone / chunks.length) * 70), message: `正在分析（${totalDone}/${chunks.length} 块）…` });
           return null;
         })()
       );
@@ -4857,8 +4867,6 @@ router.post('/knowledge/import', async (req, res) => {
         }
         if (result.value) partialResults.push(result.value);
       }
-      doneChunks += batch.length;
-      send({ type: 'progress', progress: 5 + Math.round((doneChunks / chunks.length) * 70), message: `分析中（${doneChunks}/${chunks.length} 块完成）…` });
     }
 
     if (!partialResults.length) {
