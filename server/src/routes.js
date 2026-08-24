@@ -1268,7 +1268,8 @@ const userPrompt = `用户的灵感想法：${concept || novel.concept || ''}
   }
 
   const maxOut = Math.max(4096, Number(config.maxTokens) || 8192);
-  const skeletonMaxOut = Math.min(maxOut, 8192);
+  // 骨架输出含角色/势力/关系列表，输出规模大：下限提到 12288，防止截断导致反复重试后降级（书名/大纲雷同的根因之一）
+  const skeletonMaxOut = Math.min(Math.max(maxOut, 12288), 16384);
   const chapterMaxOut = Math.min(maxOut, 4096);
 
   // 流式生成并把内容透传给前端（进度可见），返回完整文本
@@ -1293,18 +1294,20 @@ const userPrompt = `用户的灵感想法：${concept || novel.concept || ''}
   // 指数退避
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // 流式生成 + 解析 JSON，最多重试 5 次（流式 + 非流式交替 + 指数退避）
-  // 重试时追加格式强化提示，降低格式出错率。重试时递增 max_tokens 防止截断
+  // 流式生成 + 解析 JSON，最多重试 maxAttempts 次（流式 + 非流式交替 + 指数退避）
+  // 重试时追加格式强化提示，降低格式出错率。重试时递增 max_tokens 防止截断（上限 cap）
   const FORMAT_REMINDER = '\n\n【重要提醒】你之前的输出无法被解析为 JSON。请严格只输出一个 JSON 对象或数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
-const jsonFrom = async (messages, label, mt = maxOut) => {
+const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
+    const maxAttempts = Number(opts.maxAttempts) > 0 ? opts.maxAttempts : 5;
+    const cap = Number(opts.cap) > 0 ? opts.cap : maxOut;
     let lastText = '';
-    for (let attempt = 1; attempt <= 5; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (attempt > 1) {
         const waitSec = Math.pow(2, attempt - 1);
         send({ type: 'status', message: `AI 返回格式异常，第 ${attempt} 次重试（等待 ${waitSec}s 后重试）…` });
         await sleep(waitSec * 1000);
         // 递增 max_tokens 防止截断
-        mt = Math.min(maxOut, Math.round(mt * 1.5));
+        mt = Math.min(cap, Math.round(mt * 1.5));
       }
       // 重试时追加格式强化提示
       const useMessages = attempt > 1
@@ -1352,13 +1355,13 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
       }
       const obj = extractJson(lastText);
       if (obj) return obj;
-      if (attempt < 5) {
+      if (attempt < maxAttempts) {
         const preview = lastText.slice(0, 120).replace(/\n/g, ' ');
         send({ type: 'status', message: `解析失败（返回内容开头：${preview}…），将重试…` });
       }
     }
     if (lastText.trim()) {
-      // 5 次重试后仍失败但至少返回了文本，尝试解析最后一段
+      // 重试用尽仍失败但至少返回了文本，尝试解析最后一段
       const obj = extractJson(lastText.slice(-2000));
       if (obj) return obj;
     }
@@ -1378,10 +1381,12 @@ const jsonFrom = async (messages, label, mt = maxOut) => {
   };
 
   try {
-    // 无总超时上限：只要模型持续返回数据就继续生成
-    // 只用 per-batch idle timeout（runLLMStream 内部的 idle timer 已实现）
+    // 整体超时保护：防止极端情况下（慢模型/反复重试）无限拉长。到点后章节用占位补齐、细纲跳过剩余，保证方案完整收尾
+    const PLAN_DEADLINE_MS = 120 * 60 * 1000; // 120 分钟
+    const planDeadline = Date.now() + PLAN_DEADLINE_MS;
+    const isPlanOverdue = () => Date.now() > planDeadline;
     const estimatedBatches = Math.ceil(target / 30);
-    send({ type: 'status', message: `开始生成方案（目标 ${target} 章，预计 ${estimatedBatches} 批，无总超时限制，逐批完成）…` });
+    send({ type: 'status', message: `开始生成方案（目标 ${target} 章，预计 ${estimatedBatches} 批，逐批完成）…` });
     send({ type: 'progress', progress: 8, message: '正在构思世界观、角色与剧情大纲…' });
 
     // 注入知识学习库分析（手动关联 + 按题材自动匹配）
@@ -1440,21 +1445,23 @@ ${parts.join('\n\n')}
         { role: 'user', content: userPrompt }
       ],
       '正在构思世界观、角色与剧情大纲…',
-      skeletonMaxOut
+      skeletonMaxOut,
+      { cap: skeletonMaxOut }
     );
     if (!skeleton) {
-      // 骨架降级：基于用户输入生成基础骨架
-      send({ type: 'status', message: '骨架解析失败 5 次，正在生成基础骨架…' });
+      // 骨架降级：基于用户输入生成基础骨架（临时书名，供占位，后续可用「修改方案」完善）
+      send({ type: 'status', message: '骨架多次解析失败，已生成基础骨架（临时书名）…' });
+      const fallbackTitle = (concept || '').trim().slice(0, 12) || '未命名小说';
       skeleton = {
-        title: (concept || '未命名小说').slice(0, 20),
-        genre: genre || '通用',
+        title: fallbackTitle,
+        genre: genre || novel.genre || '通用',
         world_view: '（待补充）',
         outline: concept || '（待补充）',
         characters: [],
         relationships: [],
         chapters: []
       };
-      send({ type: 'status', message: '已生成基础骨架，继续规划章节…' });
+      send({ type: 'status', message: '已生成基础骨架，继续规划章节…（提示：当前书名为临时占位，可生成后用「修改方案」让 AI 重拟书名与设定）' });
     }
     send({ type: 'progress', progress: 30, message: '骨架已生成，正在规划章节…' });
     updateJob(job.id, { progress: 30, stream_cursor: '骨架已生成，正在规划章节…' });
@@ -1473,6 +1480,12 @@ ${parts.join('\n\n')}
       const MAX_CONSECUTIVE_FALLBACKS = 3;
 
       while (start <= target) {
+        if (isPlanOverdue()) {
+          const remaining = generateFallbackChapters(start, target, brief);
+          allChapters.push(...remaining);
+          send({ type: 'status', message: `方案生成已到整体时限，剩余章节（第 ${start}-${target} 章）已用占位补齐，生成完成后可手动完善。` });
+          break;
+        }
         const batchEnd = Math.min(target, start + BATCH_SIZE - 1);
         const batchSize = batchEnd - start + 1;
 
@@ -1538,11 +1551,13 @@ ${parts.join('\n\n')}
 
     const plan = { ...skeleton, chapters: allChapters.slice(0, target) };
 
-    // 生成细纲（场景级 beat）：批量生成，每批 5 章
+    // 生成细纲（场景级 beat）：批量生成，每批 5 章。批与批之间无依赖，改为并发执行大幅提速
     send({ type: 'progress', progress: 93, message: '正在生成细纲…' });
     updateJob(job.id, { progress: 93, word_count: plan.chapters.length, stream_cursor: '正在生成细纲…' });
     try {
       const BEATS_BATCH = 5;
+      const BEATS_CONCURRENCY = 5; // 并发批数（= 同时进行的 LLM 请求数）
+      const batches = [];
       for (let batchStart = 0; batchStart < plan.chapters.length; batchStart += BEATS_BATCH) {
         const batchEnd = Math.min(batchStart + BEATS_BATCH, plan.chapters.length);
         const batch = plan.chapters.slice(batchStart, batchEnd);
@@ -1551,16 +1566,21 @@ ${parts.join('\n\n')}
           const idx = batchStart + i + 1;
           beatsReq[idx] = { title: ch.title, summary: ch.summary, emotion: ch.emotion, arc_hint: ch.arc_hint, hook: ch.hook };
         });
+        batches.push({ batchStart, batchEnd, userContent: `作品骨架：\n${brief}\n\n请为第 ${batchStart + 1} 至第 ${batchEnd} 章生成细纲（场景级 beat），每章 3-6 个场景。\n\n各章信息：\n${JSON.stringify(beatsReq, null, 2)}` });
+      }
+      const runBatch = async (b) => {
+        // 每批最多重试 2 次，失败不阻塞，正文创作时按大纲兜底
         const beatsRes = await jsonFrom(
           [
             { role: 'system', content: PLAN_BEATS_SYSTEM },
-            { role: 'user', content: `作品骨架：\n${brief}\n\n请为第 ${batchStart + 1} 至第 ${batchEnd} 章生成细纲（场景级 beat），每章 3-6 个场景。\n\n各章信息：\n${JSON.stringify(beatsReq, null, 2)}` }
+            { role: 'user', content: b.userContent }
           ],
-          `正在生成细纲（第 ${batchStart + 1}-${batchEnd} 章）…`,
-          { maxAttempts: 2, filter: (v) => typeof v === 'object' && v !== null }
+          `正在生成细纲（第 ${b.batchStart + 1}-${b.batchEnd} 章）…`,
+          skeletonMaxOut,
+          { maxAttempts: 2, cap: skeletonMaxOut }
         );
         if (beatsRes && typeof beatsRes === 'object') {
-          for (let i = batchStart; i < batchEnd; i++) {
+          for (let i = b.batchStart; i < b.batchEnd; i++) {
             const idx = i + 1;
             const chBeats = beatsRes[String(idx)];
             if (Array.isArray(chBeats) && chBeats.length) {
@@ -1568,10 +1588,25 @@ ${parts.join('\n\n')}
             }
           }
         }
-        const pct = 93 + Math.round(((batchEnd) / plan.chapters.length) * 3);
-        send({ type: 'progress', progress: pct, message: `细纲进度：${Math.min(batchEnd, plan.chapters.length)}/${plan.chapters.length} 章` });
+      };
+      for (let i = 0; i < batches.length; i += BEATS_CONCURRENCY) {
+        if (isPlanOverdue()) {
+          send({ type: 'status', message: '方案生成已到整体时限，剩余细纲已跳过（正文创作时会按大纲现场生成场景）。' });
+          break;
+        }
+        const slice = batches.slice(i, i + BEATS_CONCURRENCY);
+        const settled = await Promise.allSettled(slice.map(runBatch));
+        // 用户主动中止：立即终止
+        const aborted = settled.find((r) => r.status === 'rejected' && r.reason?.name === 'AbortError' && ctrl.signal.aborted);
+        if (aborted) throw aborted.reason;
+        const doneChapters = Math.min((i + slice.length) * BEATS_BATCH, plan.chapters.length);
+        const pct = 93 + Math.round((doneChapters / plan.chapters.length) * 3);
+        send({ type: 'progress', progress: pct, message: `细纲进度：${doneChapters}/${plan.chapters.length} 章` });
       }
-    } catch { /* 细纲生成失败不阻塞，后续章节生成时运行时生成 */ }
+    } catch (e) {
+      // 用户中止向上抛，其余细纲生成失败不阻塞，后续章节生成时运行时生成
+      if (e?.name === 'AbortError' && ctrl.signal.aborted) throw e;
+    }
 
     send({ type: 'progress', progress: 96, message: '正在应用方案到小说…' });
     const result = await applyPlan(novel, plan, { words, target, concept });
