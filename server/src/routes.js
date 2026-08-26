@@ -692,6 +692,157 @@ function detectEnglishLeak(full) {
   return { leaked: false, quote: '' };
 }
 
+// 思考残留/任务复述检测：推理型模型（deepseek-v4-flash 等）会把内部"规划/复述任务要求"
+// 当成正文开头输出（如"我们需要回答用户：重写《X》第一章正文，约2000字，直接正文…"），
+// 这是上一版"重新生成输出思考过程"问题的根因。逐句识别开头是否在复述任务而非写故事。
+const THINK_RESIDUE_SENTENCE = [
+  /(?:我们|我|本模型|AI)(?:需要|要|必须|将|会|正在)?(?:回答|服务|满足|为)?用户[：:]?/,
+  /(?:我们需要回答|我要回答|请回答)/,
+  /重写《[^》]{1,20}》第[一二三四五六七八九十百千\d零]+章正文/,
+  /(?:本章|本段)?(?:正文)?约\s*\d{2,6}\s*字[，,]?(?:中文|左右|的正文)?/,
+  /不输出(?:标题|markdown|标题\/markdown)[，,]?直接(?:正文|输出正文)/,
+  /需要修正(?:上一版|上版|前版)(?:问题|反馈|内容)/,
+  /请(?:直接)?(?:开始)?创作本章正文/,
+  /(?:以下|上面|上文)(?:为|是)?(?:本章|重新|修改后|生成)?(?:正文|内容)[：:]/,
+  /(?:好的|好|收到|明白|没问题|了解)[，,。\s]{0,4}(?:我|我们)?(?:来|会|将)?(?:重新)?(?:生成|重写|创作|继续|修改)/,
+  /^(?:根据|按照|遵循)(?:以上|上述|你的)?(?:要求|指示|指令|反馈)[，,]?(?:我)?(?:来|将|会)?(?:重新|整体)?(?:生成|重写|创作|修改)/
+];
+function isThinkingResidueSentence(sent) {
+  const s = String(sent || '').trim();
+  if (!s) return false;
+  if (s.length < 4 || s.length > 80) return false;
+  return THINK_RESIDUE_SENTENCE.some((re) => re.test(s));
+}
+// 检测正文开头是否混入思考/任务复述残留（只看开头 600 字，避免误伤正文中段）
+function detectThinkingResidue(full) {
+  const text = String(full || '').trim();
+  if (!text) return { leaked: false, quote: '' };
+  const head = text.slice(0, 600);
+  const parts = head.split(/(?<=[。！？!?；\n])/).filter((p) => p.trim());
+  let leaked = false;
+  let quote = '';
+  let metaRun = 0;
+  for (const p of parts) {
+    const t = p.trim();
+    if (!t) continue;
+    if (isThinkingResidueSentence(t)) {
+      metaRun++;
+      if (!leaked) { leaked = true; quote = t.slice(0, 80); }
+      if (metaRun >= 2) break;
+    } else {
+      break;
+    }
+  }
+  return { leaked, quote };
+}
+// 剥离正文开头的思考/任务复述残留：从开头逐句删除"复述任务"的句子，直到碰到正常叙事句。
+// 兜底：剥离后剩余过短（整段都是思考）则原样返回，交由质检判重生成。
+function stripThinkingResidue(text) {
+  const s = String(text || '').trim();
+  if (!s) return s;
+  const head = s.slice(0, 600);
+  const parts = head.split(/(?<=[。！？!?；\n])/).filter((p) => p.trim());
+  let metaCount = 0;
+  for (const p of parts) {
+    if (isThinkingResidueSentence(p.trim())) metaCount++;
+    else break;
+  }
+  if (metaCount === 0) return s;
+  // 重建：保留 head 中被剥离的句段之后的内容
+  let cutLen = 0;
+  let count = 0;
+  for (const p of parts) {
+    if (count >= metaCount) break;
+    cutLen += p.length;
+    count++;
+  }
+  const rest = (s.slice(cutLen) || '').trim();
+  if (!rest) return s; // 剥离后什么都没有 → 整段都是思考，交给质检判重生成
+  return rest;
+}
+
+// ===== 剧情衔接硬校验（模型无关）=====
+// 目标：无论用哪个模型，都能在落库前识别"本章与上一章结尾脱节"的形态。
+// 现有 0a 检测只抓"时间过了很久/另一边"等表面话术；这里补两类正则硬检测：
+//  A) 时空跳转：本章开头出现的时间/地点与上一章结尾明显冲突
+//  B) 角色状态断裂：上一章结尾主角处于某激烈状态（重伤/昏迷/对峙/逃亡），本章开头若无其事
+// 返回 problems 描述数组（每项含可读反馈），质检循环据此判整章重生成。
+
+// 上一章结尾通常以"结束状态"收束：离开某地/受伤/昏迷/对峙/发现某物等。若本章开头直接
+// 跳到"第二天/几天后/另一个地方/完全平静的日常"，而上一章结尾是悬念/冲突/重伤，则为脱节。
+const SEAM_JUMP_OPENERS = [
+  /^(?:时间(?:过了|过去|流逝|一晃|来到)|过了(?:很久|许久|几天|数年|一段|些日子)|(?:第二天|次日|翌日|隔天|几天后|数日后|第二天早晨|第二天一早|第二天早上)(?:，|,|\s)?(?:清晨|早晨|早上)?)/,
+  /^(?:另一边|与此同时|与此同时\s*[，,]\s*(?:镜头|画面)|镜头一转|画面一转|镜头切到|画面切到|让我们把视线|视角转到|另一方面|而与此同时|再看)/,
+  /^(?:多年后|数年后|一年后|几月后|很久以后|多年以后|不久之后|良久|许久)/,
+  /^(?:他|她|我|他们|她们)(?:在)?(?:一个新的|陌生的|别的|另一处)(?:地方|地点|房间|屋子)/
+];
+
+// 场景/地点断裂：上一章结尾明确在 A 地，本章开头直接无交代地出现在 B 地（且 A、B 差异明显）
+function seamLocationGap(prevTail, head) {
+  // 提取上一章结尾出现的地点名词（常见地点）
+  const locRe = /(?:在|来到|走进|回到|赶到|离开|走出|冲进|躲进|进了|到了|就在)([一-龥]{2,4}(?:店|院|楼|房|屋|室|厅|场|站|街|巷|口|边|里|外|上|下|旁|角|门|窗|车|山|林|河|桥|路|库|馆|厅|室|房))(?![一-龥])/g;
+  const prevLocs = new Set();
+  let m;
+  while ((m = locRe.exec(prevTail))) prevLocs.add(m[1]);
+  if (prevLocs.size === 0) return null;
+  // 本章开头 300 字内出现的地点
+  const headLocs = new Set();
+  let m2;
+  const headRe = /(?:在|来到|走进|回到|赶到|离开|走出|冲进|躲进|进了|到了|就在)([一-龥]{2,4}(?:店|院|楼|房|屋|室|厅|场|站|街|巷|口|边|里|外|上|下|旁|角|门|窗|车|山|林|河|桥|路|库|馆|厅|室|房))(?![一-龥])/g;
+  while ((m2 = headRe.exec(head))) headLocs.add(m2[1]);
+  if (headLocs.size === 0) return null;
+  // 若本章开头出现的地点，与上一章结尾的地点完全无交集，且上一章是明确的单一封闭场景 → 判脱节
+  let overlap = false;
+  for (const l of headLocs) {
+    if ([...prevLocs].some((p) => p === l || p.includes(l) || l.includes(p))) { overlap = true; break; }
+  }
+  if (!overlap && prevLocs.size >= 1) {
+    return `地点跳变：上一章结尾角色在「${[...prevLocs].join('/')}」，本章开头却无交代地出现在「${[...headLocs].join('/')}」，时间地点断裂，须从上一章结尾所在场景直接续写`;
+  }
+  return null;
+}
+
+// 状态断裂：上一章结尾主角处于激烈/特殊状态，本章开头却若无其事地平静开始
+const SEAM_STATE_TAIL = [
+  { re: /(?:昏迷|昏了过去|失去意识|倒在地上|晕了过去|重伤|奄奄一息|血流如注|命悬一线|气若游丝|昏死过去|人事不省)/, label: '上一章结尾主角重伤/昏迷' },
+  { re: /(?:对峙|剑拔弩张|针锋相对|怒目而视|剑指|枪口|掐住|扼住|压在地上|扭打|搏斗|殊死)/, label: '上一章结尾正处激烈对峙' },
+  { re: /(?:逃|跑|狂奔|疾驰|夺路|冲出|窜出|没命|踉跄|跌跌撞撞|慌不择路)/, label: '上一章结尾正在逃亡' },
+  { re: /(?:哭|啜泣|抽泣|嚎啕|崩溃|失魂落魄|呆立|愣在原地|失神)/, label: '上一章结尾情绪崩溃' }
+];
+const SEAM_STATE_HEAD_CALM = /^(?:他|她|我|他们|她们)?(?:醒(?:了|来)?后?|一觉醒来|第二天(?:早晨|一早|早上|清晨)?|起床|起?床|睁开眼|睁开双眼|梳洗|洗漱|换好衣服|穿好衣服|坐在|端起|吃着|喝着|悠闲|若无其事|气定神闲|平静地|慢条斯理)/;
+
+function checkSeamlessConnection(prevTail, head) {
+  const problems = [];
+  if (!prevTail || !head) return problems;
+  const prev = String(prevTail).slice(-800); // 上一章结尾末尾 800 字
+  const h = String(head).slice(0, 400);      // 本章开头 400 字
+  if (!prev || !h) return problems;
+
+  // A) 跳转话术开头
+  for (const re of SEAM_JUMP_OPENERS) {
+    if (re.test(h)) {
+      problems.push({ desc: `本章开头以跳转话术「${h.slice(0, 16)}…」开启，未紧接上一章结尾的场面续写。须从上一章结尾的最后一个动作/对话/悬念直接往下写` });
+      break;
+    }
+  }
+  // B) 地点跳变
+  const loc = seamLocationGap(prev, h);
+  if (loc) problems.push({ desc: loc });
+  // C) 状态断裂
+  for (const st of SEAM_STATE_TAIL) {
+    if (st.re.test(prev)) {
+      // 上一章结尾是激烈状态，本章开头若无其事 → 断裂
+      if (SEAM_STATE_HEAD_CALM.test(h)) {
+        problems.push({ desc: `${st.label}，本章开头却平静无事地开始（「${h.slice(0, 16)}…」），情绪/状态断裂。须从上一章结尾的状态直接延续，先写角色如何处理该状态` });
+      }
+      break;
+    }
+  }
+  // 去重
+  const seen = new Set();
+  return problems.filter((p) => { if (seen.has(p.desc)) return false; seen.add(p.desc); return true; });
+}
+
 // 新增伏笔去重：与已存在的 open 伏笔高度相似则不重复插入，返回是否插入
 function insertForeshadowUnique(novelId, content, idx) {
   const dup = getOpenForeshadowings(novelId, 200).find(
@@ -2556,9 +2707,16 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         }
       } catch { /* 解析失败不阻塞 */ }
     }
-    const prevTailLen = mode === 'regenerate' ? 2000 : 800;
+    const prevTailLen = mode === 'regenerate' ? 2000 : 1200;
     const prevTailBlock = prevChapter
-      ? `【上一章结尾（本章必须从上一章结尾的场面直接续写，严格延续时间/地点/人物/悬念，不得倒回上一章开头重新描写同一场景，不得重复已经发生过的事件）】\n上一章《${prevChapter.title}》${prevChapterSummary}${prevBeatsBlock}\n上一章结尾：…${String(prevChapter.content).slice(-prevTailLen)}`
+      ? `【上一章结尾（本章必须从上一章结尾的场面直接续写，严格延续时间/地点/人物/悬念，不得倒回上一章开头重新描写同一场景，不得重复已经发生过的事件）】
+上一章《${prevChapter.title}》${prevChapterSummary}${prevBeatsBlock}
+上一章结尾：
+…${String(prevChapter.content).slice(-prevTailLen)}
+【衔接要求】
+- 本章第一句必须紧接上述"上一章结尾"的最后一个人物动作、一句对话或一个悬念往下写，让读者感到前后两章是连续的。
+- 开头不得另起炉灶介绍新场景/新人物/新设定，不得从"时间过去了很久""另一边""与此同时"等跳转话术另开一线。
+- 若上一章结尾主角正处在某个地点/某个动作中，本章开头就从这个地点/动作继续。`
       : '';
 
 const regenNote = mode === 'regenerate'
@@ -2729,6 +2887,8 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
 
       // 规则化清污（标点全角化、省略号归一、叹号压缩、空行折叠）。幂等，润色后也安全。
       full = cleanAiText(full);
+      // 剥离正文开头的思考/任务复述残留（推理型模型把"复述任务"当正文输出）
+      full = stripThinkingResidue(full);
       // 移除 AI 可能在正文开头输出的"第N章"标记（标题由系统独立管理）
       full = full.replace(/^第[一二三四五六七八九十百千\d]+章\s*\n*/g, '').trim();
 
@@ -2746,6 +2906,29 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
           problems.push({ desc: `本章开头与上一章开头高度相似（重复${overlap.length}字），疑似重复上一章内容，须从上一章结尾之后的时间点续写，不得倒退重写` });
         }
       }
+
+      // 0a) 开头跳转/脱节检测：本章第一句若以"时间流逝/另起一线"等跳转话术开头，说明没有紧接上一章结尾续写
+      if (prevChapter) {
+        const firstLine = full.split(/\n/)[0].trim().replace(/^第[一二三四五六七八九十百千\d]+章\s*/, '');
+        if (/^(?:时间(?:过了|过去|流逝|一晃)|过了(?:很久|许久|几天|几年|一段|些日子)|(?:另一边|与此同时|镜头一转|画面一转|另一方面|然而此时)|(?:良久|许久)之后|与此同时)/.test(firstLine)) {
+          problems.push({ desc: `本章开头以"${firstLine.slice(0, 20)}…"跳转话术开头，未紧接上一章结尾续写（上一章结尾：${String(prevChapter.content).slice(-60)}…）。须从上一章结尾的场面/动作/对话直接继续` });
+        }
+      }
+
+      // 0a2) 剧情衔接硬校验（模型无关）：除开头话术外，进一步核对地点跳变/角色状态断裂等
+      //      更隐蔽的脱节形态（上一章结尾重伤/昏迷/对峙，本章开头却平静无事；或地点无交代跳变）
+      try {
+        if (prevChapter && String(prevChapter.content).length > 100) {
+          const prevContent = String(prevChapter.content);
+          const seamHead = full.slice(0, 400);
+          const seam = checkSeamlessConnection(prevContent, seamHead);
+          for (const p of seam) {
+            if (!problems.some((q) => q.desc.includes(p.desc.slice(0, 12)))) {
+              problems.push({ desc: `${p.desc}（上一章结尾：${prevContent.slice(-50)}…）` });
+            }
+          }
+        }
+      } catch { /* 衔接硬校验失败不阻塞 */ }
 
       // 0) 参考作品照抄检测：正文与知识库/风格库样本原文大量重复，说明模型把参考作品当正文写了
       try {
@@ -2768,6 +2951,14 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
           problems.push({ desc: `正文混入模型内部指令/英文话术（"${leak.quote}"），属生成跑飞，须整章重写，只保留纯小说正文` });
         }
       } catch { /* 泄漏检测失败不阻塞 */ }
+
+      // 0c) 思考/任务复述残留检测：推理型模型把"复述任务要求"当正文开头输出（"我们需要回答用户：重写《X》第一章正文…"）
+      try {
+        const think = detectThinkingResidue(full);
+        if (think.leaked) {
+          problems.push({ desc: `正文开头混入思考/任务复述残留（"${think.quote}"），属模型把内部规划当正文，须整章重写为纯小说正文` });
+        }
+      } catch { /* 思考残留检测失败不阻塞 */ }
 
       // 1) 题材跑题检测
       try {

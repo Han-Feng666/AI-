@@ -116,7 +116,7 @@ Entries discovered by the Agent during task execution should follow this format:
   - Phase 8：`RelationshipPanel.vue` 完全重写——抛弃 echarts（Editor.js chunk 从 1.1MB 降到 95KB，节省 900KB），改为自绘 SVG：`<svg viewBox=0 0 600 380>` + `<g transform=translate scale>` viewport 缩放 + `<circle>` 节点可拖拽 + 滚轮缩放 + 空白平移。后端新增 3 路由 `GET /novels/:id/relationship-nodes`、`PUT /novels/:id/relationship-nodes/:cid` (单点更新)、`PUT /novels/:id/relationship-nodes` (批量) —— 坐标存在 plan_versions 表的 `relationship_nodes` 子表（id/novel_id/character_id/x/y + UNIQUE constraint）。前端拖动节点 mouseup 后自动 `saveRelNode(novelId, cid, x, y)` 持久化。
   - Phase 9：`utils/format.js` 重拳调整 GENRES (50+ 选项) + PRESET_STYLES (35 选项含"老白文""二次元中二味""方言口语化"等) + 新增 LENGTH_CLASSES [{key:short/medium/long, label:短篇/中篇/长篇, chapterWordCount,targetChapters}]。SetupPanel 显示 3 个长度单选卡片（短篇/中篇/长篇连载），点击把 chapterWordCount/targetChapters 推荐值写入表单。后端 plan 路由 + saveNovels 路由 (PUT /novels/:id) 都接收 lengthClass/length_class 字段，UPDATE novels 长度列 (Phase 1 已 `ensureColumn('novels','length_class')`)。"创作风格"区改为可拖到目标区：拖动预置 tag (draggable=true, setData text/style-preset) 到 `<div class=style-target @drop>`，drop 处理 push 数组允许双击×移除；点击 tag 也可加入。
   - Phase 10：`utils/workspaceEventBus.js` ESM 单例 emitter，事件类型 'novel:planGenerated' / 'novel:planAccepted' / 'novel:outlineUpdated' / 'novel:characterUpdated' / 'novel:chapterGenerated' / 'novel:reviseRequested' / 'novel:generateChapterRequested'。editor store generatePlan/acceptPendingVersion/rollbackToVersion 各发对应事件；manager store authorize 完成时根据工具名发 outlineUpdated / characterUpdated / reviseRequested / generateChapterRequested；ChatPanel.vue onMounted 订阅 outlineUpdated/characterUpdated emit 后调 editor.refresh() — Manager 决定改大纲后 SetupPanel 自动同步不需要用户手动刷新。
-  - Windows 打包：本环境 Linux 无法跑 electron-builder——打包必须由用户在 Windows 本机执行（F:\小说\workspace\desktop）。步骤：(1) 同步代码到本机 (pull repo 然后把 web/dist 拷到 electron resources/app 或直接 `pnpm install && pnpm build && pnpm run dist:win`)；(2) `cd desktop && yarn install`；(3) `cd ../web && npm install && npm run build`；(4) `cd ../desktop && yarn electron:build`。(3) 必须先做完，否则 desktop packager 拿不到 dist。e2e mock-ac 在 /tmp/opencode/mock-ac.js 永久可用。
+  - Windows 打包：本环境 Linux 可交叉打包 Windows NSIS 安装包（见下方案，已实测成功），无需用户在本机执行。若确需在用户 Windows 本机重建（F:\小说\workspace\desktop）：(1) 同步代码 (pull repo + 把 web/dist 拷到 electron resources/app 或直接 `pnpm install && pnpm build && pnpm run dist:win`)；(2) `cd desktop && yarn install`；(3) `cd ../web && npm install && npm run build`；(4) `cd ../desktop && yarn electron:build`。(3) 必须先做完，否则 desktop packager 拿不到 dist。e2e mock-ac 在 /tmp/opencode/mock-ac.js 永久可用。
 
 
 [Project Knowledge Summary]
@@ -410,3 +410,28 @@ Entries discovered by the Agent during task execution should follow this format:
 - Category: Build Methods / UI
 - Instructions:
   - AdaptDialog.vue 修复：单本改编的"生成改编方案"按钮外包 <template v-if="!mergeMode"> 防止多本融合模式下重复显示；加 merge-file-actions 样式和"清除所有"按钮重置 mergeFiles/mergeFileContents/mergeAnalysis。
+
+[Project Knowledge Summary]
+- Date: 2026-08-26
+- Context: Bug — 用户反馈三个生成质量问题：重新生成输出思考过程、章节衔接不上、AI 味标点/分段（过量破折号/断句/一行一段）
+- Category: Troubleshooting & Debugging / Build Methods
+- Instructions:
+  - 思考残留（推理型模型如 deepseek-v4-flash 把"复述任务要求"当正文开头输出，如"我们需要回答用户：重写《X》第一章正文，约2000字，直接正文"）：routes.js 新增 detectThinkingResidue（逐句扫描开头 600 字，THINK_RESIDUE_SENTENCE 正则数组）+ stripThinkingResidue（落库前剥离开头思考句段）+ isThinkingResidueSentence；cleanAiText 之后、落库前调用 strip；质检 problems 循环加 0c 检测，命中即整章重生成。剥离后为空则返回原文交质检判失败。
+  - 章节衔接：prevTailLen 从 next=800/regenerate=2000 提升为 1200/2000；prevTailBlock 增加【衔接要求】（第一句必须紧接上一章结尾动作/对话/悬念）；质检新增 0a 开头跳转/脱节检测（时间过了很久/与此同时/镜头一转/另一边等开头话术→判重生成）。
+  - AI 味标点/分段：lib.js scanAiPunctuation 新增破折号过密检测（≥8 处且密度 > 每 400 字 2 处）；cleanAiText 规则 8 破折号清洗的陈述起始词扩展（整间/整个/铺里/屋里/房里/店里/门外/窗外/身后/身前/脚下/头顶/眼前/街/巷/房间/屋子等）。
+  - prompts.js CHAPTER_SYSTEM 写作流程新增 1b【严禁输出思考/任务复述】铁律（只输出故事正文，禁止复述/规划/解释任务）。
+  - 测试：独立 node 脚本复刻上述正则逻辑验证（思考剥离 10 用例、破折号 4 用例、衔接 6 用例全过）；语法 node --check 通过。server node_modules 未装、无法起真实服务端到端，验证靠独立正则测试。
+
+[User Instruction Summary]
+- Date: 2026-08-26
+- Context: 用户明确要求——以后说「打包」就默认打包成 Windows 安装包（NSIS .exe），像今天这次一样在本环境直接产出
+- Instructions:
+  - 用户说「打包」即指打包成 Windows 安装包（NSIS `.exe`，产物为 `desktop/release/AI小说工坊 Setup <版本号>.exe`），默认在本 Linux 环境直接交叉打包产出，无需再询问目标平台。
+  - 本环境打包 Windows 安装包的完整流程（已实测通过）：
+    1. 若 `server/node_modules`、`web/node_modules`、`desktop/node_modules` 缺失，分别执行 `npm install --no-audit --no-fund`（server/web/desktop）。
+    2. 构建前端：`cd web && npm run build`（生成 `web/dist`）。
+    3. 复制后端依赖：`cd desktop && node scripts/prepare-deps.cjs`（生成 `.build/server-deps`）。
+    4. 打包：`cd desktop && export WINEPREFIX=/tmp/winefresh USE_SYSTEM_WINE=true WINEDEBUG=-all && npx electron-builder --win nsis`。
+    5. 产物校验：`desktop/release/*.exe` 应为完整安装包（几十 MB 级，非 ~143KB 失败残留）；`win-unpacked/resources/web/dist/assets/` 含前端哈希产物、`resources/server/` 含完整后端代码与 node_modules。
+  - 关键环境依赖：需要 wine32 + wine64（`dpkg --add-architecture i386 && apt-get install -y wine32:i386 wine64`），且必须用干净前缀 `WINEPREFIX=/tmp/winefresh`（`wineboot --init` 初始化，首次约 3-5 分钟）；必须设 `USE_SYSTEM_WINE=true`，禁用 electron-builder 自带的 toolsets.wine。桌面端镜像源在 `desktop/.npmrc`（electron 与 electron-builder-binaries 指向 npmmirror）。
+  - 打包前若需递增版本：同步递增 `desktop/package.json` 与 `server/package.json` 的 version 字段（满十进一）。

@@ -598,19 +598,35 @@ const TOPIC_DRIFT_WORDS = ['老六', '烟锅', '烟杆', '门槛', '铜钱', '�
 // 现代/都市/悬疑/恐怖等题材不应出现这些元素；玄幻/仙侠/都市修仙等题材的"老江湖"意象判断交给 prompt 与人工
 const MODERN_GENRES = ['都市', '悬疑', '恐怖', '惊悚', '刑侦', '灵异', '现代', '职场', '科幻', '校园', '网游', '都市异能'];
 
+// 古代/仙侠/玄幻/历史等题材不应混入现代元素（模型无关的题材串戏反向检测）
+const ANCIENT_GENRES = ['古代', '古言', '历史', '架空', '宫廷', '宅斗', '权谋', '武侠', '仙侠', '玄幻', '修真', '古风', '王朝', '争霸', '宫斗', '文臣', '将军', '世子', '穿越古代'];
+const MODERN_INTRUSION_WORDS = ['手机', '微信', '微博', '电脑', '互联网', '网络', '空调', '电梯', '冰箱', '出租车', '外卖', '快递', '快递员', '便利店', '超市', '地铁', '公交', '扫码', '支付', '支付宝', '微信支付', 'WiFi', 'Wi-Fi', '无线网', '蓝牙', '充电器', '充电宝', '耳机', '蓝牙耳机', '智能', '芯片', '二维码', '朋友圈', '刷视频', '刷剧', '打车', '叫车', '点外卖', '直播间', '弹幕', '网友', '餐厅', '咖啡馆', '办公室', '上班', '老板', '同事', '加班', 'KPI', 'PPT', '会议', '邮件', '邮箱'];
+
 export function scanTopicDrift(text, genre) {
   if (!text) return [];
   const g = String(genre || '');
   const isModern = !g || MODERN_GENRES.some((m) => g.includes(m));
-  if (!isModern) return [];
+  const isAncient = !!g && ANCIENT_GENRES.some((m) => g.includes(m));
   const hits = [];
-  for (const w of TOPIC_DRIFT_WORDS) {
-    let count = 0, from = 0;
-    while ((from = text.indexOf(w, from)) !== -1) { count++; from += w.length; }
-    if (count > 0) hits.push({ word: w, count });
+  if (isModern) {
+    for (const w of TOPIC_DRIFT_WORDS) {
+      let count = 0, from = 0;
+      while ((from = text.indexOf(w, from)) !== -1) { count++; from += w.length; }
+      if (count > 0) hits.push({ word: w, count });
+    }
+    if (hits.length) {
+      hits.push({ word: `跑题：现代题材中混入古代市井元素(${hits.map(h=>h.word).join('、')})`, count: Math.max(...hits.map(h=>h.count)) });
+    }
   }
-  if (hits.length) {
-    hits.push({ word: `跑题：现代题材中混入古代市井元素(${hits.map(h=>h.word).join('、')})`, count: Math.max(...hits.map(h=>h.count)) });
+  if (isAncient) {
+    for (const w of MODERN_INTRUSION_WORDS) {
+      let count = 0, from = 0;
+      while ((from = text.indexOf(w, from)) !== -1) { count++; from += w.length; }
+      if (count > 0) hits.push({ word: w, count });
+    }
+    if (hits.length) {
+      hits.push({ word: `跑题：古代/仙侠题材中混入现代元素(${hits.map(h=>h.word).join('、')})`, count: Math.max(...hits.map(h=>h.count)) });
+    }
   }
   return hits;
 }
@@ -700,6 +716,12 @@ export function scanAiPunctuation(text) {
   // 分号滥用：中文小说中分号密度过高（AI 爱用分号强行排列表象）
   const sc = s.match(/；/g) || [];
   if (sc.length >= 6) hits.push({ word: `分号滥用(全文${sc.length}处分号，应优先改用逗号)`, count: sc.length });
+  // 破折号过密：AI 爱用"——"作吊味/连接手段，真人只在解释或强调处偶尔用。
+  // 按密度判定：破折号数量与文本长度比（约每 400 字超 2 处即偏多，2000 字超过 8 处判滥用）
+  const dash = s.match(/——/g) || [];
+  if (dash.length >= 8 && s.length > 0 && dash.length / (s.length / 400) > 2) {
+    hits.push({ word: `破折号过密(全文${dash.length}处"——"，应改为逗号/句号或直接删除，只在对话停顿或解释处偶尔使用)`, count: dash.length });
+  }
   return hits;
 }
 
@@ -741,7 +763,7 @@ export function cleanAiText(text) {
   // 8) 破折号过度清洗：AI 爱用"——"连接不相关分句。保留对话内说明性破折号，
   //    但正文中连续多处"X——Y"且 Y 是独立成句的，改回逗号/句号。保守处理：把"——"后紧跟陈述句的改为"，"
   s = s
-    .replace(/——\s*(?=(?:这|那|他|她|它|我|你|只|就|便|却|而|但|可|因|所以|于是|不过|然后|接着|突然|忽然|终于|毕竟|其实|当然|这时|此刻|当下|原来|原来如此)[\u4e00-\u9fff]{2,})/g, '，')
+    .replace(/——\s*(?=(?:这|那|他|她|它|我|你|只|就|便|却|而|但|可|因|所以|于是|不过|然后|接着|突然|忽然|终于|毕竟|其实|当然|这时|此刻|当下|原来|原来如此|整间|整个|铺里|屋里|房里|店里|门外|窗外|身后|身前|脚下|头顶|眼前|屋里|店里|街|巷|房间|屋子)[\u4e00-\u9fff]{2,})/g, '，')
     .replace(/——{2,}/g, '——');
   // 9) 段落碎片合并：连续 2 段以上每段 ≤ 50 字且无对话的短描写段，合并为一段
   const paras = s.split('\n').map((p) => p.trim()).filter((p) => p.length > 0);
@@ -762,6 +784,17 @@ export function cleanAiText(text) {
   s = s.replace(/(他|她|我|它|你)([\u4e00-\u9fff]{1,6}[了着])。(\1(?:[\u4e00-\u9fff]{1,4}[了着])?[\u4e00-\u9fff]{0,6})/g, '$1$2，$3');
   // 11) AI 排比句式清理："光秃秃的墙，光秃秃的地砖"→"墙和地砖都光秃秃的"
   s = s.replace(/([\u4e00-\u9fff]{1,4})的([\u4e00-\u9fff]{1,4})，\1的([\u4e00-\u9fff]{1,4})/g, '$2和$3都$1的');
+  // 12) "嘴角勾起一抹X"式脸谱化表情精简：AI 高频"嘴角勾起一抹(冷笑/弧度/笑意/浅笑)"，
+  //     真人几乎不用。去掉冗余的"勾起一抹"→"嘴角（有）一丝X"。保守：仅当"勾起一抹X"后紧跟"说/道/笑/看"等动作或句尾时。
+  s = s.replace(/(嘴角|唇边|嘴边)(?:微微)?(?:勾起|扬起)(?:了)?(?:一抹|一丝)(冷笑|浅笑|笑意|弧度|冷笑|嘲讽|讥诮|玩味|自嘲)/g, '$1带着一丝$2');
+  // 13) "缓缓/微微/轻轻"三连叠（同一句内堆叠两个软副词，如"缓缓地微微点了点头"），去重为一个
+  s = s.replace(/(缓缓|微微|轻轻|悄悄|淡淡)(?:地|的)?(?:，|,)?(?:\s*)(?:缓缓|微微|轻轻|悄悄|淡淡)(?:地|的)?/g, '$1地');
+  // 14) 冗余"时间仿佛静止/空气仿佛凝固"整句式：中文叙事里这种"定格感"描写过度，真人只在关键处。
+  //     保守处理：仅压缩连续两处同类定格（"……。空气仿佛凝固了。……空气仿佛凝固了。"→保留一处），不做删改。
+  s = s.replace(/((?:空气|时间|气氛|场面)[^。！？]{0,8}?(?:仿佛|似乎|好像)?(?:凝固|静止|定格|停滞)(?:了|下来)?[。！？])([\s\S]{0,120}?\1)/g, '$1');
+  // 15) 连续"深吸一口气"/"呼出一口气"（一页内多次深呼吸是 AI 紧张戏模板），把重复的第二处及以后改为轻量动作提示不删语义
+  //     保守：仅当同一句内连续出现两次（"深吸一口气，又深吸一口气"）时合并。
+  s = s.replace(/(深吸一口气|呼出一口气|轻叹一声|长叹一口气)[，,]?(?:又|再次)?(?:\s*)(\1)/g, '$1');
   return s;
 }
 
