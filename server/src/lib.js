@@ -748,6 +748,106 @@ function stripDialogue(text) {
   return String(text || '').replace(/["""''「『【（][^""""''」』】）]*["""''」』】）]/g, '');
 }
 
+// 对白/叙述结构失衡检测：全章零对话=流水账旁白体，全章近乎全对话=剧本化。
+// 正常章节对白与叙述交织，两类失衡都显著降低可读性。返回人类可读的问题描述数组，供润色定向修复。
+export function scanStructureBalance(text) {
+  const s = String(text || '');
+  const issues = [];
+  if (s.length < 1200) return issues;
+  // 引号集覆盖中文弯引号与英文直引号，兼容不同模型的输出习惯
+  const dialogues = s.match(/["""“”''‘’「『][^""""“”''‘’」』]{1,200}["""“”''‘’」』]/g) || [];
+  const dialogueChars = dialogues.reduce((sum, d) => sum + d.length, 0);
+  const plainLen = s.replace(/\s/g, '').length;
+  if (dialogues.length === 0 || dialogueChars < 60) {
+    issues.push('全章几乎无人物对话（通篇旁白叙述），像剧情梗概而非小说——至少安排两三处角色开口的对话场面，用台词交锋推进信息与冲突');
+  } else if (plainLen > 0 && dialogueChars / plainLen > 0.85) {
+    issues.push('全章几乎全是对话（剧本化），缺少动作、环境、心理等叙述层描写——压缩对话量或穿插行为细节，让文字有画面');
+  }
+  return issues;
+}
+
+// 跨章口癖固化检测：长篇连载最隐蔽的 AI 破绽是"每章同款小动作/小表情"——
+// 单章内看每处都正常，跨章看就是"主角每一章都要挑眉一次、勾一次嘴角"。
+// 提取本章高频四字汉字片段，检查其在最近数章是否同样高频复现；命中说明该写法已固化成模板，需替换为多样的表达。
+export function scanCrossChapterRepeats(current, priorTexts, { minCurrent = 3, minPriorTotal = 4, minChapters = 2 } = {}) {
+  const cur = String(current || '').replace(/[^\u4e00-\u9fff]/g, '');
+  if (cur.length < 800) return [];
+  const priors = (Array.isArray(priorTexts) ? priorTexts : [priorTexts])
+    .map((t) => String(t || '').replace(/[^\u4e00-\u9fff]/g, ''))
+    .filter((t) => t.length >= 500);
+  if (!priors.length) return [];
+
+  const counts = new Map();
+  for (let i = 0; i + 4 <= cur.length; i++) {
+    const g = cur.slice(i, i + 4);
+    counts.set(g, (counts.get(g) || 0) + 1);
+  }
+
+  // 功能搭配过滤：高频虚词组合是自然语言现象，不构成口癖
+  const functionalHead = /^(一个|是的|没有|什么|自己|这个|那个|就是|还是|但是|所以|因为|时候|知道|觉得|已经|可能|一样|似的|于是|然后|这样|那样|起来|下去|过来|出来|地上|人的|的时候)/;
+  const tailStop = /[的了着是在和与就把被很也又都再还便才向从对着说地得个这那他她它你我不没]/;
+
+  const results = [];
+  for (const [gram, cnt] of counts) {
+    if (cnt < minCurrent) continue;
+    // 短语必须是连续实义片段：尾部含停用字时去掉尾字仍成立才更稳；此处简单要求四个字里最多一个虚词
+    let stopCount = 0;
+    for (const ch of gram) if (tailStop.test(ch)) stopCount++;
+    if (stopCount >= 2 || functionalHead.test(gram)) continue;
+
+    let total = 0, chapters = 0;
+    for (const p of priors) {
+      let c = 0, from = 0;
+      while ((from = p.indexOf(gram, from)) !== -1) { c++; from += gram.length; }
+      if (c > 0) chapters++;
+      total += c;
+    }
+    const needTotal = priors.length >= minChapters ? minPriorTotal : minPriorTotal - 1;
+    const needChapters = Math.min(minChapters, priors.length);
+    if (total >= needTotal && chapters >= needChapters) {
+      results.push({ phrase: gram, current: cnt, priorTotal: total, chapters });
+    }
+  }
+  results.sort((a, b) => (b.chapters * b.priorTotal) - (a.chapters * a.priorTotal));
+  // 去重：4 字滑窗会把同一个固化长短语切成多个重叠片段（"说话时指""话时指节""指节泛白"），
+  // 共享任一 3 连字即视为同一来源，只保留频次最高的代表
+  const tri = (g) => new Set([0, 1].map((i) => g.slice(i, i + 3)));
+  const kept = [];
+  for (const r of results) {
+    const ks = tri(r.phrase);
+    if (kept.some((k) => [...tri(k.phrase)].some((t) => ks.has(t)))) continue;
+    kept.push(r);
+    if (kept.length >= 5) break;
+  }
+  return kept.map((r) =>
+    `"${r.phrase}"在本章出现 ${r.current} 次、近几章共出现 ${r.priorTotal} 次（${r.chapters} 章）——写法已固化成模板，请把重复处换成不同角度的动作/神态/表达`
+  );
+}
+
+// 跨章自我复述检测：求两段文本的最长公共子串长度（滚动数组 DP，内存 O(m)，时间 O(n*m)）
+// 用于发现"本章大段重写上一章已发生的内容"。正常承接最多复述结尾一两句，≥100 连续字基本必是复述。
+export function longestDuplicateLength(a, b) {
+  const aa = String(a || '').replace(/\s+/g, '');
+  const bb = String(b || '').replace(/\s+/g, '');
+  const n = aa.length, m = bb.length;
+  if (!n || !m) return 0;
+  let prev = new Uint32Array(m + 1);
+  let cur = new Uint32Array(m + 1);
+  let best = 0;
+  for (let i = 1; i <= n; i++) {
+    cur.fill(0);
+    const ai = aa[i - 1];
+    for (let j = 1; j <= m; j++) {
+      if (ai === bb[j - 1]) {
+        cur[j] = prev[j - 1] + 1;
+        if (cur[j] > best) best = cur[j];
+      }
+    }
+    const tmp = prev; prev = cur; cur = tmp;
+  }
+  return best;
+}
+
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
 export function scanAiPunctuation(text) {
   const s = String(text || '');

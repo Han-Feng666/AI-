@@ -11,6 +11,7 @@ import {
   getStageMemories, formatStageMemories, upsertStageMemory,
   getCharacterProfiles, upsertCharacterProfile, formatCharacterProfiles,
   scanAiPatterns, blacklistPenalty, blacklistFlagWords, cleanAiText, scanTopicDrift,
+  scanStructureBalance, scanCrossChapterRepeats, longestDuplicateLength,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
 } from './lib.js';
@@ -236,7 +237,7 @@ async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX
           getStyles(parseStyleIds(novel)),
           novel.style_baseline,
           novel.style_samples,
-          round === 0 ? [] : lastDetect.issues,
+          round === 0 ? (opts.extraIssues || []) : lastDetect.issues,
           flagWords,
           parseStylePresets(novel),
           opts
@@ -330,6 +331,24 @@ function requireLLM() {
     return { config: null, error: e };
   }
   return { config, error: null };
+}
+
+// 多模型交叉评审：从已启用的多模型配置里挑一个与当前写作模型不同的可用模型，
+// 作为"第二读者"做终审。单模型环境返回 null（调用方跳过，不增加成本）。
+function pickReviewerConfig(currentConfig) {
+  try {
+    const cur = normalizeLLMConfig(currentConfig || {});
+    for (const m of getModels()) {
+      if (!m || !m.enabled) continue;
+      const raw = m.config || {};
+      if (!raw.model) continue;
+      const usable = raw.provider === 'ollama' || raw.provider === 'transformers' ? true : !!raw.apiKey;
+      if (!usable) continue;
+      if ((raw.baseUrl || '') === (cur.baseUrl || '') && raw.model === cur.model) continue;
+      return normalizeLLMConfig(raw);
+    }
+  } catch { /* 交叉评审选择失败则跳过 */ }
+  return null;
 }
 
 function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, timeout, streamIdleTimeout } = {}) {
@@ -2654,7 +2673,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 - 细节：${b.sensory_detail || ''}
 - 作用：${b.purpose || ''}${b.tone ? `｜情绪：${b.tone}` : ''}`;
         }).filter(Boolean).join('\n\n');
-        beatsBlock = lines ? `【本章场景规划（细纲，按此结构组织正文，场景之间自然过渡，最后要有钩子）】\n${lines}` : '';
+        beatsBlock = lines ? `【本章场景规划（细纲，每个 beat 的关键画面、转折与信息必须真实落实到正文，不得漏拍、不得合并关键转折，先后顺序不打乱；场景之间自然过渡，最后落实钩子）】\n${lines}` : '';
       } else {
         send({ type: 'status', message: '正在规划本章场景…' });
         const btRes = await chat({
@@ -2679,7 +2698,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 - 细节：${b.sensory_detail || ''}
 - 作用：${b.purpose || ''}${b.tone ? `｜情绪：${b.tone}` : ''}`;
           }).filter(Boolean).join('\n\n');
-          beatsBlock = lines ? `【本章场景规划（按此结构组织正文，场景之间自然过渡，最后要有钩子）】\n${lines}` : '';
+          beatsBlock = lines ? `【本章场景规划（每个 beat 的关键画面、转折与信息必须真实落实到正文，不得漏拍、不得合并关键转折，先后顺序不打乱；场景之间自然过渡，最后落实钩子）】\n${lines}` : '';
         }
       }
     } catch { /* beats 失败不阻塞，直接进入正文创作 */ }
@@ -2780,6 +2799,7 @@ ${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水
     let finalBlacklist = [];
     let finalRounds = [];
     let lastProblems = [];
+    let structureFixes = []; // 表达层结构问题（失衡/口癖/复述），注入润色定向修复，不触发整章重生成
     const perMax = Math.max(2000, Math.min(16000, Math.round(targetWordsN * 1.8)));
 
     const buildRegenFeedback = (problems) => `【上一版未通过自动检查，本次整章重新生成必须修正的问题】
@@ -3051,6 +3071,36 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
         }
       } catch { /* 行为规则检查失败不阻塞 */ }
 
+      // 5) 表达层结构检测（免费正则，模型无关）：对白失衡/跨章口癖固化/自我复述。
+      //    这些属"表达层"问题，整章重生成同样概率复发且代价高，收集为定向润色信号注入 autoPolish 与文笔门。
+      structureFixes = [];
+      try {
+        // 5a) 对白/叙述结构失衡：全章零对话（流水账旁白体）或全章 85%+ 对话（剧本化）
+        structureFixes.push(...scanStructureBalance(full));
+
+        // 5b) 跨章口癖固化：最近 3 章正文与本章比对，找出"每章同款"的固化短语
+        const priorRows = db.prepare(
+          "SELECT content FROM chapters WHERE novel_id = ? AND chapter_index >= ? AND chapter_index < ? AND content != '' ORDER BY chapter_index DESC LIMIT 3"
+        ).all(novel.id, Math.max(1, idx - 3), idx);
+        if (priorRows.length) {
+          const repeats = scanCrossChapterRepeats(full, priorRows.map((r) => r.content));
+          if (repeats.length) {
+            send({ type: 'status', message: `发现 ${repeats.length} 处跨章固化写法（${repeats.map((r) => r.slice(0, 8)).join('、')}…），将在润色中定向改写` });
+            structureFixes.push(...repeats);
+          }
+          // 5c) 跨章自我复述：与最近一章全文做最长公共子串比对（滚动数组 DP，毫秒级）。
+          //     正常承接只重叠结尾一两句；≥120 连续字判定大段复述须重写；80-119 字注入润色提示。
+          if (prevChapter && String(prevChapter.content).length > 500) {
+            const dupLen = longestDuplicateLength(full, String(prevChapter.content));
+            if (dupLen >= 120) {
+              problems.push({ desc: `本章存在 ≥${dupLen} 字的大段连续重复上一章内容，属于剧情复述而非推进。必须删掉复述段落，从上一章结尾之后的新内容写起` });
+            } else if (dupLen >= 80) {
+              structureFixes.push(`本章有约 ${dupLen} 字内容与上一章高度雷同（重复叙述/换皮描写），请把这些段落的表达彻底改写或压缩为一句话带过`);
+            }
+          }
+        }
+      } catch { /* 结构检测失败不阻塞 */ }
+
       lastProblems = problems;
       if (problems.length === 0) break; // 全部通过
 
@@ -3088,7 +3138,7 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
         const iter = await iteratePolish(config, novel, full, {
           onStatus: (m) => send({ type: 'status', message: m }),
           maxRounds: AI_MAX_ROUNDS,
-          opts: { knowledgeBlock, skillsBlock, genre: novel.genre }
+          opts: { knowledgeBlock, skillsBlock, genre: novel.genre, extraIssues: structureFixes }
         });
         if (iter.text && iter.text.trim()) {
           full = iter.text.trim();
@@ -3142,7 +3192,7 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
             const wIter = await iteratePolish(config, novel, full, {
               onStatus: (m) => send({ type: 'status', message: m }),
               maxRounds: 1,
-              opts: { knowledgeBlock: wqKnowledgeBlock, skillsBlock: wqSkillsBlock, genre: novel.genre }
+              opts: { knowledgeBlock: wqKnowledgeBlock, skillsBlock: wqSkillsBlock, genre: novel.genre, extraIssues: structureFixes }
             });
             if (wIter.text && wIter.text.trim() && wIter.text.trim().length >= Math.floor(full.length * 0.5)) {
               full = wIter.text.trim();
@@ -3152,6 +3202,37 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
         }
         if (wqWeak[0]) send({ type: 'status', message: `文笔润色完成（重点改善${wqWeak[0]}）` });
       } catch { /* 文笔检查失败不阻塞 */ }
+    }
+
+    // 多模型交叉读者终审：配置了多个不同模型时，用非写作模型的另一家模型以挑剔读者视角
+    // 做最后一道试读（复用可读性检测 6 维度）。判 rewrite 时按其意见定向优化一轮。
+    // 单模型环境自动跳过，零额外成本；为不同厂商模型的"盲区互查"，进一步压低单一模型风格缺陷。
+    if (strictMode()) {
+      try {
+        const reviewerCfg = pickReviewerConfig(config);
+        if (reviewerCfg) {
+          send({ type: 'status', message: `交叉读者终审：${reviewerCfg.model || '第二模型'} 正在试读本章…` });
+          let rd2 = { average: 0, verdict: 'pass', issues: [] };
+          try { rd2 = await runReadability(reviewerCfg, full); } catch { /* 终审失败不阻塞 */ }
+          if (rd2.verdict === 'rewrite') {
+            const crossIssues = (rd2.issues || []).slice(0, 4)
+              .map((i) => `[${i.dimension || '可读性'}] ${i.suggestion || i.problem || ''}`)
+              .filter(Boolean);
+            if (crossIssues.length) {
+              send({ type: 'status', message: '交叉读者发现可读性问题，正在按意见定向优化…' });
+              const cIter = await iteratePolish(reviewerCfg, novel, full, {
+                onStatus: (m) => send({ type: 'status', message: m }),
+                maxRounds: 1,
+                opts: { knowledgeBlock, skillsBlock, genre: novel.genre, extraIssues: [...crossIssues, ...structureFixes] }
+              });
+              if (cIter.text && cIter.text.trim() && cIter.text.trim().length >= Math.floor(full.length * 0.5)) {
+                full = cIter.text.trim();
+                send({ type: 'status', message: '交叉终审优化完成' });
+              }
+            }
+          }
+        }
+      } catch { /* 交叉终审整体失败不阻塞 */ }
     }
 
     // 保存章节（质检通过或达上限后的最终版）
