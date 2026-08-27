@@ -458,6 +458,59 @@ export function scanSentenceOpeners(text) {
   return hits;
 }
 
+// 明喻密度检测（AI 最大特征）：AI 爱给每个画面配一个"像/好像/如同/宛如/仿佛…一样/似的"明喻，
+// 真人只会在关键处偶尔用。按密度判定——整章明喻超过一定数量即判 AI 味。
+// 需排除非明喻的"像"字用法（"像他这样的人""相像""像样""好像=也许"）。
+export function scanSimileOveruse(text) {
+  const s = String(text || '');
+  const hits = [];
+  if (s.length < 100) return hits;
+  // 抓"像/好像/如同/宛如/仿佛/犹如/好似 + … + 一样/似的/般"的完整明喻结构，以及"像只/像个/像一+量词/名"的短明喻
+  const simileRe = /(?:像|好像|如同|宛如|仿佛|犹如|好似)[\u4e00-\u9fff]{0,8}(?:一样|似的|一般|般|那样|那样地)/g;
+  const shortSimileRe = /(?:像|宛如|犹如|如同|仿佛)(?:只|个|一|被|是|在|从|把|将|条|根|块|张|片|团|座|头|双|只眼|盏|扇|阵|股|层|面|个)[\u4e00-\u9fff]{0,4}/g;
+  // 捕捉"像+定语+名词"式明喻（如"像某种动物的肋骨""像一只睁着的眼睛""像一张揉皱了的纸"），
+  // 这些没有"一样/似的"但仍是明喻。前缀词控制避免误伤"相像/好像=也许/象征"。
+  const nounSimileRe = /(?:轻?得)?像(?:一只|一个|一?种|一张|一根|一?块|一片|一条|一头|一座|一?双|一?枚|一?捧|一?截|一?团|一?层|一?道|一?缕|一?把|一?阵|一?股|一?个|他|她|它|被|在|有人|某种|什么)[\u4e00-\u9fff]{0,6}(?:的|一样|似的)/g;
+  const nounSimile2 = /(?:声音|脸|指|眼|眉|唇|手|背|影|光|色|味|气|泪|汗|血|骨|皮)(?:却)?(?:像|如)[\u4e00-\u9fff]{0,10}/g;
+  const long = s.match(simileRe) || [];
+  const short = s.match(shortSimileRe) || [];
+  const noun = s.match(nounSimileRe) || [];
+  const noun2 = s.match(nounSimile2) || [];
+  // 合并去重（按起始位置去重，避免同一比喻被两个正则都抓到）
+  const seen = new Set();
+  const total = [];
+  for (const m of [].concat(long, short, noun, noun2)) {
+    const idx = s.indexOf(m);
+    // 排除否定式"不像/不像是/不似/并非像/不像装的"——"不像=否定"不是明喻
+    const before = s.slice(Math.max(0, idx - 2), idx);
+    if (/不|非|没|别|未/.test(before)) continue;
+    if (idx >= 0 && !seen.has(idx)) { seen.add(idx); total.push(m); }
+  }
+  if (total.length === 0) return hits;
+  const chars = s.replace(/\s/g, '').length;
+  const per1k = chars > 0 ? (total.length * 1000) / chars : 0;
+  // 阈值：真人偶用几个好比喻也正常（4 处以内），但 AI 腔是"每段一个、总量明显偏多"。
+  // 按总量判（≥6 处必是 AI 腔），密度仅作辅助参考，避免误伤少量但精妙的好比喻。
+  if (total.length >= 6) {
+    const sample = total.slice(0, 5).map((x) => `「${x}」`).join('、');
+    hits.push({ word: `明喻过密(全文 ${total.length} 处"像/仿佛…一样/似的"，密度 ${per1k.toFixed(1)}/千字：${sample}…，AI 最大特征，每段一个比喻。真人不这么写，绝大多数画面应白描)`, count: total.length, template: true });
+  }
+  return hits;
+}
+
+// 静态凝视/定格感检测：AI 爱让角色"盯着X看了很久/凝视着X发呆"来假装有戏。
+export function scanFrozenGaze(text) {
+  const s = String(text || '');
+  const hits = [];
+  if (s.length < 100) return hits;
+  const count = (re) => { const m = s.match(re); return m ? m.length : 0; };
+  const gaze = count(/(?:他|她|我|它|对方|那人)(?:直勾勾|怔怔|呆呆)?(?:盯着|凝视着|望着|瞧着|看着|注视着|盯着看)[\u4e00-\u9fff]{0,10}(?:很久|许久|良久|发了呆|出神|了半天|一动不动|没动)/g);
+  const wanLe = count(/看了(?:很|许|良)久|盯了(?:很|许|良)久|看了半天|发了半天呆|望着(?:他|她|它)很久|凝视了很久/g);
+  const total = gaze + wanLe;
+  if (total >= 3) hits.push({ word: `定格凝视滥用(全文 ${total} 处"盯着/凝视…看了很久"，AI 用静态凝视假装有戏，全章至多一次)`, count: total, template: true });
+  return hits;
+}
+
 // 转折/连接词过密：AI 叙事爱堆"然而/但是/不过/却/忽然/突然/于是/然后"制造转折感
 export function scanTransitionOveruse(text) {
   const s = String(text || '');
@@ -658,6 +711,9 @@ export function scanAiPatterns(text) {
   hits.push(...scanElevationClosers(text));
   hits.push(...scanExclamationFlavor(text));
   hits.push(...scanPerceptionLed(text));
+  hits.push(...scanSimileOveruse(text));
+  hits.push(...scanFrozenGaze(text));
+  hits.push(...scanDialogueEllipsis(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -669,6 +725,22 @@ export function scanAiPatterns(text) {
     }
   }
   return hits.sort((a, b) => b.count - a.count);
+}
+
+// 对话省略号占比检测：AI 让角色每两句对话就塞一个"……"表示欲言又止/沉默，真人只在关键处用。
+// 按对话中含省略号的比例判定（≥35% 对话带省略号即 AI 腔）。
+export function scanDialogueEllipsis(text) {
+  const s = String(text || '');
+  const hits = [];
+  const dialogues = s.match(/["""''「『【（][^""""''」』】）]{1,80}["""''」』】）]/g) || [];
+  if (dialogues.length < 6) return hits;
+  let withEll = 0;
+  for (const d of dialogues) if (d.includes('…') || d.includes('...')) withEll++;
+  const ratio = withEll / dialogues.length;
+  if (ratio >= 0.35) {
+    hits.push({ word: `对话省略号过密(${withEll}/${dialogues.length} 句对话带"……"(${Math.round(ratio * 100)}%)，AI 让角色频繁用省略号表示欲言又止/沉默，真人只在关键处用。删去大部分省略号，让停顿由内容和场景带出)`, count: withEll, template: true });
+  }
+  return hits;
 }
 
 // 剥离引号内对话内容，避免"对话短句/短段"干扰短句切割与碎片化检测（对话短句是正常写作）
@@ -717,10 +789,16 @@ export function scanAiPunctuation(text) {
   const sc = s.match(/；/g) || [];
   if (sc.length >= 6) hits.push({ word: `分号滥用(全文${sc.length}处分号，应优先改用逗号)`, count: sc.length });
   // 破折号过密：AI 爱用"——"作吊味/连接手段，真人只在解释或强调处偶尔用。
-  // 按密度判定：破折号数量与文本长度比（约每 400 字超 2 处即偏多，2000 字超过 8 处判滥用）
+  // 按密度判定：约每 400 字超 2 处即偏多；2000 字超过 6 处、或任何长度下破折号 ≥8 处即判滥用。
   const dash = s.match(/——/g) || [];
-  if (dash.length >= 8 && s.length > 0 && dash.length / (s.length / 400) > 2) {
+  if (dash.length >= 8 || (dash.length >= 6 && s.length > 0 && dash.length / (s.length / 400) > 1.5)) {
     hits.push({ word: `破折号过密(全文${dash.length}处"——"，应改为逗号/句号或直接删除，只在对话停顿或解释处偶尔使用)`, count: dash.length });
+  }
+  // 省略号总密度过高：AI 爱用"……"吊味/故作停顿，真人只在欲言又止、沉默、思绪中断时偶尔用。
+  // 省略号密度超 10 处/千字（约每 100 字一个省略号）即明显过量。
+  const ellipsisAll = s.match(/…/g) || [];
+  if (ellipsisAll.length >= 8 && s.length > 0 && ellipsisAll.length / (s.length / 1000) > 10) {
+    hits.push({ word: `省略号过密(全文${ellipsisAll.length}个"…"(${Math.round((ellipsisAll.length / (s.length / 1000)))}/千字)，AI 用省略号吊味/故作停顿，真人在欲言又止、沉默时偶尔用。删去大部分，让停顿由对话内容和场景自然带出)`, count: ellipsisAll.length });
   }
   return hits;
 }

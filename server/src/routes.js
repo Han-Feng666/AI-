@@ -3093,6 +3093,43 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       } catch { /* 自动去 AI 味失败不阻塞，保存质量门通过后的版本 */ }
     }
 
+    // 文笔质量门：文笔总体分 < 6（平淡/对话生硬/句式呆板）时自动触发一轮润色提升，而非仅发提示。
+    // 放在落库之前运行，润色只改写 full，随后统一落库，避免重复插入。
+    if (strictMode()) {
+      try {
+        const wqRes = await chat({
+          config,
+          task: 'quality',
+          messages: [
+            { role: 'system', content: WRITING_QUALITY_SYSTEM },
+            { role: 'user', content: `第${idx}章 标题：${title}\n\n${full.slice(0, 3000)}` }
+          ],
+          maxTokens: 1500
+        });
+        const wq = extractJson(wqRes.content);
+        if (wq && wq.overall && wq.overall.score < 6) {
+          const weak = (wq.overall.weaknesses || []).slice(0, 2).join('、');
+          send({ type: 'status', message: `文笔 ${wq.overall.score}/10 偏低（${weak || '表达平淡'}），正在自动润色提升…` });
+          try {
+            const knowledgeIds = getNovelKnowledgeIds(novel);
+            const knowledgeBlock = formatKnowledgeBlock(knowledgeIds);
+            const skillIds = getNovelSkillIds(novel);
+            const autoSkills = recommendSkillsForGenre(novel.genre).filter((id) => !skillIds.includes(id));
+            const skillsBlock = formatSkillsBlock([...skillIds, ...autoSkills]);
+            const wIter = await iteratePolish(config, novel, full, {
+              onStatus: (m) => send({ type: 'status', message: m }),
+              maxRounds: 1,
+              opts: { knowledgeBlock, skillsBlock, genre: novel.genre }
+            });
+            if (wIter.text && wIter.text.trim() && wIter.text.trim().length >= Math.floor(full.length * 0.5)) {
+              full = wIter.text.trim();
+              send({ type: 'status', message: `文笔润色完成（${weak ? '重点改善' + weak : '提升表达自然度'}）` });
+            }
+          } catch { /* 文笔润色失败不阻塞，保留原版 */ }
+        }
+      } catch { /* 文笔检查失败不阻塞 */ }
+    }
+
     // 保存章节（质检通过或达上限后的最终版）
     let chapterId = existing ? existing.id : null;
     const wc = countWords(full);
@@ -3115,31 +3152,6 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       saveDetection(novel.id, idx, finalRounds.at(-1)?.score ?? finalDetect.score ?? 0, finalDetect.issues, finalBlacklist, 'quality_gate');
       send({ type: 'status', message: `第 ${idx} 章已完成自动检查并保存${lastProblems.length ? `（残留 ${lastProblems.length} 处问题待处理）` : '（全部通过）'}` });
     } catch { /* 记录失败不阻塞 */ }
-
-    // 文笔质量检查（非阻塞，仅记录不触发重生成）
-    try {
-      const wqRes = await chat({
-        config,
-        task: 'quality',
-        messages: [
-          { role: 'system', content: WRITING_QUALITY_SYSTEM },
-          { role: 'user', content: `第${idx}章 标题：${title}\n\n${full.slice(0, 3000)}` }
-        ],
-        maxTokens: 1500
-      });
-      const wq = extractJson(wqRes.content);
-      if (wq && wq.overall && wq.overall.score < 6) {
-        const wqTips = [];
-        for (const k of ['fluency', 'vocabulary', 'sentence', 'description', 'dialogue']) {
-          const d = wq[k];
-          if (d && d.issues && d.issues.length && d.suggestions && d.suggestions.length) {
-            wqTips.push(`${d.suggestions[0]}`);
-          }
-        }
-        const weak = (wq.overall.weaknesses || []).slice(0, 2).join('、');
-        send({ type: 'status', message: `文笔提示：总体${wq.overall.score}/10分（${weak ? '短板：' + weak + '；' : ''}${wqTips.slice(0, 2).join('；')}），可在后续润色中优化` });
-      }
-    } catch { /* 文笔检查失败不阻塞 */ }
 
     // ★ 正文 + 去AI味已完成：立即回完成信号，避免后处理拖慢 SSE（后处理在下方继续后台消化，send 已有连接保护）
     try {

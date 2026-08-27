@@ -1,6 +1,6 @@
 {
   "name": "ai-novel-studio-desktop",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "description": "AI 小说工坊 - 本地桌面版",
   "main": "electron/main.cjs",
   "author": "Novel Studio",
