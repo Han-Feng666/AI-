@@ -1,5 +1,6 @@
 import { estimateTokens } from './lib.js';
 import { getTaskConfig } from './model_router.js';
+import { acquire as rateLimitAcquire, onRateLimited } from './rate_limit.js';
 
 // 还原模型/中转站把中文双重转义成的字面 \uXXXX 序列（含代理对）。
 // 正常内容里的真实反斜杠+\u（如讲解转义用法的文本）会被一并还原，但小说创作场景不受影响。
@@ -188,6 +189,15 @@ export async function chat(opts) {
     if (routed) cfg = { ...cfg, ...routed };
   }
   if (!cfg.model) throw new Error('未配置模型名称');
+
+  // 分析类批量请求限速排队：AI 味检测/可读性/一致性/文笔/摘要等在质检阶段会连续高频调用，
+  // 不经限速时容易瞬间打满中转站的 RPM/TPM 触发 HTTP 429（"tpm exhausted"）。
+  // 这里对分析/摘要/质量/联网类请求统一走滑动窗口限速器，把请求平滑排布；正文生成等低频请求不受影响。
+  const isThrottledTask = task === 'analysis' || task === 'summary' || task === 'quality' || task === 'research';
+  if (isThrottledTask) {
+    await rateLimitAcquire(signal);
+  }
+
   if (!cfg.baseUrl && cfg.provider !== 'ollama') {
     const preset = PROVIDER_PRESETS[cfg.provider];
     if (preset?.baseUrl) cfg.baseUrl = preset.baseUrl;
@@ -282,12 +292,30 @@ export async function chat(opts) {
     };
   }
   try {
-    resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: buildHeaders(cfg),
-      body: JSON.stringify(body),
-      signal: combined
-    });
+    // 429 自动重试：单次请求瞬时命中限流/配额不足时，进入服务商冷却并退避后重试，
+    // 而不是直接把 429 抛给上层导致整条生成链路中断。最多重试 3 次，仍失败才抛错。
+    const MAX_429_RETRY = 3;
+    for (let attempt = 0; ; attempt++) {
+      resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: buildHeaders(cfg),
+        body: JSON.stringify(body),
+        signal: combined
+      });
+      if (resp.status !== 429 || attempt >= MAX_429_RETRY) break;
+      // 命限流：记录冷却并退避（Retry-After 优先，否则按限速器计算），等待服务商窗口恢复
+      onRateLimited(Number(resp.headers?.get?.('retry-after')));
+      const retryAfterSec = Number(resp.headers?.get?.('retry-after'));
+      const waitMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+        ? Math.min(retryAfterSec * 1000, 120000)
+        : Math.max(8000, 1000 * (attempt + 1) * 4);
+      const doAbortSleep = new Promise((resolve) => {
+        const t = setTimeout(resolve, waitMs);
+        if (signal) signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+      });
+      await doAbortSleep;
+      if (signal?.aborted) { try { resp.body?.cancel?.(); } catch { /* ignore */ } break; }
+    }
   } catch (e) {
     cleanup();
     if (e.name === 'AbortError') {
