@@ -184,17 +184,25 @@ async function runReadability(config, text) {
     task: 'analysis',
     messages: [
       { role: 'system', content: STORY_READABILITY_SYSTEM },
-      { role: 'user', content: `请评估以下章节的故事可读性。\n\n${String(text).slice(0, 6000)}` }
+      { role: 'user', content: `请评估以下章节的故事可读性。\n\n${sampleText(String(text), 6000)}` }
     ],
     maxTokens: 2200
   });
   const rv = extractJson(r.content) || {};
   const pd = rv.per_dimension && typeof rv.per_dimension === 'object' ? rv.per_dimension : {};
   const dims = ['curiosity', 'desire', 'tension', 'emotion', 'hook', 'momentum'];
-  const scores = dims.map((k) => Math.max(0, Math.min(10, Number(pd[k]) || 0)));
-  const average = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
-  const anyLow = dims.some((k, i) => scores[i] <= 4);
-  const verdict = rv.verdict === 'rewrite' || rv.verdict === 'fail' || average <= 5 || anyLow ? 'rewrite' : 'pass';
+  const scores = dims.map((k) => {
+    const v = Number(pd[k]);
+    return Number.isFinite(v) ? Math.max(0, Math.min(10, v)) : null;
+  });
+  // 解析失败（各维度都取不到有效分数）时不误判为 rewrite，视为 pass（宁放行不误伤）
+  const hasValidScore = scores.some((v) => v !== null);
+  const validScores = scores.filter((v) => v !== null);
+  const average = validScores.length ? validScores.reduce((a, b) => a + b, 0) / validScores.length : 0;
+  const anyLow = dims.some((k, i) => scores[i] !== null && scores[i] <= 4);
+  const verdict = !hasValidScore
+    ? 'pass'
+    : (rv.verdict === 'rewrite' || rv.verdict === 'fail' || average <= 5 || anyLow ? 'rewrite' : 'pass');
   return {
     average: Math.round(average * 10) / 10,
     verdict,
@@ -3093,40 +3101,56 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       } catch { /* 自动去 AI 味失败不阻塞，保存质量门通过后的版本 */ }
     }
 
-    // 文笔质量门：文笔总体分 < 6（平淡/对话生硬/句式呆板）时自动触发一轮润色提升，而非仅发提示。
+    // 文笔质量门：文笔总体分 < 6（平淡/对话生硬/句式呆板）时自动触发润色提升，而非仅发提示。
+    // 采用"检测→润色→复检"迭代（最多 2 轮），让低分文笔真正被改写到达标，而不是只改一遍就放行。
+    // JSON 解析失败或分数缺失时按"需润色"处理（降级兜底），避免文笔门被静默跳过。
     // 放在落库之前运行，润色只改写 full，随后统一落库，避免重复插入。
     if (strictMode()) {
+      const wqKnowledgeIds = getNovelKnowledgeIds(novel);
+      const wqKnowledgeBlock = formatKnowledgeBlock(wqKnowledgeIds);
+      const wqSkillIds = getNovelSkillIds(novel);
+      const wqAutoSkills = recommendSkillsForGenre(novel.genre).filter((id) => !wqSkillIds.includes(id));
+      const wqSkillsBlock = formatSkillsBlock([...wqSkillIds, ...wqAutoSkills]);
+      const wqWeak = [];
       try {
-        const wqRes = await chat({
-          config,
-          task: 'quality',
-          messages: [
-            { role: 'system', content: WRITING_QUALITY_SYSTEM },
-            { role: 'user', content: `第${idx}章 标题：${title}\n\n${full.slice(0, 3000)}` }
-          ],
-          maxTokens: 1500
-        });
-        const wq = extractJson(wqRes.content);
-        if (wq && wq.overall && wq.overall.score < 6) {
-          const weak = (wq.overall.weaknesses || []).slice(0, 2).join('、');
-          send({ type: 'status', message: `文笔 ${wq.overall.score}/10 偏低（${weak || '表达平淡'}），正在自动润色提升…` });
+        for (let wqRound = 0; wqRound < 2; wqRound++) {
+          let wqScore = null;
+          let wqIssues = '';
           try {
-            const knowledgeIds = getNovelKnowledgeIds(novel);
-            const knowledgeBlock = formatKnowledgeBlock(knowledgeIds);
-            const skillIds = getNovelSkillIds(novel);
-            const autoSkills = recommendSkillsForGenre(novel.genre).filter((id) => !skillIds.includes(id));
-            const skillsBlock = formatSkillsBlock([...skillIds, ...autoSkills]);
+            const wqRes = await chat({
+              config,
+              task: 'quality',
+              messages: [
+                { role: 'system', content: WRITING_QUALITY_SYSTEM },
+                { role: 'user', content: `第${idx}章 标题：${title}\n\n${sampleText(full, 3500)}` }
+              ],
+              maxTokens: 1500
+            });
+            const wq = extractJson(wqRes.content);
+            wqScore = wq?.overall?.score ?? null;
+            wqIssues = (wq?.overall?.weaknesses || []).slice(0, 2).join('、');
+            if (wqScore != null) wqWeak[0] = wqIssues;
+          } catch { /* 评分失败，按需润色处理 */ }
+
+          // 解析失败或分数缺失 → 视为需润色；分数存在且 ≥6 → 达标
+          const needsPolish = wqScore == null || wqScore < 6;
+          if (!needsPolish) break;
+
+          const reason = wqScore == null ? '文笔评分解析异常' : (`文笔 ${wqScore}/10 偏低（${wqIssues || '表达平淡'}）`);
+          send({ type: 'status', message: `${reason}，正在自动润色提升…` });
+          try {
             const wIter = await iteratePolish(config, novel, full, {
               onStatus: (m) => send({ type: 'status', message: m }),
               maxRounds: 1,
-              opts: { knowledgeBlock, skillsBlock, genre: novel.genre }
+              opts: { knowledgeBlock: wqKnowledgeBlock, skillsBlock: wqSkillsBlock, genre: novel.genre }
             });
             if (wIter.text && wIter.text.trim() && wIter.text.trim().length >= Math.floor(full.length * 0.5)) {
               full = wIter.text.trim();
-              send({ type: 'status', message: `文笔润色完成（${weak ? '重点改善' + weak : '提升表达自然度'}）` });
+              if (!wqWeak[0]) wqWeak[0] = wqIssues || '提升表达自然度';
             }
           } catch { /* 文笔润色失败不阻塞，保留原版 */ }
         }
+        if (wqWeak[0]) send({ type: 'status', message: `文笔润色完成（重点改善${wqWeak[0]}）` });
       } catch { /* 文笔检查失败不阻塞 */ }
     }
 
@@ -3346,11 +3370,14 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
             maxTokens: 4096
           });
           const stAnalysis = extractJson(stRes.content);
-          if (stAnalysis && typeof stAnalysis === 'object') {
-            const newBaseline = (stAnalysis.overview || JSON.stringify(stAnalysis)).trim();
-            if (newBaseline) {
-              db.prepare("UPDATE novels SET style_baseline = ?, style_samples = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(newBaseline, JSON.stringify(stAnalysis.example || []), novel.id);
-            }
+          const rawText = (stRes.content || '').trim();
+          // JSON 解析失败或 overview 缺失时，用模型原始输出截断作兜底基准，避免重锚定被静默丢弃
+          const newBaseline = (stAnalysis && typeof stAnalysis === 'object')
+            ? ((stAnalysis.overview || JSON.stringify(stAnalysis)).trim())
+            : (rawText ? rawText.slice(0, 1200) : '');
+          if (newBaseline) {
+            const samples = (stAnalysis && Array.isArray(stAnalysis.example)) ? JSON.stringify(stAnalysis.example) : '';
+            db.prepare("UPDATE novels SET style_baseline = ?, style_samples = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(newBaseline, samples, novel.id);
           }
         }
       } catch { /* 风格重锚定失败不阻塞 */ }
