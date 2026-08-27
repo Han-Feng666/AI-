@@ -848,6 +848,117 @@ export function longestDuplicateLength(a, b) {
   return best;
 }
 
+// 时间线自洽检测：文中出现的具体时刻按叙述顺序必须递进。
+// 若后文出现的时刻早于前文（如先写"凌晨三点"守夜、后写"凌晨两点四十七分"死亡），
+// 且两处之间没有"前一天/回忆/当时/想起/与此同时"等回溯或并行标记，即判定时间倒置。
+// 这是 LLM 生成最容易犯、读者一眼看穿的硬伤，纯正则即可拦截。支持汉字与阿拉伯数字。
+export function scanTimelineContradiction(text) {
+  const s = String(text || '');
+  if (s.length < 200) return [];
+  const D = { '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '半': 30 };
+  // 汉字/阿拉伯数字互转：小时 1-12（一~十二），分钟 0-59（含"四十七""五十""十五"等）
+  const parseNum = (str) => {
+    if (!str) return NaN;
+    if (/^\d+$/.test(str)) return Number(str);
+    const m = str.match(/^([一二两三四五六七八九])?十([一二三四五六七八九])?$/);
+    if (m) return (m[1] ? D[m[1]] * 10 : 10) + (m[2] ? D[m[2]] : 0);
+    return D[str] !== undefined ? D[str] : NaN;
+  };
+  // 捕获 (前缀)(N)点(M分)，前缀决定半日区间；不同前缀之间不做比较（保守防误报）
+  const timeRe = /(凌晨|清晨|早上|上午|中午|下午|傍晚|晚上|夜里|深夜)?\s*(\d{1,2}|[一二两三四五六七八九十]{1,2})\s*[点时:：]\s*(\d{1,2}|[一二两三四五六七八九十]{1,3})?\s*分?/g;
+  const PREFIX = { '凌晨': 0, '清晨': 0, '早上': 0, '上午': 0, '中午': 1, '下午': 1, '傍晚': 1, '晚上': 1, '夜里': 1, '深夜': 1 };
+  const marks = [];
+  for (const m of s.matchAll(timeRe)) {
+    const hour = parseNum(m[2]);
+    const minute = parseNum(m[3] || '') || 0;
+    if (!Number.isFinite(hour) || hour < 0 || hour > 23 || minute < 0 || minute > 59) continue;
+    // 排除非时刻上下文（"三个月""四点起床的班"这类误匹配）
+    const before = s.slice(Math.max(0, m.index - 6), m.index);
+    if (/个月|年头|岁|年代|号|日|周|星期|点钟的/.test(before)) continue;
+    marks.push({ half: PREFIX[m[1]] ?? null, minutes: hour * 60 + minute, index: m.index, label: m[0].trim() });
+  }
+  // 两时刻之间的文本若有回溯/并行/预约标记，则这对比较无效
+  const flashbackRe = /(前一天|前一晚|头一天|昨晚|昨日|昨天|那天|当日|当时|想起|记得|回忆|曾经|以前|此前|与此同时|另一边|镜头一转|这时|此刻|约的?是|说好|订的?是|提前|一晃|过了.{0,6}(天|年|月)|第二天|翌日|次[日晨])/;
+  const issues = [];
+  for (let i = 0; i < marks.length; i++) {
+    for (let j = i + 1; j < Math.min(marks.length, i + 6); j++) {
+      const a = marks[i], b = marks[j];
+      // 只比较同为无前缀或同半日区间（凌晨对凌晨、晚上对晚上）；跨区间保守跳过
+      if (a.half !== b.half) continue;
+      const diff = a.minutes - b.minutes; // >0 表示后文时刻更早 = 倒流
+      if (diff < 10) continue; // <10 分钟的微小抖动放过
+      const between = s.slice(a.index + a.label.length, b.index);
+      if (flashbackRe.test(between)) continue;
+      // 场景跳切（空行 + 新场景）也可能合法回拨时间；两处相隔超过 800 字保守放过
+      if (b.index - a.index > 800) continue;
+      issues.push(`时间倒置：先写"${a.label}"，后文又出现更早的"${b.label}"（早了约${diff}分钟），中间没有任何回忆/前一天/并行场景等回溯标记——后文时刻应晚于前文，或补上明确的时间回溯交代`);
+      break;
+    }
+    if (issues.length >= 3) break;
+  }
+  return issues;
+}
+
+// 称呼与身份一致性检测：叫"爹/娘/爷/奶"等亲属称谓的角色，介绍语必须与称谓相称。
+// 如"老爹已经把灵台撤了。……他是爷爷的老伙计，在铺子里帮了几十年忙"——称呼是父亲、
+// 介绍是雇员，读者立刻会问"这到底是他爹还是伙计"。收养/义亲（继/养/干/义/过继/入赘）除外。
+// 称呼与身份介绍常分属前后两句，故按段落内 160 字窗口检测，而非单句内共现。
+export function scanKinshipTitleConflict(text) {
+  const s = String(text || '');
+  if (s.length < 300) return [];
+  const issues = [];
+  const kinRe = /(老爹|老爸|老娘|老妈|我爹|我娘|他爹|她爹|他娘|她娘|我父亲|我母亲|他父亲|她母亲|亲爹|亲娘|生父|生母|父亲大人|娘亲|我爸|我妈|他爸|他妈|她爸|她妈)/;
+  const outsiderRe = /(老伙计|的伙计|帮工|雇[员工]|学徒|打工|做工|做事的|手下|部下|店里人手|老搭档|老相识)/;
+  const guardRe = /(继父|继母|养父|养母|干爹|干娘|义父|义母|过继|入赘|拜把|认的|名义上|前夫|前妻|岳父|岳母|公公|婆婆|师傅|师徒|收养|认作|当年|那时候|年轻时|以前在|早年间)/;
+  for (const para of s.split(/\n+/)) {
+    let searchFrom = 0;
+    while (searchFrom < para.length) {
+      const kinMatch = para.slice(searchFrom).match(kinRe);
+      if (!kinMatch) break;
+      const kinIdx = searchFrom + kinMatch.index;
+      // 称呼之后 160 字窗口（跨句）内查外人身份词；窗口内出现收养/义亲/时间缓冲词则跳过
+      const window = para.slice(kinIdx, kinIdx + 160);
+      const outsiderMatch = window.match(outsiderRe);
+      if (outsiderMatch && !guardRe.test(window)) {
+        issues.push(`称呼与身份矛盾："${kinMatch[0]}"是亲属称谓，但其后介绍出现"${outsiderMatch[0]}"（外人/雇员身份），两者冲突——请统一该人物的称呼与身份（若是亲缘就改为继承/跟随一辈子的表述；若是伙计就改用姓名或"陈叔/福伯"式称呼）`);
+        if (issues.length >= 3) return issues;
+      }
+      searchFrom = kinIdx + kinMatch[0].length;
+    }
+  }
+  return issues;
+}
+
+// 场景元素错位检测：A 场景出现 B 场景专属元素（如殡仪馆走廊里出现监护仪、病房里出现纸扎）。
+// 常见错位对：医院元素 vs 殡仪/法事元素；现代元素 vs 古代元素（后者已由世界观锚定覆盖，此处防场景级混搭）。
+export function scanSceneElementMismatch(text) {
+  const s = String(text || '');
+  if (s.length < 300) return [];
+  const issues = [];
+  const pairs = [
+    {
+      scene: /(殡仪馆|灵堂|告别室|守灵|灵棚|挽联|寿衣店|纸扎铺)/,
+      alien: /(监护仪|心电图|点滴|输液管|住院部|查房|值班医生|门诊|挂号|手术台|无影灯|病床|查体|听诊器)/,
+      bridge: /(从医院|从病房|医院运来|转到|送来|抬来|回忆|想起|生前|住院那会儿|当时|昨天|前一天|救护车|运到|遗体|太平间)/,
+      sceneName: '殡仪/丧仪场景', alienName: '医院元素'
+    },
+    {
+      scene: /(病房|住院|门诊|点滴)/,
+      alien: /(纸扎|寿衣|挽联|花圈|骨灰|灵位|道场|超度|经幡)/,
+      bridge: /(回忆|想起|生前|母亲|父亲|爷爷|奶奶|去世|老人提起|柜里|库房|旁边|隔壁|楼下|陪护|带来的)/,
+      sceneName: '医院场景', alienName: '丧仪元素'
+    }
+  ];
+  for (const p of pairs) {
+    if (p.scene.test(s) && p.alien.test(s) && !p.bridge.test(s)) {
+      const alienHit = s.match(p.alien);
+      issues.push(`场景元素错位：本章存在${p.sceneName}，却出现${p.alienName}（"${alienHit[0]}"），且没有转运/回忆/并存合理性交代——请确认场景设定，把不属于该场景的元素替换或补上合理来由`);
+      if (issues.length >= 3) break;
+    }
+  }
+  return issues;
+}
+
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
 export function scanAiPunctuation(text) {
   const s = String(text || '');

@@ -12,6 +12,7 @@ import {
   getCharacterProfiles, upsertCharacterProfile, formatCharacterProfiles,
   scanAiPatterns, blacklistPenalty, blacklistFlagWords, cleanAiText, scanTopicDrift,
   scanStructureBalance, scanCrossChapterRepeats, longestDuplicateLength,
+  scanTimelineContradiction, scanKinshipTitleConflict, scanSceneElementMismatch,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
 } from './lib.js';
@@ -3078,6 +3079,15 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
         // 5a) 对白/叙述结构失衡：全章零对话（流水账旁白体）或全章 85%+ 对话（剧本化）
         structureFixes.push(...scanStructureBalance(full));
 
+        // 5a2) 硬逻辑矛盾（免费正则，模型无关）：
+        //      时间倒置（先"凌晨三点"后"凌晨两点四十七分"且无回溯标记）→ 触发重生成；
+        //      称呼身份矛盾（"老爹"被介绍成"爷爷的老伙计"）、场景元素错位（殡仪馆出现监护仪）→ 定向润色。
+        for (const timelineIssue of scanTimelineContradiction(full)) {
+          problems.push({ desc: `时间线硬伤：${timelineIssue}` });
+        }
+        structureFixes.push(...scanKinshipTitleConflict(full));
+        structureFixes.push(...scanSceneElementMismatch(full));
+
         // 5b) 跨章口癖固化：最近 3 章正文与本章比对，找出"每章同款"的固化短语
         const priorRows = db.prepare(
           "SELECT content FROM chapters WHERE novel_id = ? AND chapter_index >= ? AND chapter_index < ? AND content != '' ORDER BY chapter_index DESC LIMIT 3"
@@ -3184,7 +3194,8 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
 
           // 解析失败或分数缺失 → 视为需润色；分数存在且 ≥6 → 达标
           const needsPolish = wqScore == null || wqScore < 6;
-          if (!needsPolish) break;
+          // 文笔达标但存在结构问题（称呼矛盾/场景错位/口癖固化等）时，仍强制一轮定向润色把问题修掉
+          if (!needsPolish && structureFixes.length === 0) break;
 
           const reason = wqScore == null ? '文笔评分解析异常' : (`文笔 ${wqScore}/10 偏低（${wqIssues || '表达平淡'}）`);
           send({ type: 'status', message: `${reason}，正在自动润色提升…` });
@@ -3198,6 +3209,8 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
               full = wIter.text.trim();
               if (!wqWeak[0]) wqWeak[0] = wqIssues || '提升表达自然度';
             }
+            // 本轮润色已携带全部结构问题；文笔达标纯走结构修复时清空，避免第二轮重复修复
+            if (!needsPolish) structureFixes = [];
           } catch { /* 文笔润色失败不阻塞，保留原版 */ }
         }
         if (wqWeak[0]) send({ type: 'status', message: `文笔润色完成（重点改善${wqWeak[0]}）` });
