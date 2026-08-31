@@ -14,7 +14,7 @@ http.interceptors.response.use(
 );
 
 // 流式请求：解析后端 SSE，返回 AbortController 以便取消
-export async function streamRequest(url, body, { onStatus, onDelta, onError, onProgress, onReset, idleTimeout = 300000 } = {}) {
+export async function streamRequest(url, body, { onStatus, onDelta, onError, onProgress, onReset, onEvent, idleTimeout = 300000 } = {}) {
   const ctrl = new AbortController();
   let timer;
   let idleAborted = false;
@@ -93,6 +93,7 @@ export async function streamRequest(url, body, { onStatus, onDelta, onError, onP
           else if (obj.type === 'error' && onError) { onError(obj.message); errorReceived = true; }
           else if (obj.type === 'reset' && onReset) onReset();
           else if (obj.type === 'aborted') throw new Error('已停止');
+          else if (onEvent) onEvent(obj);
         }
       }
       if (!doneReceived) {
@@ -233,6 +234,11 @@ export const api = {
   createStyle: (data, handlers) => streamRequest('/styles', data, handlers),
   updateStyle: (id, data) => http.put(`/styles/${id}`, data),
   deleteStyle: (id) => http.delete(`/styles/${id}`),
+  getStyleSlices: (id, tag) => http.get(`/styles/${id}/slices`, { params: tag ? { tag } : {} }),
+  retagStyle: (id, handlers) => streamRequest(`/styles/${id}/retag`, {}, handlers),
+
+  // 风格 DNA 偏差与重润
+  polishByDNA: (id, idx, handlers) => streamRequest(`/novels/${id}/chapters/${idx}/polish-by-dna`, {}, { ...handlers, idleTimeout: 600000 }),
 
   // 灵感生成器：按题材+风格批量产出小说创意大纲
   generateIdeas: (data, handlers) => streamRequest('/ideas', data, handlers),
@@ -270,6 +276,8 @@ export const api = {
   listKnowledge: (genre) => http.get('/knowledge/corpora', { params: genre ? { genre } : {} }),
   getKnowledge: (id) => http.get(`/knowledge/corpora/${id}`),
   getKnowledgeSamples: (id) => http.get(`/knowledge/corpora/${id}/samples`),
+  getKnowledgeSlices: (id, tag) => http.get(`/knowledge/corpora/${id}/slices`, { params: tag ? { tag } : {} }),
+  retagKnowledge: (id, handlers) => streamRequest(`/knowledge/corpora/${id}/retag`, {}, handlers),
   deleteKnowledge: (id) => http.delete(`/knowledge/corpora/${id}`),
   listKnowledgeByGenres: (genres) => http.get('/knowledge/by-genres', { params: { genres } }),
 

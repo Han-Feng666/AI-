@@ -450,6 +450,26 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_samples ON knowledge_samples(corpus_id,
 ensureColumn('novels', 'knowledge_corpus_ids', "knowledge_corpus_ids TEXT DEFAULT ''");
 ensureColumn('novels', 'skill_ids', "skill_ids TEXT DEFAULT '[]'");
 
+// ===== 风格 DNA 与样本切片（风格库引擎升级） =====
+ensureColumn('styles', 'style_dna', "style_dna TEXT DEFAULT ''");
+ensureColumn('knowledge_samples', 'scene_tags', "scene_tags TEXT DEFAULT ''");
+ensureColumn('knowledge_samples', 'keywords', "keywords TEXT DEFAULT ''");
+ensureColumn('knowledge_corpora', 'tag_status', "tag_status TEXT DEFAULT ''");
+ensureColumn('chapters', 'style_deviation', 'style_deviation INTEGER DEFAULT NULL');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS style_slices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  style_id INTEGER NOT NULL REFERENCES styles(id) ON DELETE CASCADE,
+  slice_index INTEGER NOT NULL DEFAULT 0,
+  text TEXT NOT NULL DEFAULT '',
+  scene_tags TEXT DEFAULT '',
+  keywords TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_style_slices ON style_slices(style_id, slice_index);
+`);
+
 // ===== 技能库 =====
 db.exec(`
 CREATE TABLE IF NOT EXISTS skills (

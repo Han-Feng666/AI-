@@ -589,3 +589,50 @@ export function offlineLearnNovelStyle(novelId) {
   return result;
 }
 
+/**
+ * 纯统计特征提取（风格 DNA 数据源）
+ * 只返回数值化统计特征，不做任何 LLM 调用、不写数据库，可独立单元测试。
+ */
+export function analyzeStyleStats(text) {
+  const clean = String(text || '');
+  if (!clean.trim()) return null;
+
+  const sentences = splitSentences(clean);
+  if (!sentences.length) return null;
+
+  const sentLen = analyzeSentenceLength(sentences);
+  const punct = analyzePunctuation(clean);
+  const dialogue = analyzeDialogue(clean);
+  const paraRhythm = analyzeParagraphRhythm(clean);
+  const wordPatterns = analyzeWordPatterns(clean);
+
+  const shortRatio = Math.round((sentences.filter((s) => countChars(s) < 10).length / sentences.length) * 100);
+  const longRatio = Math.round((sentences.filter((s) => countChars(s) > 50).length / sentences.length) * 100);
+  const periodCount = punct.raw.period || 0;
+
+  // 高频 2-gram 词（DNA 摘要展示用）
+  const topBigrams = topN(bigramFreq(clean), 10).map((b) => b.word);
+
+  return {
+    avg_sentence_length: sentLen.avg,
+    sentence_variance: sentLen.variance,
+    short_sentence_ratio: shortRatio,
+    long_sentence_ratio: longRatio,
+    dialogue_ratio: dialogue.ratio,
+    avg_paragraph_length: paraRhythm.avgParaLen,
+    paragraph_pace: paraRhythm.pace,
+    paragraph_variance: paraRhythm.variance,
+    comma_period_ratio: periodCount > 0 ? Math.round((punct.raw.comma / periodCount) * 10) / 10 : 0,
+    exclaim_per_1k: punct.perThousand.exclaim,
+    question_per_1k: punct.perThousand.question,
+    ellipsis_per_1k: punct.perThousand.ellipsis,
+    action_words_per_1k: wordPatterns.perThousand.action,
+    emotion_words_per_1k: wordPatterns.perThousand.emotion,
+    sense_visual_per_1k: wordPatterns.perThousand.sense_visual,
+    sense_auditory_per_1k: wordPatterns.perThousand.sense_auditory,
+    time_words_per_1k: wordPatterns.perThousand.time,
+    cognition_words_per_1k: wordPatterns.perThousand.cognition,
+    top_bigrams: topBigrams
+  };
+}
+

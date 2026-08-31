@@ -5,8 +5,8 @@ import { db } from './db.js';
 // 不依赖 embedding API，适用于 500 章以内 (4000 chunks) 的检索
 // ====================================================================
 
-// 中文 2-gram 分词
-function tokenize(text) {
+// 中文 2-gram 分词（导出供切片检索复用）
+export function tokenize(text) {
   const clean = String(text || '').replace(/\s+/g, '');
   const tokens = [];
   for (let i = 0; i < clean.length - 1; i++) {
@@ -17,8 +17,8 @@ function tokenize(text) {
   return tokens;
 }
 
-// 构建 TF-IDF 向量
-function buildTfIdf(docs) {
+// 构建 TF-IDF 向量（导出供切片检索复用）
+export function buildTfIdf(docs) {
   // docs: [{id, text}]
   const N = docs.length;
   if (!N) return null;
@@ -63,8 +63,8 @@ function buildTfIdf(docs) {
   return { idf, vectors, N };
 }
 
-// 余弦相似度
-function cosineSim(queryVec, docVec) {
+// 余弦相似度（导出供切片检索复用）
+export function cosineSim(queryVec, docVec) {
   let dot = 0;
   for (const [t, q] of queryVec) {
     const d = docVec.get(t);

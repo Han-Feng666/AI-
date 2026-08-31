@@ -99,6 +99,57 @@ function cancelEdit() {
   clearDraft();
 }
 
+// 风格 DNA 偏差（SSE 实时事件优先，章节列兜底；事件残留按章节索引过滤）
+const styleDev = computed(() => {
+  const ev = store.styleDeviation;
+  if (ev && (ev.chapterIndex == null || String(ev.chapterIndex) === String(store.activeChapter?.chapter_index))) {
+    return { score: ev.score, details: ev.details || [], threshold: ev.threshold ?? 40 };
+  }
+  const col = store.activeChapter?.style_deviation;
+  if (col == null) return null;
+  return { score: Number(col) || 0, details: [], threshold: 40 };
+});
+const styleDevLevel = computed(() => {
+  if (!styleDev.value) return null;
+  const s = styleDev.value.score;
+  if (s <= 20) return { text: '贴近参考风格', cls: 'ok' };
+  if (s <= styleDev.value.threshold) return { text: '轻微偏离', cls: 'warn' };
+  return { text: '明显偏离', cls: 'bad' };
+});
+const styleDeviationOpen = ref(false);
+const polishingByDNA = ref(false);
+
+async function polishByDNA() {
+  try {
+    await ElMessageBox.confirm(
+      '将按风格 DNA 偏差明细（句长/对话比/标点节奏等）对当前章节做定向重润，保留剧情与人设。覆盖当前内容，确定吗？',
+      '按风格 DNA 重润',
+      { type: 'info', confirmButtonText: '开始重润', cancelButtonText: '取消' }
+    );
+  } catch { return; }
+  polishingByDNA.value = true;
+  try {
+    const data = await store.polishByDNA();
+    if (data?.chapter) {
+      detect.value = {
+        score: data?.detect?.score ?? detect.value?.score ?? 0,
+        issues: data?.detect?.issues || detect.value?.issues || [],
+        blacklist: data?.detect?.blacklist || detect.value?.blacklist || [],
+        passed: !!data?.passed
+      };
+      ElMessage.success(
+        data?.before != null && data?.deviation?.score != null
+          ? `重润完成，风格偏差 ${data.before} 分 → ${data.deviation.score} 分`
+          : '重润完成'
+      );
+    }
+  } catch (e) {
+    ElMessage.error(e.message);
+  } finally {
+    polishingByDNA.value = false;
+  }
+}
+
 // AI 味检测
 const detect = ref(null);
 const detectLoading = ref(false);
@@ -428,6 +479,38 @@ watch(
         <div v-else class="detect-clean">未检测到明显 AI 痕迹，文风合格。</div>
       </div>
 
+      <!-- 风格 DNA 偏差提示 -->
+      <div v-if="styleDev && !store.chapterEdit" class="dev-box" :class="styleDevLevel.cls">
+        <div class="dev-head">
+          <span class="dev-label"><el-icon><DataAnalysis /></el-icon>风格偏差</span>
+          <span class="dev-score" :class="styleDevLevel.cls">{{ styleDev.score }} 分 · {{ styleDevLevel.text }}</span>
+          <span v-if="styleDev.score > styleDev.threshold" class="dev-tip">与参考风格 DNA 差异较大，建议重润</span>
+          <div class="dev-ops">
+            <el-button
+              v-if="styleDev.score > styleDev.threshold"
+              size="small"
+              type="primary"
+              plain
+              :loading="polishingByDNA"
+              @click="polishByDNA"
+            >
+              <el-icon style="margin-right:4px"><MagicStick /></el-icon>按风格 DNA 重润
+            </el-button>
+            <el-button v-if="styleDev.details.length" size="small" text @click="styleDeviationOpen = !styleDeviationOpen">
+              {{ styleDeviationOpen ? '收起明细' : '偏差明细' }}
+            </el-button>
+          </div>
+        </div>
+        <div v-if="styleDeviationOpen && styleDev.details.length" class="dev-details">
+          <div v-for="(d, i) in styleDev.details" :key="i" class="dev-row">
+            <span class="dev-dim">{{ d.label || d.dim }}</span>
+            <span class="dev-target">参考 {{ d.target }}{{ d.unit || '' }}</span>
+            <span class="dev-actual">本章 {{ d.actual }}{{ d.unit || '' }}</span>
+            <span class="dev-delta">偏差 {{ d.deviation }}{{ d.unit || '' }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- 历史版本弹窗 -->
       <el-dialog v-model="backupsOpen" :title="'第 ' + store.activeChapter?.chapter_index + ' 章 · 历史版本'" width="520px">
         <div v-loading="backupsLoading">
@@ -633,6 +716,24 @@ watch(
 .detect-score.ok { color: #059669; }
 .detect-score.warn { color: #d97706; }
 .detect-score.bad { color: #dc2626; }
+.dev-box { border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px 14px; margin-top: 10px; background: #fafafa; }
+.dev-box.ok { border-color: #a7f3d0; background: #f4fffa; }
+.dev-box.warn { border-color: #fde68a; background: #fffbeb; }
+.dev-box.bad { border-color: #fecaca; background: #fff5f5; }
+.dev-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dev-label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 700; color: #374151; }
+.dev-score { font-size: 13px; font-weight: 700; }
+.dev-score.ok { color: #059669; }
+.dev-score.warn { color: #d97706; }
+.dev-score.bad { color: #dc2626; }
+.dev-tip { font-size: 12px; color: #9ca3af; }
+.dev-ops { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.dev-details { margin-top: 10px; border-top: 1px dashed #e5e7eb; padding-top: 8px; }
+.dev-row { display: flex; align-items: center; gap: 12px; font-size: 12px; color: #4b5563; padding: 3px 0; }
+.dev-dim { width: 110px; font-weight: 600; color: #374151; flex-shrink: 0; }
+.dev-target { width: 110px; flex-shrink: 0; }
+.dev-actual { width: 110px; flex-shrink: 0; }
+.dev-delta { color: #d97706; font-weight: 600; }
 .detect-ops { margin-left: auto; display: flex; gap: 8px; }
 .detect-pass {
   display: inline-flex;

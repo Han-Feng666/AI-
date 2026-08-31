@@ -31,6 +31,7 @@ export const useEditorStore = defineStore('editor', {
     busyLabel: '',
     genStream: '',
     genProgress: 0,
+    styleDeviation: null,
 
     chatMessages: [],
     chatStream: '',
@@ -514,6 +515,9 @@ export const useEditorStore = defineStore('editor', {
       try {
         const p = api.generateChapter(this.novelId, params, {
           onStatus: (m) => { this._commit(originId, { busyLabel: m }); },
+          onEvent: (obj) => {
+            if (obj.type === 'style_deviation') this._commit(originId, { styleDeviation: obj });
+          },
           onProgress: (pct, msg) => {
             const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
             this._commit(originId, { genProgress: p, busyLabel: msg || `正在生成章节…（${p}%）` });
@@ -652,6 +656,9 @@ export const useEditorStore = defineStore('editor', {
       try {
         const p = api.polishChapter(this.novelId, idx, {
           onStatus: (m) => { this._commit(originId, { busyLabel: m }); },
+          onEvent: (obj) => {
+            if (obj.type === 'style_deviation') this._commit(originId, { styleDeviation: obj });
+          },
           onProgress: (pct, msg) => {
             const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
             this._commit(originId, { genProgress: p, busyLabel: msg || `正在去除 AI 味…（${p}%）` });
@@ -659,6 +666,44 @@ export const useEditorStore = defineStore('editor', {
           onDelta: (d) => {
             const cur = String(this.novelId) === String(originId) ? (this.$state.genStream || '') : ((this._slices.get(String(originId)) || {}).genStream || '');
             this._commit(originId, { genStream: cur + d });
+          },
+          onError: (m) => { throw new Error(m); }
+        });
+        this._genAbort = p.abort;
+        const data = await p;
+        this._commit(originId, { activeChapter: data.chapter, chapterEdit: false, busy: false, busyLabel: '', genStream: '', genProgress: 100, _genAbort: null });
+        if (String(this.novelId) === String(originId)) await this.refresh();
+        return data;
+      } catch (e) {
+        if (e.message === '已停止') return null;
+        throw e;
+      } finally {
+        this._commit(originId, { busy: false, busyLabel: '', genStream: '', genProgress: 0, _genAbort: null });
+      }
+    },
+
+    // 按风格 DNA 偏差明细重润当前章节
+    async polishByDNA() {
+      if (this.busy || !this.activeChapter) return null;
+      const originId = this.novelId;
+      const idx = this.activeChapter.chapter_index;
+      this.busy = true;
+      this.busyLabel = '正在按风格 DNA 重润…';
+      this.genStream = '';
+      this.genProgress = 0;
+      try {
+        const p = api.polishByDNA(this.novelId, idx, {
+          onStatus: (m) => { this._commit(originId, { busyLabel: m }); },
+          onEvent: (obj) => {
+            if (obj.type === 'style_deviation') this._commit(originId, { styleDeviation: obj });
+          },
+          onProgress: (pct, msg) => {
+            const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+            this._commit(originId, { genProgress: p, busyLabel: msg || `正在按风格 DNA 重润…（${p}%）` });
+          },
+          onDelta: (d) => {
+            const cur = String(this.novelId) === String(originId) ? (this.$state.genStream || '') : ((this._slices.get(String(originId)) || {}).genStream || '');
+            this._commit(originId, { genStream: cur + unescapeUnicode(d) });
           },
           onError: (m) => { throw new Error(m); }
         });
@@ -687,6 +732,9 @@ export const useEditorStore = defineStore('editor', {
       try {
         const p = api.reviseChapter(this.novelId, idx, instructions, {
           onStatus: (m) => { this._commit(originId, { busyLabel: m }); },
+          onEvent: (obj) => {
+            if (obj.type === 'style_deviation') this._commit(originId, { styleDeviation: obj });
+          },
           onProgress: (pct, msg) => {
             const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
             this._commit(originId, { genProgress: p, busyLabel: msg || `正在按要求修改…（${p}%）` });

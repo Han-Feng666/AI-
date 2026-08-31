@@ -19,6 +19,91 @@ const form = ref({ name: '', notes: '', sourceText: '' });
 const fileInput = ref(null);
 const uploadRef = ref(null);
 
+// 风格 DNA / 切片浏览
+const SCENE_TAGS = ['对话', '动作/打斗', '心理', '环境', '开篇', '悬念/转折', '日常', '情绪高潮'];
+const dnaOpen = ref(false);
+const dnaData = ref(null);
+const slices = ref([]);
+const slicesLoading = ref(false);
+const activeTag = ref('');
+const retagging = ref(false);
+const retagStatus = ref('');
+
+const DNA_LABELS = {
+  avg_sentence_length: '平均句长(字)',
+  short_sentence_ratio: '短句占比(%)',
+  long_sentence_ratio: '长句占比(%)',
+  dialogue_ratio: '对话占比(%)',
+  avg_paragraph_length: '段落均长(字)',
+  comma_period_ratio: '逗句比',
+  exclaim_per_1k: '感叹号/千字',
+  question_per_1k: '问号/千字',
+  action_words_per_1k: '动作词/千字',
+  emotion_words_per_1k: '情绪词/千字'
+};
+
+function parseDNA(s) {
+  if (!s?.style_dna) return null;
+  try { return JSON.parse(s.style_dna); } catch { return null; }
+}
+
+function safeTags(s) {
+  if (!s?.scene_tags) return [];
+  try {
+    const t = typeof s.scene_tags === 'string' ? JSON.parse(s.scene_tags) : s.scene_tags;
+    return Array.isArray(t) ? t : [];
+  } catch { return []; }
+}
+
+async function openDna(s) {
+  dnaData.value = parseDNA(s);
+  activeTag.value = '';
+  slices.value = [];
+  dnaOpen.value = true;
+  await loadSlices(s.id);
+}
+
+async function loadSlices(styleId) {
+  slicesLoading.value = true;
+  try {
+    const r = await api.getStyleSlices(styleId, activeTag.value || undefined);
+    slices.value = r.slices || [];
+  } catch (e) {
+    ElMessage.error(e.message);
+  } finally {
+    slicesLoading.value = false;
+  }
+}
+
+function pickTag(tag) {
+  activeTag.value = activeTag.value === tag ? '' : tag;
+  if (current.value) loadSlices(current.value.id);
+}
+
+async function retagStyle() {
+  const s = current.value;
+  if (!s) return;
+  retagging.value = true;
+  retagStatus.value = '准备中…';
+  try {
+    await api.retagStyle(s.id, {
+      onStatus: (m) => { retagStatus.value = m; },
+      onError: (m) => { throw new Error(m); }
+    });
+    ElMessage.success('切片与打标已更新');
+    const fresh = await api.getStyle(s.id);
+    current.value = fresh;
+    dnaData.value = parseDNA(fresh);
+    const idx = styles.value.findIndex((x) => x.id === s.id);
+    if (idx > -1) styles.value[idx] = fresh;
+    await loadSlices(s.id);
+  } catch (e) {
+    ElMessage.error(e.message);
+  } finally {
+    retagging.value = false;
+  }
+}
+
 async function load() {
   loading.value = true;
   try {
@@ -223,6 +308,12 @@ onMounted(load);
     <el-drawer v-model="detailOpen" size="560px" :title="current?.name">
       <div v-if="current" class="detail-body">
         <el-tag v-if="current.notes" effect="plain" type="info" class="notes-tag">{{ current.notes }}</el-tag>
+        <div class="dna-entry">
+          <el-button size="small" type="primary" plain @click="openDna(current)">
+            <el-icon style="margin-right:4px"><DataAnalysis /></el-icon>风格 DNA 与样本切片
+          </el-button>
+          <span class="dna-hint">{{ parseDNA(current) ? '已建立量化画像' : '未建立画像（可点上方按钮补建）' }}</span>
+        </div>
         <div v-for="[key, label] in analysisFields" :key="key" class="field">
           <div class="field-label">{{ label }}</div>
           <div class="field-text">{{ current.analysis?.[key] || '—' }}</div>
@@ -235,6 +326,48 @@ onMounted(load);
           <el-button size="small" @click="openEdit(current)"><el-icon style="margin-right:4px"><Edit /></el-icon>编辑</el-button>
           <el-button size="small" type="danger" plain @click="removeStyle(current)"><el-icon style="margin-right:4px"><Delete /></el-icon>删除</el-button>
         </div>
+      </div>
+    </el-drawer>
+
+    <!-- 风格 DNA + 样本切片抽屉 -->
+    <el-drawer v-model="dnaOpen" size="620px" :title="`${current?.name} · 风格 DNA`">
+      <div v-loading="slicesLoading" class="dna-body">
+        <div v-if="dnaData" class="dna-grid">
+          <div v-for="(label, key) in DNA_LABELS" :key="key" class="dna-cell">
+            <div class="dna-val">{{ dnaData[key] ?? '—' }}</div>
+            <div class="dna-label">{{ label }}</div>
+          </div>
+        </div>
+        <el-empty v-else description="该风格还没有风格 DNA，点击下方按钮基于原文补建" :image-size="60" />
+        <div v-if="dnaData?.top_bigrams?.length" class="field">
+          <div class="field-label">高频词</div>
+          <div class="field-text">{{ dnaData.top_bigrams.join('、') }}</div>
+        </div>
+
+        <div class="slice-head">
+          <div class="field-label" style="margin:0">样本切片（{{ slices.length }}）</div>
+          <el-button size="small" :loading="retagging" @click="retagStyle">
+            <el-icon style="margin-right:4px"><Refresh /></el-icon>{{ retagging ? '处理中' : '重新切片/打标' }}
+          </el-button>
+        </div>
+        <div v-if="retagging" class="retag-status">{{ retagStatus }}</div>
+        <div class="tag-filter">
+          <el-tag
+            v-for="tag in SCENE_TAGS"
+            :key="tag"
+            :effect="activeTag === tag ? 'dark' : 'plain'"
+            class="tag-chip"
+            @click="pickTag(tag)"
+          >{{ tag }}</el-tag>
+        </div>
+        <div v-if="slicesLoading" style="min-height:120px"></div>
+        <blockquote v-for="s in slices" :key="s.id" class="slice-item">
+          <div class="slice-tags">
+            <el-tag v-for="t in safeTags(s)" :key="t" size="small" effect="plain" type="info">{{ t }}</el-tag>
+          </div>
+          {{ s.text }}
+        </blockquote>
+        <el-empty v-if="!slicesLoading && !slices.length" description="暂无切片（可点「重新切片/打标」基于原文补建）" :image-size="60" />
       </div>
     </el-drawer>
 
@@ -306,4 +439,27 @@ onMounted(load);
   line-height: 1.8;
 }
 .detail-ops { margin-top: 18px; display: flex; gap: 10px; }
+.dna-entry { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.dna-hint { font-size: 11.5px; color: #9ca3af; }
+.dna-body { padding: 4px 2px; }
+.dna-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+.dna-cell { background: #fafbff; border: 1px solid #eef0f8; border-radius: 10px; padding: 10px 8px; text-align: center; }
+.dna-val { font-size: 16px; font-weight: 700; color: #4f46e5; }
+.dna-label { font-size: 11px; color: #9ca3af; margin-top: 3px; }
+.slice-head { display: flex; justify-content: space-between; align-items: center; margin: 20px 0 8px; }
+.retag-status { font-size: 12px; color: #4f46e5; margin-bottom: 8px; }
+.tag-filter { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.tag-chip { cursor: pointer; }
+.slice-item {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid #c7d2fe;
+  background: #fafbff;
+  color: #4b5563;
+  font-size: 12.5px;
+  line-height: 1.8;
+  max-height: 140px;
+  overflow: hidden;
+}
+.slice-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
 </style>

@@ -137,6 +137,72 @@ const analysisFields = [
   ['replicable_techniques', '可复用技法']
 ];
 
+// 场景切片浏览 / 打标
+const SCENE_TAGS = ['对话', '动作/打斗', '心理', '环境', '开篇', '悬念/转折', '日常', '情绪高潮'];
+const slicesOpen = ref(false);
+const slices = ref([]);
+const slicesLoading = ref(false);
+const activeTag = ref('');
+const retagging = ref(false);
+const retagStatus = ref('');
+const tagStats = ref([]);
+
+async function loadSlices(corpusId) {
+  slicesLoading.value = true;
+  try {
+    const r = await api.getKnowledgeSlices(corpusId, activeTag.value || undefined);
+    slices.value = r.slices || [];
+    tagStats.value = r.tag_stats || [];
+  } catch (e) {
+    ElMessage.error(e.message);
+  } finally {
+    slicesLoading.value = false;
+  }
+}
+
+function openSlices(c) {
+  current.value = c;
+  activeTag.value = '';
+  slices.value = [];
+  tagStats.value = [];
+  slicesOpen.value = true;
+  loadSlices(c.id);
+}
+
+function pickTag(tag) {
+  activeTag.value = activeTag.value === tag ? '' : tag;
+  if (current.value) loadSlices(current.value.id);
+}
+
+async function retagCorpus() {
+  const c = current.value;
+  if (!c) return;
+  retagging.value = true;
+  retagStatus.value = '准备中…';
+  try {
+    await api.retagKnowledge(c.id, {
+      onStatus: (m) => { retagStatus.value = m; },
+      onError: (m) => { throw new Error(m); }
+    });
+    ElMessage.success('切片与打标已更新');
+    await loadSlices(c.id);
+  } catch (e) {
+    ElMessage.error(e.message);
+  } finally {
+    retagging.value = false;
+  }
+}
+
+function safeTags(s) {
+  if (!s?.scene_tags) return [];
+  try {
+    const t = typeof s.scene_tags === 'string' ? JSON.parse(s.scene_tags) : s.scene_tags;
+    return Array.isArray(t) ? t : [];
+  } catch { return []; }
+}
+
+const TAG_STATUS_LABEL = { tagged: 'LLM 已打标', 'rule-tagged': '规则预分类', partial: '部分打标', none: '未打标' };
+
 onMounted(load);
 </script>
 
@@ -270,9 +336,54 @@ onMounted(load);
         </template>
 
         <div class="detail-ops">
+          <el-button size="small" type="primary" plain @click="openSlices(current)">
+            <el-icon style="margin-right:4px"><DataAnalysis /></el-icon>场景切片与分布
+          </el-button>
           <el-button size="small" type="danger" plain @click="removeCorpus(current)">
             <el-icon style="margin-right:4px"><Delete /></el-icon>删除知识库
           </el-button>
+        </div>
+      </div>
+    </el-drawer>
+
+    <!-- 场景切片抽屉 -->
+    <el-drawer v-model="slicesOpen" size="620px" :title="`${current?.title} · 场景切片`">
+      <div v-loading="slicesLoading" class="slice-body">
+        <div v-if="tagStats.length" class="dist-block">
+          <div class="field-label">场景标签分布</div>
+          <div v-for="t in tagStats" :key="t.tag" class="dist-row">
+            <span class="dist-tag">{{ t.tag }}</span>
+            <el-progress :percentage="t.pct" :stroke-width="8" :show-text="false" class="dist-bar" />
+            <span class="dist-count">{{ t.count }} 片</span>
+          </div>
+        </div>
+
+        <div class="slice-head">
+          <div class="field-label" style="margin:0">样本切片（{{ slices.length }}）</div>
+          <el-button size="small" :loading="retagging" @click="retagCorpus">
+            <el-icon style="margin-right:4px"><Refresh /></el-icon>{{ retagging ? '处理中' : '重新打标' }}
+          </el-button>
+        </div>
+        <div v-if="retagging" class="retag-status">{{ retagStatus }}</div>
+        <div class="tag-filter">
+          <el-tag
+            v-for="tag in SCENE_TAGS"
+            :key="tag"
+            :effect="activeTag === tag ? 'dark' : 'plain'"
+            class="tag-chip"
+            @click="pickTag(tag)"
+          >{{ tag }}</el-tag>
+        </div>
+        <div v-if="slicesLoading" style="min-height:120px"></div>
+        <blockquote v-for="s in slices" :key="s.id" class="slice-item">
+          <div class="slice-tags">
+            <el-tag v-for="t in safeTags(s)" :key="t" size="small" effect="plain" type="info">{{ t }}</el-tag>
+          </div>
+          {{ s.text }}
+        </blockquote>
+        <el-empty v-if="!slicesLoading && !slices.length" description="暂无切片数据" :image-size="60" />
+        <div v-if="current?.tag_status && slicesOpen" class="tag-status-hint">
+          打标状态：{{ TAG_STATUS_LABEL[current.tag_status] || current.tag_status }}
         </div>
       </div>
     </el-drawer>
@@ -326,5 +437,28 @@ onMounted(load);
 .field-label { font-size: 12px; color: #059669; font-weight: 700; margin-bottom: 4px; }
 .field-text { font-size: 13.5px; color: #374151; line-height: 1.8; white-space: pre-wrap; }
 .field-text.raw { white-space: pre-wrap; }
-.detail-ops { margin-top: 24px; }
+.detail-ops { margin-top: 24px; display: flex; gap: 10px; }
+.slice-body { padding: 4px 2px; }
+.dist-block { margin-bottom: 16px; }
+.dist-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.dist-tag { font-size: 12px; color: #059669; width: 76px; flex-shrink: 0; text-align: right; }
+.dist-bar { flex: 1; }
+.dist-count { font-size: 11px; color: #9ca3af; width: 52px; flex-shrink: 0; }
+.slice-head { display: flex; justify-content: space-between; align-items: center; margin: 16px 0 8px; }
+.retag-status { font-size: 12px; color: #059669; margin-bottom: 8px; }
+.tag-filter { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.tag-chip { cursor: pointer; }
+.slice-item {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid #a7f3d0;
+  background: #f8fffb;
+  color: #4b5563;
+  font-size: 12.5px;
+  line-height: 1.8;
+  max-height: 140px;
+  overflow: hidden;
+}
+.slice-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.tag-status-hint { font-size: 11.5px; color: #9ca3af; margin-top: 12px; }
 </style>

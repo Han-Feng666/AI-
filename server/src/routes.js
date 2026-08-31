@@ -67,12 +67,18 @@ import {
 import { storeChunks, retrieveRelevant, formatRagBlock } from './rag.js';
 import {
   createCorpus, getCorpus, listCorpora, deleteCorpus,
-  updateCorpusStatus, saveSamples, getSamples, getCorpusAnalysis,
+  updateCorpusStatus, saveSamples, clearSamples, getSamples, getCorpusAnalysis,
+  updateSampleTags, setCorpusTagStatus, getCorpusTagStats,
   getKnowledgeByGenres, formatKnowledgeBlock, getSampleSnippets,
   getNovelKnowledgeIds
 } from './knowledge_store.js';
 import { getNovelSkillIds, getSkills, formatSkillsBlock, parseSkillFile, recommendSkillsForGenre } from './skill_store.js';
-import { KNOWLEDGE_LEARN_SYSTEM, KNOWLEDGE_SAMPLE_INTRO, PER_CHUNK_ANALYSIS_SYSTEM, FINAL_SYNTHESIS_SYSTEM } from './prompts.js';
+import { KNOWLEDGE_LEARN_SYSTEM, KNOWLEDGE_SAMPLE_INTRO, PER_CHUNK_ANALYSIS_SYSTEM, FINAL_SYNTHESIS_SYSTEM, SCENE_TAG_SYSTEM, DNA_POLISH_HINT } from './prompts.js';
+import { computeStyleDNA, mergeDNA, compareDNA, formatDNABlock, buildDNAPolishInstructions } from './style_dna.js';
+import {
+  sliceText, saveStyleSlices, getStyleSlices, retrieveFromSlices, preClassify, extractKeywords,
+  getNovelStyleSnippets, getNovelKnowledgeSnippets, SCENE_TAGS
+} from './slice_store.js';
 import {
   detectOllama, ollamaListModels, getLocalModelStatus,
   localChat, shouldUseLocal, autoLearnInBackground
@@ -521,6 +527,110 @@ async function synthesizeWithRateLimit({ config, ctrl, system, user, sse }) {
     }
   }
   throw new Error('综合合成请求多次失败，请稍后重试或检查模型状态。');
+}
+
+/**
+ * 章节文风偏差校验：对启用风格含 DNA 的小说自动计算成章与目标 DNA 的偏差分并写入 style_deviation。
+ * 返回 { score, details } 或 null（无 DNA / 无正文 / 计算失败）。
+ */
+function checkStyleDeviation(novel, idx, content) {
+  try {
+    const text = String(content || '');
+    if (text.length < 300) return null;
+    const styleIdList = parseStyleIds(novel);
+    if (!styleIdList.length) return null;
+    const dnas = getStyles(styleIdList)
+      .map((s) => { try { return s.style_dna ? JSON.parse(s.style_dna) : null; } catch { return null; } })
+      .filter(Boolean);
+    if (!dnas.length) return null;
+    const target = mergeDNA(dnas);
+    const actual = computeStyleDNA(text);
+    if (!target || !actual) return null;
+    const cmp = compareDNA(target, actual);
+    if (!cmp) return null;
+    db.prepare('UPDATE chapters SET style_deviation = ? WHERE novel_id = ? AND chapter_index = ?')
+      .run(cmp.score, novel.id, idx);
+    return cmp;
+  } catch { return null; }
+}
+
+/**
+ * 为润色/改写等单章任务构建风格注入（动态范文 + DNA），失败静默回退到固定样本。
+ */
+function buildStyleInjection(novel, query) {
+  const out = {};
+  try {
+    const styleIdList = parseStyleIds(novel);
+    if (styleIdList.length) {
+      const sr = getNovelStyleSnippets(styleIdList, query || novel.title || '', { topK: 4, maxChars: 3000 });
+      if (sr.snippets) out.styleSnippets = sr.snippets;
+      const dnas = getStyles(styleIdList)
+        .map((s) => { try { return s.style_dna ? JSON.parse(s.style_dna) : null; } catch { return null; } })
+        .filter(Boolean);
+      if (dnas.length) {
+        try { out.styleDNA = formatDNABlock(mergeDNA(dnas)); } catch { /* 忽略 */ }
+      }
+    }
+  } catch { /* 回退固定样本注入 */ }
+  return out;
+}
+
+/**
+ * 样本切片批量打标（风格库 / 知识库共用），限速 + 失败容错。
+ * 每批 5 片请求 LLM 输出场景标签；失败的片保留规则预分类结果。
+ * @returns {Promise<{tagged:number, failed:number}>}
+ */
+async function tagSlicesRateLimited({ config, ctrl, slices, sse }) {
+  const BATCH = 5;
+  let tagged = 0;
+  let failed = 0;
+  for (let i = 0; i < slices.length; i += BATCH) {
+    if (ctrl?.signal?.aborted) break;
+    const batch = slices.slice(i, i + BATCH);
+    const user = batch.map((s, j) => `[片段${j}]（${s.text.length} 字）\n${s.text.slice(0, 1200)}`).join('\n\n');
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await rateLimitAcquire(ctrl?.signal);
+        const r = await runLLMStream(config, [
+          { role: 'system', content: SCENE_TAG_SYSTEM },
+          { role: 'user', content: user }
+        ], { ctrl, maxTokens: 800, streamIdleTimeout: 600000 });
+        const arr = extractJson(r?.content || '');
+        if (Array.isArray(arr)) {
+          for (const item of arr) {
+            const idx = Number(item?.index);
+            if (!Number.isInteger(idx) || idx < 0 || idx >= batch.length) continue;
+            const tags = Array.isArray(item.scene_tags)
+              ? item.scene_tags.map((t) => String(t).trim()).filter((t) => SCENE_TAGS.includes(t)).slice(0, 3)
+              : [];
+            batch[idx].scene_tags = tags.length ? tags : preClassify(batch[idx].text);
+            tagged++;
+          }
+          // 未被返回的片用规则预分类兜底
+          for (const s of batch) {
+            if (!s.scene_tags) { s.scene_tags = preClassify(s.text); tagged++; }
+          }
+        } else {
+          for (const s of batch) { if (!s.scene_tags) { s.scene_tags = preClassify(s.text); } failed++; }
+        }
+        break;
+      } catch (e) {
+        if (ctrl?.signal?.aborted) break;
+        if (isRateLimitError(e) && attempt < 3) {
+          onRateLimited(e.retryAfter);
+          sse?.send?.({ type: 'status', message: `打标触发限流，降低速率后重试（第 ${attempt} 次）…` });
+          continue;
+        }
+        for (const s of batch) { if (!s.scene_tags) { s.scene_tags = preClassify(s.text); } failed++; }
+        break;
+      }
+    }
+    if (slices.length > BATCH) {
+      const done = Math.min(i + BATCH, slices.length);
+      sse?.send?.({ type: 'status', message: `样本打标中（${done}/${slices.length} 片）…` });
+    }
+  }
+  return { tagged, failed };
 }
 
 // 续写提示：截取已写末尾，要求紧接续写至自然收尾，不重复内容
@@ -2654,6 +2764,9 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     // 题材联动：技能 tags 含小说题材关键词的自动带入选，降低手动配置成本
     const autoSkillIds = recommendSkillsForGenre(novel.genre).filter((id) => !skillIds.includes(id));
     const skillsBlock = formatSkillsBlock([...skillIds, ...autoSkillIds]);
+    let dynKnowledgeSamples = '';   // 动态召回的知识库片段（beats 生成后填充，失败回退固定取样）
+    let dynStyleSnippets = '';      // 动态召回的风格范文片段
+    let styleDNABlock = '';         // 风格 DNA 量化注入块
     const chapterSysOpts = {
       constitution: constitution || '',
       characterVoices: charVoices || '',
@@ -2703,6 +2816,53 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         }
       }
     } catch { /* beats 失败不阻塞，直接进入正文创作 */ }
+
+    // ===== 动态召回（风格范文 + 知识库参考片段）=====
+    // 查询串：本章概要 + beat 场景描述 + 出场人物，与当前创作内容强相关
+    try {
+      const beatTexts = (() => {
+        try {
+          const storedBeats = existing?.beats ? JSON.parse(existing.beats) : null;
+          return Array.isArray(storedBeats) ? storedBeats : null;
+        } catch { return null; }
+      })();
+      const recallParts = [];
+      const summaryForRecall = existing?.summary && !String(existing.summary).includes('自动生成占位') && !String(existing.summary).includes('根据大纲推进剧情')
+        ? existing.summary : '';
+      if (summaryForRecall) recallParts.push(summaryForRecall);
+      if (Array.isArray(beatTexts) && beatTexts.length) {
+        recallParts.push(beatTexts.map((b) => `${b.scene || ''} ${b.action || ''} ${b.purpose || ''}`).join(' '));
+      }
+      if (characters.length) recallParts.push(characters.map((c) => c.name).join(' '));
+      const recallQuery = recallParts.join(' ').slice(0, 2000) || title;
+
+      // 知识库动态召回：成功则替换固定取样
+      if (knowledgeIds.length) {
+        const kr = getNovelKnowledgeSnippets(knowledgeIds, recallQuery, { topK: 5, maxChars: 4000 });
+        if (kr.snippets) dynKnowledgeSamples = kr.snippets;
+      }
+      // 风格范文动态召回 + DNA 融合注入
+      const styleIdList = parseStyleIds(novel);
+      if (styleIdList.length) {
+        const sr = getNovelStyleSnippets(styleIdList, recallQuery, { topK: 4, maxChars: 3000 });
+        if (sr.snippets) dynStyleSnippets = sr.snippets;
+        const enabledStyles = getStyles(styleIdList);
+        const dnas = enabledStyles
+          .map((s) => { try { return s.style_dna ? JSON.parse(s.style_dna) : null; } catch { return null; } })
+          .filter(Boolean);
+        if (dnas.length) {
+          try { styleDNABlock = formatDNABlock(mergeDNA(dnas)); } catch { /* DNA 注入失败不阻塞 */ }
+        }
+      }
+      if (dynKnowledgeSamples || dynStyleSnippets) {
+        send({ type: 'status', message: '已按本章场景动态召回参考片段（范文/同类作品）' });
+      }
+    } catch { /* 动态召回失败走固定注入回退 */ }
+    if (dynKnowledgeSamples) {
+      chapterSysOpts.knowledgeBlock = (knowledgeBlock + KNOWLEDGE_SAMPLE_INTRO + dynKnowledgeSamples + plotReferenceBlock).trim();
+    }
+    if (dynStyleSnippets) chapterSysOpts.styleSnippets = dynStyleSnippets;
+    if (styleDNABlock) chapterSysOpts.styleDNA = styleDNABlock;
 
     // 联网参考同类小说
     let referenceBlock = '';
@@ -3148,7 +3308,7 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
         const iter = await iteratePolish(config, novel, full, {
           onStatus: (m) => send({ type: 'status', message: m }),
           maxRounds: AI_MAX_ROUNDS,
-          opts: { knowledgeBlock, skillsBlock, genre: novel.genre, extraIssues: structureFixes }
+          opts: { knowledgeBlock, skillsBlock, genre: novel.genre, extraIssues: structureFixes, ...buildStyleInjection(novel, full.slice(0, 2000)) }
         });
         if (iter.text && iter.text.trim()) {
           full = iter.text.trim();
@@ -3203,7 +3363,7 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
             const wIter = await iteratePolish(config, novel, full, {
               onStatus: (m) => send({ type: 'status', message: m }),
               maxRounds: 1,
-              opts: { knowledgeBlock: wqKnowledgeBlock, skillsBlock: wqSkillsBlock, genre: novel.genre, extraIssues: structureFixes }
+              opts: { knowledgeBlock: wqKnowledgeBlock, skillsBlock: wqSkillsBlock, genre: novel.genre, extraIssues: structureFixes, ...buildStyleInjection(novel, full.slice(0, 2000)) }
             });
             if (wIter.text && wIter.text.trim() && wIter.text.trim().length >= Math.floor(full.length * 0.5)) {
               full = wIter.text.trim();
@@ -3236,7 +3396,7 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
               const cIter = await iteratePolish(reviewerCfg, novel, full, {
                 onStatus: (m) => send({ type: 'status', message: m }),
                 maxRounds: 1,
-                opts: { knowledgeBlock, skillsBlock, genre: novel.genre, extraIssues: [...crossIssues, ...structureFixes] }
+                opts: { knowledgeBlock, skillsBlock, genre: novel.genre, extraIssues: [...crossIssues, ...structureFixes], ...buildStyleInjection(novel, full.slice(0, 2000)) }
               });
               if (cIter.text && cIter.text.trim() && cIter.text.trim().length >= Math.floor(full.length * 0.5)) {
                 full = cIter.text.trim();
@@ -3270,6 +3430,26 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       saveDetection(novel.id, idx, finalRounds.at(-1)?.score ?? finalDetect.score ?? 0, finalDetect.issues, finalBlacklist, 'quality_gate');
       send({ type: 'status', message: `第 ${idx} 章已完成自动检查并保存${lastProblems.length ? `（残留 ${lastProblems.length} 处问题待处理）` : '（全部通过）'}` });
     } catch { /* 记录失败不阻塞 */ }
+
+    // 风格 DNA 偏差校验：量化成章与目标文风的差距，超阈值提示一键重润
+    try {
+      const devCmp = checkStyleDeviation(novel, idx, full);
+      if (devCmp) {
+        const topDevs = devCmp.details.filter((d) => d.deviation >= 20).slice(0, 4);
+        send({
+          type: 'style_deviation',
+          chapterIndex: idx,
+          score: devCmp.score,
+          details: devCmp.details,
+          threshold: 40
+        });
+        if (devCmp.score > 40) {
+          send({ type: 'status', message: `文风偏差 ${devCmp.score} 分（${topDevs.map((d) => `${d.label}偏差${d.deviation}%`).join('、') || '整体偏差偏大'}），可在章节操作中「按风格 DNA 重润」` });
+        } else {
+          send({ type: 'status', message: `文风匹配度良好（偏差 ${devCmp.score} 分）` });
+        }
+      }
+    } catch { /* 偏差校验失败不阻塞 */ }
 
     // ★ 正文 + 去AI味已完成：立即回完成信号，避免后处理拖慢 SSE（后处理在下方继续后台消化，send 已有连接保护）
     try {
@@ -3779,7 +3959,7 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
       const iter = await iteratePolish(config, novel, chapter.content, {
         onStatus: (m) => send({ type: 'status', message: m }),
         maxRounds: AI_MAX_ROUNDS,
-        opts: { knowledgeBlock, skillsBlock, genre: novel.genre }
+        opts: { knowledgeBlock, skillsBlock, genre: novel.genre, ...buildStyleInjection(novel, String(chapter.content || '').slice(0, 2000)) }
       });
       if (!iter.text.trim()) return end({ type: 'error', message: 'AI 未返回内容，请重试。' });
       const finalText = cleanAiText(iter.text.trim());
@@ -3792,6 +3972,8 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
       const finalScore = iter.rounds.at(-1)?.score ?? 0;
       const passed = finalScore <= aiScorePass() && iter.blacklist.length === 0;
       saveDetection(novel.id, idx, finalScore, iter.lastDetect.issues, iter.blacklist, 'polish');
+      const devCmp = checkStyleDeviation(novel, idx, finalText);
+      if (devCmp) send({ type: 'style_deviation', chapterIndex: idx, score: devCmp.score, details: devCmp.details, threshold: 40 });
       send({ type: 'progress', progress: 100, message: '润色完成' });
       end({
         type: 'done',
@@ -3811,7 +3993,7 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
       const autoSkills = recommendSkillsForGenre(novel.genre).filter((id) => !skillIds.includes(id));
       const skillsBlock = formatSkillsBlock([...skillIds, ...autoSkills]);
       await runLLMStream(config, [
-        { role: 'system', content: buildPolishSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), { knowledgeBlock, skillsBlock, genre: novel.genre }) },
+        { role: 'system', content: buildPolishSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), { knowledgeBlock, skillsBlock, genre: novel.genre, ...buildStyleInjection(novel, String(chapter.content || '').slice(0, 2000)) }) },
         { role: 'user', content: `以下是一章小说原稿。请按人类写作风格整体改写，彻底去除一切 AI 痕迹，保留剧情与人设。\n\n原稿：\n${chapter.content}` }
       ], {
         ctrl,
@@ -3831,6 +4013,8 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
       try { detect = await runDetection(config, full); } catch { /* 检测失败不阻塞 */ }
       const bl = blacklistFlagWords(scanAiPatterns(full), full.length);
       saveDetection(novel.id, idx, detect.score, detect.issues, bl, 'polish');
+      const devCmp = checkStyleDeviation(novel, idx, full);
+      if (devCmp) send({ type: 'style_deviation', chapterIndex: idx, score: devCmp.score, details: devCmp.details, threshold: 40 });
       send({ type: 'progress', progress: 100, message: '润色完成' });
       end({ type: 'done', data: { chapter: getChapter(novel.id, idx), detect, rounds: [], passed: detect.score <= aiScorePass() } });
     }
@@ -3869,7 +4053,7 @@ router.post('/novels/:id/chapters/:idx/revise', async (req, res) => {
     const autoSkills = recommendSkillsForGenre(novel.genre).filter((id) => !skillIds.includes(id));
     const skillsBlock = formatSkillsBlock([...skillIds, ...autoSkills]);
     await runLLMStream(config, [
-      { role: 'system', content: buildReviseSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), { knowledgeBlock, skillsBlock, genre: novel.genre }) },
+      { role: 'system', content: buildReviseSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), { knowledgeBlock, skillsBlock, genre: novel.genre, ...buildStyleInjection(novel, instructions + ' ' + String(chapter.content || '').slice(0, 1500)) }) },
       { role: 'user', content: `以下是第 ${idx} 章《${chapter.title}》原稿与作者的修改要求。请只按修改要求改写，未被要求的段落保持原样，输出改写后的完整正文。
 
 【作者的修改要求】
@@ -3906,11 +4090,93 @@ ${chapter.content}` }
       saveDetection(novel.id, idx, total, det.issues, blacklist, 'revise');
       send({ type: 'status', message: `修改完成，AI 味检测 ${total} 分${total > aiScorePass() ? '（略有残留，可再次润色）' : '（达标）'}` });
     } catch { /* 检测失败不阻塞 */ }
+    const revDev = checkStyleDeviation(novel, idx, full);
+    if (revDev) send({ type: 'style_deviation', chapterIndex: idx, score: revDev.score, details: revDev.details, threshold: 40 });
 
     send({ type: 'progress', progress: 100, message: '修改完成' });
     end({ type: 'done', data: { chapter: getChapter(novel.id, idx), detect, passed: detect.score <= aiScorePass() } });
   } catch (e) {
     if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止修改' });
+    return end({ type: 'error', message: e.message });
+  }
+});
+
+// ---------- 按风格 DNA 偏差重润 ----------
+router.post('/novels/:id/chapters/:idx/polish-by-dna', async (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const { config, error } = requireLLM();
+  if (error) return res.status(400).json({ error: error.message });
+
+  const idx = Number(req.params.idx);
+  const chapter = getChapter(novel.id, idx);
+  if (!chapter) return res.status(404).json({ error: '章节不存在' });
+  if (!chapter.content) return res.status(400).json({ error: '本章还没有内容可润色' });
+
+  const styleIdList = parseStyleIds(novel);
+  const dnas = getStyles(styleIdList)
+    .map((s) => { try { return s.style_dna ? JSON.parse(s.style_dna) : null; } catch { return null; } })
+    .filter(Boolean);
+  if (!dnas.length) return res.status(400).json({ error: '启用的风格没有风格 DNA，请先在风格库重新分析建立画像。' });
+
+  const { ctrl, send, end } = startSSE(req, res);
+  try {
+    const target = mergeDNA(dnas);
+    const actual = computeStyleDNA(chapter.content);
+    const cmp = compareDNA(target, actual);
+    if (!cmp || cmp.score <= 20) {
+      return end({ type: 'done', data: { chapter, deviation: cmp, skipped: true, message: '当前章节与目标文风匹配度良好，无需重润。' } });
+    }
+
+    // 偏差明细转成润色指令（issues 数组结构，进入 buildPolishWithIssues 渲染）
+    const devIssues = (cmp.details || [])
+      .filter((d) => d.deviation >= 15)
+      .slice(0, 5)
+      .map((d) => ({
+        category: '文风偏差（风格 DNA）',
+        quote: '',
+        problem: `${d.label}偏差 ${d.deviation}%（目标 ${d.target}${d.unit}，当前 ${d.actual}${d.unit}）`,
+        suggestion: (() => {
+          const higher = Number(d.actual) > Number(d.target);
+          if (d.dim === 'avg_sentence_length') return higher ? '多用短句，把长句拆分，压缩平均句长' : '适当合并短句，增加铺陈';
+          if (d.dim === 'dialogue_ratio') return higher ? '减少对话篇幅，把部分对话改为叙述描写' : '增加人物对话推进剧情';
+          if (d.dim === 'avg_paragraph_length') return higher ? '把大段落拆小，增加留白' : '合并零碎段落，充实描写细节';
+          if (d.dim === 'short_sentence_ratio') return higher ? '减少超短句堆叠' : '适当增加短句制造节奏感';
+          if (d.dim === 'long_sentence_ratio') return higher ? '减少超长句，避免一句到底' : '允许少量长句铺陈氛围';
+          return higher ? `把${d.label}降到接近目标值` : `把${d.label}提升到接近目标值`;
+        })()
+      }));
+
+    send({ type: 'status', message: `文风偏差 ${cmp.score} 分，正在按 DNA 偏差定向重润…` });
+    backupChapter(novel.id, idx, '按风格 DNA 重润');
+
+    const iter = await iteratePolish(config, novel, chapter.content, {
+      onStatus: (m) => send({ type: 'status', message: m }),
+      maxRounds: 2,
+      opts: {
+        genre: novel.genre,
+        extraIssues: devIssues,
+        ...buildStyleInjection(novel, String(chapter.content || '').slice(0, 2000))
+      }
+    });
+
+    if (!iter.text || !iter.text.trim()) return end({ type: 'error', message: 'AI 未返回内容，请重试。' });
+    const finalText = cleanAiText(iter.text.trim());
+    db.prepare('UPDATE chapters SET content = ?, word_count = ?, status = ? WHERE id = ?')
+      .run(finalText, countWords(finalText), 'draft', chapter.id);
+    touchNovel(novel.id);
+    try {
+      await writeChapterTxt(novel, { chapter_index: idx, title: chapter.title, content: finalText });
+    } catch { /* 文件写入失败不阻塞 */ }
+
+    // 重润后重算偏差
+    const after = checkStyleDeviation(novel, idx, finalText);
+    if (after) send({ type: 'style_deviation', chapterIndex: idx, score: after.score, details: after.details, threshold: 40 });
+    send({ type: 'status', message: `DNA 重润完成：偏差 ${cmp.score} → ${after?.score ?? '?'} 分` });
+    send({ type: 'progress', progress: 100, message: 'DNA 重润完成' });
+    end({ type: 'done', data: { chapter: getChapter(novel.id, idx), deviation: after, before: cmp.score, rounds: iter.rounds } });
+  } catch (e) {
+    if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止重润' });
     return end({ type: 'error', message: e.message });
   }
 });
@@ -4481,10 +4747,36 @@ router.post('/styles', async (req, res) => {
     const analysis = { ...rawAnalysis };
     delete analysis.example;
 
-    const sampleText = text.slice(0, 20000);
-    const info = db.prepare('INSERT INTO styles (name, notes, analysis, source_text, style_samples) VALUES (?,?,?,?,?)')
-      .run(String(name).trim(), notes || '', JSON.stringify(analysis), sampleText, examples);
-    end({ type: 'done', data: { style: normalizeStyle(getStyle(info.lastInsertRowid)) } });
+    // 原文样本：放宽到 20 万字，供后续切片库/重新打标使用（SQLite TEXT 可承载）
+    const sampleText = text.slice(0, 200000);
+
+    // 风格 DNA：纯统计计算（抽样开头/中间/结尾控制耗时）
+    send({ type: 'status', message: '正在计算风格 DNA（量化文风画像）…' });
+    let styleDNA = null;
+    try {
+      const dnaSample = text.length > 120000
+        ? text.slice(0, 50000) + '\n' + text.slice(Math.floor(text.length * 0.35), Math.floor(text.length * 0.35) + 40000) + '\n' + text.slice(-30000)
+        : text;
+      styleDNA = computeStyleDNA(dnaSample);
+    } catch { /* DNA 计算失败不影响风格入库 */ }
+
+    // 样本切片入库 + LLM 打标
+    send({ type: 'status', message: '正在建立样本切片库…' });
+    const slices = sliceText(text, { minLen: 500, maxLen: 2000, limit: 2000 });
+    for (const s of slices) s.scene_tags = preClassify(s.text);
+    if (slices.length) {
+      send({ type: 'status', message: `已切片 ${slices.length} 片，正在 AI 打场景标签…` });
+      await tagSlicesRateLimited({ config, ctrl, slices, sse: { send } });
+    }
+
+    const info = db.prepare('INSERT INTO styles (name, notes, analysis, source_text, style_samples, style_dna) VALUES (?,?,?,?,?,?)')
+      .run(String(name).trim(), notes || '', JSON.stringify(analysis), sampleText, examples, styleDNA ? JSON.stringify(styleDNA) : '');
+    const styleId = info.lastInsertRowid;
+    if (slices.length) {
+      try { saveStyleSlices(styleId, slices); } catch { /* 切片入库失败不影响风格保存 */ }
+    }
+
+    end({ type: 'done', data: { style: normalizeStyle(getStyle(styleId)), slices: slices.length } });
   } catch (e) {
     if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止' });
     return end({ type: 'error', message: e.message });
@@ -4513,6 +4805,58 @@ router.put('/styles/:id', (req, res) => {
 router.delete('/styles/:id', (req, res) => {
   db.prepare('DELETE FROM styles WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
+});
+
+// 风格样本切片（支持按场景标签筛选）
+router.get('/styles/:id/slices', (req, res) => {
+  const s = getStyle(req.params.id);
+  if (!s) return res.status(404).json({ error: '风格不存在' });
+  let rows = getStyleSlices(s.id);
+  const tag = String(req.query.tag || '').trim();
+  if (tag) {
+    rows = rows.filter((r) => {
+      try { return JSON.parse(r.scene_tags || '[]').includes(tag); } catch { return false; }
+    });
+  }
+  res.json({ total: rows.length, slices: rows.slice(0, 200) });
+});
+
+// 重新对已有风格执行切片 + 打标 + DNA（不重新做 LLM 文风分析）
+router.post('/styles/:id/retag', async (req, res) => {
+  const s = getStyle(req.params.id);
+  if (!s) return res.status(404).json({ error: '风格不存在' });
+  const { config, error } = requireLLM();
+  if (error) return res.status(400).json({ error: error.message });
+
+  const { ctrl, send, end } = startSSE(req, res);
+  try {
+    const text = String(s.source_text || '');
+    if (!text.trim()) return end({ type: 'error', message: '该风格缺少原文样本，无法重建切片库。' });
+
+    send({ type: 'status', message: '正在建立样本切片库…' });
+    const slices = sliceText(text, { minLen: 500, maxLen: 2000, limit: 2000 });
+    for (const sl of slices) sl.scene_tags = preClassify(sl.text);
+    if (slices.length) {
+      send({ type: 'status', message: `已切片 ${slices.length} 片，正在 AI 打场景标签…` });
+      await tagSlicesRateLimited({ config, ctrl, slices, sse: { send } });
+      saveStyleSlices(s.id, slices);
+    }
+
+    send({ type: 'status', message: '正在计算风格 DNA…' });
+    let styleDNA = null;
+    try {
+      const dnaSample = text.length > 120000
+        ? text.slice(0, 50000) + '\n' + text.slice(Math.floor(text.length * 0.35), Math.floor(text.length * 0.35) + 40000) + '\n' + text.slice(-30000)
+        : text;
+      styleDNA = computeStyleDNA(dnaSample);
+      db.prepare("UPDATE styles SET style_dna = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(styleDNA ? JSON.stringify(styleDNA) : '', s.id);
+    } catch { /* DNA 失败不影响切片 */ }
+
+    end({ type: 'done', data: { style: normalizeStyle(getStyle(s.id)), slices: slices.length } });
+  } catch (e) {
+    if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止' });
+    return end({ type: 'error', message: e.message });
+  }
 });
 
 // ---------- 技能库 ----------
@@ -5224,12 +5568,12 @@ router.post('/knowledge/import', async (req, res) => {
   try {
     const text = String(content);
 
-    // 分块用于 RAG 样本存储（取前 30 段 4000 字块）
-    const sampleChunks = [];
-    for (let i = 0; i < text.length && sampleChunks.length < 30; i += 4000) {
-      sampleChunks.push(text.slice(i, i + 4000));
-    }
-    saveSamples(corpusId, sampleChunks);
+    // 样本切片入库（500-2000 字/片，覆盖全书，供动态检索与回退注入）
+    const slices = sliceText(text, { minLen: 500, maxLen: 2000, limit: 2000 });
+    for (const s of slices) s.scene_tags = preClassify(s.text);
+    clearSamples(corpusId);
+    saveSamples(corpusId, slices.map((s) => ({ ...s, keywords: extractKeywords(s.text) })));
+    setCorpusTagStatus(corpusId, slices.length ? 'rule-tagged' : 'empty');
 
     // 分块处理：将全文按固定大小分块，保证不遗漏任何内容
     // 最多 50 块，每块至少 50K 字，超大文本自动增大块大小
@@ -5242,7 +5586,7 @@ router.post('/knowledge/import', async (req, res) => {
     }
 
     updateCorpusStatus(corpusId, 'learning', { totalWords: text.length });
-    send({ type: 'status', message: `已分块 ${sampleChunks.length} 段，全文 ${text.length} 字，分成 ${chunks.length} 块（每块约 ${chunkSize} 字），自动限速分析，避免触发 API 限流。` });
+    send({ type: 'status', message: `已切片 ${slices.length} 片，全文 ${text.length} 字，分成 ${chunks.length} 块（每块约 ${chunkSize} 字），自动限速分析，避免触发 API 限流。` });
 
     // 无云端 LLM 时用离线统计分析
     if (useOffline) {
@@ -5287,6 +5631,15 @@ router.post('/knowledge/import', async (req, res) => {
       return end({ type: 'error', message: '合成分析结果无法解析，请重试或更换模型。' });
     }
 
+    // LLM 批量打标样本切片（规则标签已兜底，此处升级为 AI 标签）
+    if (slices.length && !ctrl.signal.aborted) {
+      send({ type: 'progress', progress: 88, message: `正在为 ${slices.length} 片样本打场景标签…` });
+      const { tagged, failed } = await tagSlicesRateLimited({ config, ctrl, slices, sse: { send } });
+      for (const s of slices) updateSampleTags(corpusId, s.slice_index, s.scene_tags);
+      setCorpusTagStatus(corpusId, failed > 0 ? 'partial' : 'tagged');
+      send({ type: 'status', message: `打标完成（成功 ${tagged} 片${failed ? `，失败 ${failed} 片已用规则分类兜底` : ''}）` });
+    }
+
     send({ type: 'progress', progress: 100, message: '学习完成！' });
     updateCorpusStatus(corpusId, 'learned', { analysis: JSON.stringify(parsed, null, 2), learnedAt: new Date().toISOString().slice(0, 19).replace('T', ' ') });
     send({ type: 'status', message: '学习完成！该知识库已可在新建小说时勾选使用。' });
@@ -5322,6 +5675,54 @@ router.get('/knowledge/corpora/:id', (req, res) => {
 router.get('/knowledge/corpora/:id/samples', (req, res) => {
   const rows = getSamples(Number(req.params.id));
   res.json({ samples: rows });
+});
+
+// 知识库切片（支持按场景标签筛选）+ 标签分布
+router.get('/knowledge/corpora/:id/slices', (req, res) => {
+  const id = Number(req.params.id);
+  if (!getCorpus(id)) return res.status(404).json({ error: '知识库不存在' });
+  let rows = getSamples(id);
+  const stats = getCorpusTagStats(id);
+  const tag = String(req.query.tag || '').trim();
+  if (tag) {
+    rows = rows.filter((r) => {
+      try { return JSON.parse(r.scene_tags || '[]').includes(tag); } catch { return false; }
+    });
+  }
+  res.json({
+    total: rows.length,
+    tag_status: getCorpus(id)?.tag_status || '',
+    distribution: stats.distribution,
+    slices: rows.slice(0, 200)
+  });
+});
+
+// 重新对已有知识库执行 LLM 打标
+router.post('/knowledge/corpora/:id/retag', async (req, res) => {
+  const id = Number(req.params.id);
+  const corpus = getCorpus(id);
+  if (!corpus) return res.status(404).json({ error: '知识库不存在' });
+  const { config, error } = requireLLM();
+  if (error) return res.status(400).json({ error: error.message });
+
+  const { ctrl, send, end } = startSSE(req, res);
+  try {
+    const rows = getSamples(id);
+    if (!rows.length) return end({ type: 'error', message: '该知识库没有样本切片，请重新导入。' });
+    const slices = rows.map((r) => ({
+      slice_index: r.chunk_index,
+      text: r.text,
+      scene_tags: (() => { try { return JSON.parse(r.scene_tags || '[]'); } catch { return []; } })()
+    }));
+    send({ type: 'status', message: `正在为 ${slices.length} 片样本重新打标…` });
+    const { tagged, failed } = await tagSlicesRateLimited({ config, ctrl, slices, sse: { send } });
+    for (const s of slices) updateSampleTags(id, s.slice_index, s.scene_tags);
+    setCorpusTagStatus(id, failed > 0 ? 'partial' : 'tagged');
+    end({ type: 'done', data: { tagged, failed } });
+  } catch (e) {
+    if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止' });
+    return end({ type: 'error', message: e.message });
+  }
 });
 
 // 删除知识库

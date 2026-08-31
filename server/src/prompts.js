@@ -959,15 +959,24 @@ export function buildChapterSystem(styles, baseline, samples, presets, opts = {}
   if (baseline && String(baseline).trim()) {
     sys += `\n\n【本作文风基准（全书统一标准，无论使用哪个模型都必须严格匹配以下文风特征，不得带入模型自身的默认风格）】\n${baseline}`;
   }
-  // 合并来自 style_samples 和风格库的 example 句段
-  const styleExamples = [];
-  if (samples && String(samples).trim()) {
-    styleExamples.push(String(samples).trim());
+  // 风格 DNA：量化指标注入（有动态召回或固定样本时均为强约束补充）
+  if (opts.styleDNA && String(opts.styleDNA).trim()) {
+    sys += `\n\n${String(opts.styleDNA).trim()}`;
   }
-  if (styles && styles.length) {
-    for (const s of styles) {
-      if (s.style_samples && String(s.style_samples).trim()) {
-        styleExamples.push(String(s.style_samples).trim());
+  // 动态范文参照：按本章场景召回的范文片段（优先），否则回退固定样本
+  const dynamicSnippets = opts.styleSnippets && String(opts.styleSnippets).trim() ? String(opts.styleSnippets).trim() : '';
+  const styleExamples = [];
+  if (dynamicSnippets) {
+    styleExamples.push(dynamicSnippets);
+  } else {
+    if (samples && String(samples).trim()) {
+      styleExamples.push(String(samples).trim());
+    }
+    if (styles && styles.length) {
+      for (const s of styles) {
+        if (s.style_samples && String(s.style_samples).trim()) {
+          styleExamples.push(String(s.style_samples).trim());
+        }
       }
     }
   }
@@ -1022,15 +1031,23 @@ export function buildPolishSystem(styles, baseline, samples, presets, opts = {})
 if (baseline && String(baseline).trim()) {
     sys += `\n\n【本作文风基准（润色时必须遵循，保证全书风格统一，即使更换模型也不变）】\n${baseline}`;
   }
-  // 合并 style_samples 和风格库 example 句段
-  const styleExamples = [];
-  if (samples && String(samples).trim()) {
-    styleExamples.push(String(samples).trim());
+  if (opts.styleDNA && String(opts.styleDNA).trim()) {
+    sys += `\n\n${String(opts.styleDNA).trim()}`;
   }
-  if (styles && styles.length) {
-    for (const s of styles) {
-      if (s.style_samples && String(s.style_samples).trim()) {
-        styleExamples.push(String(s.style_samples).trim());
+  // 动态范文参照（优先）或固定样本回退
+  const dynamicSnippets = opts.styleSnippets && String(opts.styleSnippets).trim() ? String(opts.styleSnippets).trim() : '';
+  const styleExamples = [];
+  if (dynamicSnippets) {
+    styleExamples.push(dynamicSnippets);
+  } else {
+    if (samples && String(samples).trim()) {
+      styleExamples.push(String(samples).trim());
+    }
+    if (styles && styles.length) {
+      for (const s of styles) {
+        if (s.style_samples && String(s.style_samples).trim()) {
+          styleExamples.push(String(s.style_samples).trim());
+        }
       }
     }
   }
@@ -1069,15 +1086,23 @@ export function buildReviseSystem(styles, baseline, samples, presets, opts = {})
   if (baseline && String(baseline).trim()) {
     sys += `\n\n【本作文风基准（改写时必须遵循，保证全书风格统一，即使更换模型也不变）】\n${baseline}`;
   }
-  // 合并 style_samples 和风格库 example 句段
-  const styleExamples = [];
-  if (samples && String(samples).trim()) {
-    styleExamples.push(String(samples).trim());
+  if (opts.styleDNA && String(opts.styleDNA).trim()) {
+    sys += `\n\n${String(opts.styleDNA).trim()}`;
   }
-  if (styles && styles.length) {
-    for (const s of styles) {
-      if (s.style_samples && String(s.style_samples).trim()) {
-        styleExamples.push(String(s.style_samples).trim());
+  // 动态范文参照（优先）或固定样本回退
+  const dynamicSnippets = opts.styleSnippets && String(opts.styleSnippets).trim() ? String(opts.styleSnippets).trim() : '';
+  const styleExamples = [];
+  if (dynamicSnippets) {
+    styleExamples.push(dynamicSnippets);
+  } else {
+    if (samples && String(samples).trim()) {
+      styleExamples.push(String(samples).trim());
+    }
+    if (styles && styles.length) {
+      for (const s of styles) {
+        if (s.style_samples && String(s.style_samples).trim()) {
+          styleExamples.push(String(s.style_samples).trim());
+        }
       }
     }
   }
@@ -1560,6 +1585,26 @@ export const FINAL_SYNTHESIS_SYSTEM = `你是资深小说编辑和写作分析�
 只输出 JSON，不要其他文字。`;
 
 export const KNOWLEDGE_SAMPLE_INTRO = `\n\n【参考文笔与剧情样本（来自其他作品）】\n以下是同类优秀作品的原文片段，仅供参考其文笔节奏、对话方式、描写手法、叙事风格、剧情推进节奏、悬念设置与冲突制造手法。\n【强制要求】这些片段属于其他作品：其中出现的任何人物名、地名、组织名、势力名、功法/物品名均与本书无关，严禁写进本书正文；本书的角色与设定一律以本书的角色表、世界观设定为准。\n【禁止照抄】严禁连续复用片段中的原句或近义改写整句；只允许借鉴其句长、节奏、氛围等抽象手法，一切场景、人物、情节都必须由你为本书原创。\n\n原文片段如下（每段最多前 1800 字）：\n`;
+
+// ===== 样本切片场景打标（风格库 / 知识库共用）=====
+
+export const SCENE_TAG_SYSTEM = `你是中文小说文本分类器。对给定的若干小说片段逐一打场景标签。
+
+可选标签（每片段选 1-3 个最贴切的）：对话、动作/打斗、心理、环境、开篇、悬念/转折、日常、情绪高潮
+
+输出 JSON 数组（顺序与输入一致，只输出 JSON）：
+[
+  {"index": 0, "scene_tags": ["对话", "心理"], "narrative": "第三人称限知", "emotion": "压抑"},
+  {"index": 1, "scene_tags": ["动作/打斗"], "narrative": "第三人称全知", "emotion": "紧张"}
+]
+
+要求：
+- scene_tags 只能从给定标签集中选，每片段 1-3 个
+- narrative 是叙述视角（如"第三人称限知""第一人称"）
+- emotion 是该片段主导情绪（1-2 个词）`;
+
+// 按 DNA 偏差重润的 system 附加段
+export const DNA_POLISH_HINT = `润色时除了常规要求，必须按【文风偏差修正】逐条调整语感：句长、对话密度、段落节奏、标点习惯都要向目标数值靠拢，改写后各维度偏差应显著缩小。`;
 
 // ===== 章节大纲细化（场景级 beat 拆解）=====
 export const CHAPTER_BEAT_SYSTEM = `你是中文小说场景设计师。请将章节概要拆解为 3-6 个场景级 beat（节拍），规划好本章的起承转合，让正文有具体的画面和推进感。

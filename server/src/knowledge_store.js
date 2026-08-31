@@ -48,10 +48,28 @@ export function updateCorpusStatus(id, status, extra = {}) {
 }
 
 export function saveSamples(corpusId, chunks) {
-  const stmt = db.prepare('INSERT INTO knowledge_samples (corpus_id, chunk_index, text) VALUES (?,?,?)');
+  const stmt = db.prepare('INSERT INTO knowledge_samples (corpus_id, chunk_index, text, scene_tags, keywords) VALUES (?,?,?,?,?)');
   for (let i = 0; i < chunks.length; i++) {
-    stmt.run(corpusId, i, chunks[i]);
+    const c = chunks[i];
+    if (typeof c === 'string') {
+      stmt.run(corpusId, i, c, '', '');
+    } else {
+      stmt.run(corpusId, c.slice_index ?? i, c.text, JSON.stringify(c.scene_tags || []), c.keywords || '');
+    }
   }
+}
+
+export function clearSamples(corpusId) {
+  db.prepare('DELETE FROM knowledge_samples WHERE corpus_id = ?').run(corpusId);
+}
+
+export function updateSampleTags(corpusId, sliceIndex, sceneTags) {
+  db.prepare('UPDATE knowledge_samples SET scene_tags = ? WHERE corpus_id = ? AND slice_index = ?')
+    .run(JSON.stringify(sceneTags || []), corpusId, sliceIndex);
+}
+
+export function setCorpusTagStatus(corpusId, status) {
+  db.prepare("UPDATE knowledge_corpora SET tag_status = ?, updated_at = datetime('now','localtime') WHERE id = ?").run(status, corpusId);
 }
 
 export function getSamples(corpusId, limit = 0) {
@@ -115,17 +133,35 @@ export function formatKnowledgeBlock(corporaIds) {
 }
 
 /**
- * 获取知识库样本片段（供文风样本注入）
+ * 获取知识库样本片段（供文风样本注入的回退路径）：按顺序填充至 maxChars
  */
 export function getSampleSnippets(corpusId, maxChars = 6000) {
-  const rows = getSamples(corpusId, 10);
+  const rows = getSamples(corpusId);
   if (!rows.length) return '';
   let result = '';
   for (const r of rows) {
-    if (result.length + r.text.length > maxChars) break;
-    result += r.text + '\n\n';
+    if (result.length >= maxChars) break;
+    const t = String(r.text || '');
+    result += t.slice(0, maxChars - result.length) + '\n\n';
   }
   return result.trim();
+}
+
+/**
+ * 知识库场景标签分布统计（详情页展示用）
+ */
+export function getCorpusTagStats(corpusId) {
+  const rows = db.prepare('SELECT scene_tags FROM knowledge_samples WHERE corpus_id = ?').all(corpusId);
+  const stats = {};
+  let tagged = 0;
+  for (const r of rows) {
+    try {
+      const tags = JSON.parse(r.scene_tags || '[]');
+      if (tags.length) tagged++;
+      for (const t of tags) stats[t] = (stats[t] || 0) + 1;
+    } catch { /* 忽略损坏数据 */ }
+  }
+  return { total: rows.length, tagged, distribution: stats };
 }
 
 /**
