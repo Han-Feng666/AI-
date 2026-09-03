@@ -1,6 +1,6 @@
 {
   "name": "ai-novel-studio-desktop",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "AI 小说工坊 - 本地桌面版",
   "main": "electron/main.cjs",
   "author": "Novel Studio",
@@ -29,9 +29,26 @@
       "package.json"
     ],
     "extraResources": [
-      { "from": "../server", "to": "server", "filter": ["**/*", "!**/node_modules/**", "!src/data/**", "!data/**"] },
-      { "from": ".build/server-deps", "to": "server/node_modules" },
-      { "from": "../web/dist", "to": "web/dist" }
+      {
+        "from": "../server",
+        "to": "server",
+        "filter": [
+          "**/*",
+          "!**/node_modules/**",
+          "!src/data/novel-studio.db",
+          "!src/data/novel-studio.db-*",
+          "!src/data/novels/**",
+          "!data/**"
+        ]
+      },
+      {
+        "from": ".build/server-deps",
+        "to": "server/node_modules"
+      },
+      {
+        "from": "../web/dist",
+        "to": "web/dist"
+      }
     ],
     "asar": true,
     "directories": {
@@ -39,7 +56,12 @@
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "signExecutable": false
     },
@@ -49,15 +71,27 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "AI小说工坊",
-      "installerLanguages": ["zh_CN"]
+      "installerLanguages": [
+        "zh_CN"
+      ]
     },
     "mac": {
       "category": "public.app-category.productivity",
-      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }]
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
     },
     "linux": {
       "category": "Utility",
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "syncDesktopName": true
     }
   }
