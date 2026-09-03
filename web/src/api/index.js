@@ -289,6 +289,14 @@ export const api = {
   retryFanqieJob: (id) => http.post(`/import/fanqie/jobs/${id}/retry`),
   deleteFanqieJob: (id) => http.delete(`/import/fanqie/jobs/${id}`),
 
+  // 书源（Legado 兼容）导入与搜索
+  importSources: (json) => http.post('/sources', { json }, { timeout: 30000 }),
+  listSources: () => http.get('/sources'),
+  updateSource: (id, status) => http.patch(`/sources/${id}`, { status }),
+  deleteSource: (id) => http.delete(`/sources/${id}`),
+  searchSources: (keyword) => http.post('/sources/search', { keyword }, { timeout: 60000 }),
+  importFromSource: (payload) => http.post('/import/source', payload),
+
   // 本地大模型
   getLocalModelStatus: () => http.get('/local-model/status'),
   detectOllama: () => http.post('/local-model/detect-ollama', {}),

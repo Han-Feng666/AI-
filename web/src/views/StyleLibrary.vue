@@ -5,10 +5,12 @@ import api from '../api';
 import { formatDate, readTxtFile } from '../utils/format';
 import FanqieImportDialog from '../components/FanqieImportDialog.vue';
 import FanqieBatchBar from '../components/FanqieBatchBar.vue';
+import BookSearchDialog from '../components/BookSearchDialog.vue';
 
 const styles = ref([]);
 const loading = ref(false);
 const fanqieOpen = ref(false);
+const bookSearchOpen = ref(false);
 const dialogOpen = ref(false);
 const analyzing = ref(false);
 const analyzeStatus = ref('');
@@ -240,10 +242,14 @@ onMounted(load);
       <el-button size="large" @click="fanqieOpen = true">
         <el-icon style="margin-right:6px"><Connection /></el-icon>从番茄批量导入
       </el-button>
+      <el-button size="large" @click="bookSearchOpen = true">
+        <el-icon style="margin-right:6px"><Search /></el-icon>书源搜索导入
+      </el-button>
     </div>
 
     <FanqieBatchBar @done="load" />
     <FanqieImportDialog v-model="fanqieOpen" default-target="style" @refresh="load" />
+    <BookSearchDialog v-model="bookSearchOpen" default-target="style" @refresh="load" />
 
     <div v-loading="loading" class="style-grid" :style="{ minHeight: loading ? '200px' : 'auto' }">
       <el-empty v-if="!loading && !styles.length" description="风格库为空，导入一部小说的文本试试">

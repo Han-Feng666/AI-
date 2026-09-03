@@ -622,8 +622,22 @@ CREATE TABLE IF NOT EXISTS import_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_import_jobs_book ON import_jobs(book_id, target);
 CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON import_jobs(status, id);
+
+CREATE TABLE IF NOT EXISTS book_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  source_url TEXT NOT NULL UNIQUE,
+  search_url TEXT NOT NULL,
+  rules_json TEXT NOT NULL,
+  partial_json TEXT DEFAULT '[]',
+  status TEXT DEFAULT 'enabled',
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
 `);
 ensureColumn('adaptation_jobs', 'plans', "plans TEXT DEFAULT ''");
+ensureColumn('import_jobs', 'source_type', "source_type TEXT DEFAULT 'fanqie'");
+ensureColumn('import_jobs', 'book_url', "book_url TEXT DEFAULT ''");
+ensureColumn('import_jobs', 'source_site', "source_site TEXT DEFAULT ''");
 
 function getSetting(key, fallback = '') {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);

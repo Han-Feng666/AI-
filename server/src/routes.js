@@ -87,6 +87,7 @@ import {
   cancelAll as cancelFanqieAll, retryJob as retryFanqieJob, deleteJob as deleteFanqieJob,
   resumeOnBoot as resumeFanqieQueue, setImportRunner
 } from './import_queue.js';
+import { parseSourceBatch, searchBook, BookSourceError } from './booksource.js';
 import {
   detectOllama, ollamaListModels, getLocalModelStatus,
   localChat, shouldUseLocal, autoLearnInBackground
@@ -5886,6 +5887,134 @@ router.delete('/import/fanqie/jobs/:id', (req, res) => {
   const r = deleteFanqieJob(Number(req.params.id));
   if (r.error) return res.status(400).json({ error: r.error });
   res.json(r);
+});
+
+// ---------------------------------------------------------------------------
+// 书源（Legado 兼容）：导入 / 管理 / 聚合搜索 / 整本导入
+// ---------------------------------------------------------------------------
+
+function sourceRowToItem(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    sourceUrl: row.source_url,
+    host: (() => { try { return new URL(row.source_url).host; } catch { return ''; } })(),
+    partial: JSON.parse(row.partial_json || '[]'),
+    status: row.status,
+    createdAt: row.created_at
+  };
+}
+
+function getSourceById(id) {
+  const row = db.prepare('SELECT * FROM book_sources WHERE id = ?').get(id);
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    sourceUrl: row.source_url,
+    searchUrl: row.search_url,
+    rules: JSON.parse(row.rules_json),
+    partial: JSON.parse(row.partial_json || '[]'),
+    status: row.status
+  };
+}
+
+// 导入书源 JSON（单个对象或数组），返回逐条成功/失败明细
+router.post('/sources', (req, res) => {
+  const { json } = req.body || {};
+  if (!json || !String(json).trim()) return res.status(400).json({ error: '请粘贴书源 JSON' });
+  const { items, errors } = parseSourceBatch(String(json));
+  if (!items.length && errors.length) {
+    return res.status(400).json({ error: errors[0].message, errors, saved: 0 });
+  }
+  let saved = 0;
+  for (const it of items) {
+    db.prepare(
+      `INSERT INTO book_sources (name, source_url, search_url, rules_json, partial_json, status)
+       VALUES (?, ?, ?, ?, ?, 'enabled')
+       ON CONFLICT(source_url) DO UPDATE SET
+         name = excluded.name, search_url = excluded.search_url,
+         rules_json = excluded.rules_json, partial_json = excluded.partial_json,
+         status = 'enabled'`
+    ).run(it.name, it.sourceUrl, it.searchUrl, JSON.stringify(it.rules), JSON.stringify(it.partial));
+    saved++;
+  }
+  res.json({ saved, errors });
+});
+
+router.get('/sources', (req, res) => {
+  const rows = db.prepare('SELECT * FROM book_sources ORDER BY id ASC').all();
+  res.json({ sources: rows.map(sourceRowToItem) });
+});
+
+router.patch('/sources/:id', (req, res) => {
+  const { status } = req.body || {};
+  if (!['enabled', 'disabled'].includes(status)) return res.status(400).json({ error: '状态必须是 enabled 或 disabled' });
+  const r = db.prepare('UPDATE book_sources SET status = ? WHERE id = ?').run(status, Number(req.params.id));
+  if (!r.changes) return res.status(404).json({ error: '书源不存在' });
+  res.json({ ok: true });
+});
+
+router.delete('/sources/:id', (req, res) => {
+  const r = db.prepare('DELETE FROM book_sources WHERE id = ?').run(Number(req.params.id));
+  if (!r.changes) return res.status(404).json({ error: '书源不存在' });
+  res.json({ ok: true });
+});
+
+// 聚合搜索：向所有启用书源并发搜索，单源失败不阻塞其余结果
+router.post('/sources/search', async (req, res) => {
+  const { keyword } = req.body || {};
+  const kw = String(keyword || '').trim();
+  if (!kw) return res.status(400).json({ error: '请输入搜索关键词' });
+  const rows = db.prepare("SELECT * FROM book_sources WHERE status = 'enabled' ORDER BY id ASC").all();
+  if (!rows.length) return res.status(400).json({ error: '还没有可用的书源，请先导入' });
+
+  const tasks = rows.map(async (row) => {
+    const source = getSourceById(row.id);
+    try {
+      const { results } = await searchBook(source, kw);
+      return {
+        ok: true,
+        items: results.map((r) => ({ sourceId: row.id, sourceName: row.name, ...r }))
+      };
+    } catch (e) {
+      const msg = e instanceof BookSourceError ? e.message : `搜索失败: ${e.message}`;
+      return { ok: false, sourceId: row.id, sourceName: row.name, error: msg };
+    }
+  });
+  const settled = await Promise.allSettled(tasks);
+  const results = [];
+  const failures = [];
+  for (const s of settled) {
+    if (s.status !== 'fulfilled') continue;
+    if (s.value.ok) results.push(...s.value.items);
+    else failures.push({ sourceId: s.value.sourceId, sourceName: s.value.sourceName, error: s.value.error });
+  }
+  res.json({ results, failures });
+});
+
+// 从书源搜索结果创建整本导入任务（book_id 存详情页 URL 保持幂等）
+router.post('/import/source', async (req, res) => {
+  const { sourceId, bookUrl, name, author, target, genre } = req.body || {};
+  const src = getSourceById(Number(sourceId));
+  if (!src) return res.status(400).json({ error: '书源不存在或已删除' });
+  if (!String(bookUrl || '').trim()) return res.status(400).json({ error: '缺少书籍详情页链接' });
+  if (!['style', 'knowledge'].includes(target)) return res.status(400).json({ error: '请选择导入目标' });
+  if (target === 'knowledge' && !genre) return res.status(400).json({ error: '知识库导入需选择题材' });
+
+  const r = enqueueFanqieJob({
+    bookId: String(bookUrl),
+    target,
+    genre: target === 'knowledge' ? String(genre) : '',
+    sourceType: 'booksource',
+    bookUrl: String(bookUrl),
+    sourceSite: src.sourceUrl,
+    title: String(name || ''),
+    author: String(author || '')
+  });
+  const { content, ...safe } = r.job || {};
+  if (r.duplicated) return res.status(409).json({ error: r.reason, job: safe });
+  res.json({ job: safe });
 });
 
 // ---------- 本地大模型 ----------

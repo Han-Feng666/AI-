@@ -5,10 +5,12 @@ import api from '../api';
 import { formatDate, GENRES, formatNumber, readTxtFile } from '../utils/format';
 import FanqieImportDialog from '../components/FanqieImportDialog.vue';
 import FanqieBatchBar from '../components/FanqieBatchBar.vue';
+import BookSearchDialog from '../components/BookSearchDialog.vue';
 
 const corpora = ref([]);
 const loading = ref(false);
 const fanqieOpen = ref(false);
+const bookSearchOpen = ref(false);
 const dialogOpen = ref(false);
 const importing = ref(false);
 const importStatus = ref('');
@@ -222,10 +224,14 @@ onMounted(load);
       <el-button size="large" @click="fanqieOpen = true">
         <el-icon style="margin-right:6px"><Connection /></el-icon>从番茄批量导入
       </el-button>
+      <el-button size="large" @click="bookSearchOpen = true">
+        <el-icon style="margin-right:6px"><Search /></el-icon>书源搜索导入
+      </el-button>
     </div>
 
     <FanqieBatchBar @done="load" />
     <FanqieImportDialog v-model="fanqieOpen" default-target="knowledge" @refresh="load" />
+    <BookSearchDialog v-model="bookSearchOpen" default-target="knowledge" @refresh="load" />
 
     <div class="filter-bar">
       <el-select v-model="filterGenre" placeholder="按题材筛选" clearable size="default" style="width:200px">
