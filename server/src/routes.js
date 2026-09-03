@@ -80,6 +80,14 @@ import {
   getNovelStyleSnippets, getNovelKnowledgeSnippets, SCENE_TAGS
 } from './slice_store.js';
 import {
+  parseBookInputs, fetchBookMeta, FanqieError
+} from './fanqie.js';
+import {
+  enqueue as enqueueFanqieJob, getJob as getFanqieJob, listJobs as listFanqieJobs,
+  cancelAll as cancelFanqieAll, retryJob as retryFanqieJob, deleteJob as deleteFanqieJob,
+  resumeOnBoot as resumeFanqieQueue, setImportRunner
+} from './import_queue.js';
+import {
   detectOllama, ollamaListModels, getLocalModelStatus,
   localChat, shouldUseLocal, autoLearnInBackground
 } from './local_llm.js';
@@ -527,6 +535,193 @@ async function synthesizeWithRateLimit({ config, ctrl, system, user, sse }) {
     }
   }
   throw new Error('综合合成请求多次失败，请稍后重试或检查模型状态。');
+}
+
+/** 全文分块：最多 50 块，每块至少 50K 字，超大文本自动增大块大小 */
+function chunkWholeText(text) {
+  const maxChunks = 50;
+  const minChunkSize = 50000;
+  const chunkSize = Math.max(minChunkSize, Math.ceil(text.length / maxChunks));
+  const chunks = [];
+  for (let i = 0; i < text.length; i += chunkSize) {
+    chunks.push(text.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+/** 管线事件适配器：把内部 sse.send 事件分发给 onProgress/onStatus/onDelta 回调 */
+function makePipelineSse({ onProgress, onStatus, onDelta }) {
+  return {
+    send: (ev) => {
+      if (ev.type === 'progress') onProgress?.(ev.progress, ev.message ?? '');
+      else if (ev.type === 'status') onStatus?.(ev.message ?? '');
+      else if (ev.type === 'delta') onDelta?.(ev.content ?? '');
+    }
+  };
+}
+
+/**
+ * 风格分析管线（POST /styles 与番茄批量导入共用）
+ * 分块 LLM 分析 → 综合 → 提取样本 → 风格 DNA → 切片打标 → 入库
+ */
+async function runStyleAnalysisPipeline({ config, ctrl, name, notes = '', text, onProgress, onStatus, onDelta }) {
+  const sse = makePipelineSse({ onProgress, onStatus, onDelta });
+  const { send } = sse;
+  const trimmedName = String(name).trim();
+
+  send({ type: 'progress', progress: 2, message: '正在分块处理全文…' });
+  const chunks = chunkWholeText(text);
+  send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析写作风格（全文 ${text.length} 字，${chunks.length} 块，每块约 ${Math.ceil(text.length / chunks.length)} 字，已开启限速保护避免触发 API 限流）…` });
+
+  const partialResults = await analyzeChunksRateLimited({
+    config,
+    ctrl,
+    chunks,
+    sse,
+    buildUserMessage: (chunk, chunkIndex) => `以下是小说《${trimmedName}》的第 ${chunkIndex + 1} 段文本：\n\n${chunk}`
+  });
+
+  if (!partialResults.length) {
+    throw new Error('所有块分析均失败，请稍后重试或更换模型。');
+  }
+
+  send({ type: 'progress', progress: 78, message: `分块分析完成（${partialResults.length}/${chunks.length} 块成功），正在综合结果…` });
+
+  const r = await synthesizeWithRateLimit({
+    config,
+    ctrl,
+    system: STYLE_ANALYZE_SYSTEM,
+    user: `以下是对同一部小说《${trimmedName}》不同段落的分析结果，请综合为一份统一的风格分析 JSON：\n\n${JSON.stringify(partialResults, null, 2)}`,
+    sse
+  });
+
+  const rawAnalysis = extractJson(r?.content || '');
+  if (!rawAnalysis) {
+    throw new Error('风格分析综合失败：AI 返回内容无法解析，请重试或更换模型。');
+  }
+
+  send({ type: 'progress', progress: 100, message: '分析完成！' });
+
+  // 从分析结果中提取 example 句段作为 style_samples 独立存储
+  const examples = Array.isArray(rawAnalysis.example) ? rawAnalysis.example.join('\n') : '';
+  const analysis = { ...rawAnalysis };
+  delete analysis.example;
+
+  // 原文样本：放宽到 20 万字，供后续切片库/重新打标使用（SQLite TEXT 可承载）
+  const sampleText = text.slice(0, 200000);
+
+  // 风格 DNA：纯统计计算（抽样开头/中间/结尾控制耗时）
+  send({ type: 'status', message: '正在计算风格 DNA（量化文风画像）…' });
+  let styleDNA = null;
+  try {
+    const dnaSample = text.length > 120000
+      ? text.slice(0, 50000) + '\n' + text.slice(Math.floor(text.length * 0.35), Math.floor(text.length * 0.35) + 40000) + '\n' + text.slice(-30000)
+      : text;
+    styleDNA = computeStyleDNA(dnaSample);
+  } catch { /* DNA 计算失败不影响风格入库 */ }
+
+  // 样本切片入库 + LLM 打标
+  send({ type: 'status', message: '正在建立样本切片库…' });
+  const slices = sliceText(text, { minLen: 500, maxLen: 2000, limit: 2000 });
+  for (const s of slices) s.scene_tags = preClassify(s.text);
+  if (slices.length) {
+    send({ type: 'status', message: `已切片 ${slices.length} 片，正在 AI 打场景标签…` });
+    await tagSlicesRateLimited({ config, ctrl, slices, sse });
+  }
+
+  const info = db.prepare('INSERT INTO styles (name, notes, analysis, source_text, style_samples, style_dna) VALUES (?,?,?,?,?,?)')
+    .run(trimmedName, notes || '', JSON.stringify(analysis), sampleText, examples, styleDNA ? JSON.stringify(styleDNA) : '');
+  const styleId = info.lastInsertRowid;
+  if (slices.length) {
+    try { saveStyleSlices(styleId, slices); } catch { /* 切片入库失败不影响风格保存 */ }
+  }
+
+  return { styleId, sliceCount: slices.length, style: normalizeStyle(getStyle(styleId)) };
+}
+
+/**
+ * 知识库学习管线（POST /knowledge/import 与番茄批量导入共用）
+ * 切片入库 → 分块 LLM 分析（或离线统计）→ 综合 → AI 打标 → 入库
+ * 失败时内部已将 corpus 置为 failed，再向上抛出错误。
+ */
+async function runKnowledgePipeline({ config, useOffline, ctrl, title, genre, author = '', text, onProgress, onStatus, onDelta }) {
+  const sse = makePipelineSse({ onProgress, onStatus, onDelta });
+  const { send } = sse;
+  const corpusId = createCorpus({ title: title || '未命名作品', genre, author });
+  send({ type: 'status', message: '正在解析文本并分块…' });
+
+  try {
+    // 样本切片入库（500-2000 字/片，覆盖全书，供动态检索与回退注入）
+    const slices = sliceText(text, { minLen: 500, maxLen: 2000, limit: 2000 });
+    for (const s of slices) s.scene_tags = preClassify(s.text);
+    clearSamples(corpusId);
+    saveSamples(corpusId, slices.map((s) => ({ ...s, keywords: extractKeywords(s.text) })));
+    setCorpusTagStatus(corpusId, slices.length ? 'rule-tagged' : 'empty');
+
+    const chunks = chunkWholeText(text);
+    updateCorpusStatus(corpusId, 'learning', { totalWords: text.length });
+    send({ type: 'status', message: `已切片 ${slices.length} 片，全文 ${text.length} 字，分成 ${chunks.length} 块（每块约 ${Math.ceil(text.length / chunks.length)} 字），自动限速分析，避免触发 API 限流。` });
+
+    // 无云端 LLM 时用离线统计分析
+    if (useOffline) {
+      send({ type: 'status', message: '离线模式：正在用统计分析引擎学习文笔特征…' });
+      const report = offlineAnalyzeStyle(text.slice(0, 100000));
+      const analysisText = JSON.stringify(report, null, 2);
+      updateCorpusStatus(corpusId, 'learned', { analysis: analysisText, learnedAt: new Date().toISOString().slice(0, 19).replace('T', ' ') });
+      send({ type: 'status', message: '离线学习完成（统计分析模式）。连接大模型后可重新深入学习获得更精细的分析。' });
+      return { corpusId, analysis: report, offline: true };
+    }
+
+    send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析（全文 ${text.length} 字，${chunks.length} 块，已开启限速保护避免触发 API 限流）…` });
+
+    const partialResults = await analyzeChunksRateLimited({
+      config,
+      ctrl,
+      chunks,
+      sse,
+      buildUserMessage: (chunk, chunkIndex) => `以下是${genre}题材小说《${title || '未命名'}》的第 ${chunkIndex + 1} 段文本：\n\n${chunk}`
+    });
+
+    if (!partialResults.length) {
+      updateCorpusStatus(corpusId, 'failed');
+      throw new Error('所有段落分析均失败，请稍后重试或检查模型状态。');
+    }
+
+    send({ type: 'progress', progress: 75, message: '正在综合各段分析结果…' });
+
+    const r = await synthesizeWithRateLimit({
+      config,
+      ctrl,
+      system: FINAL_SYNTHESIS_SYSTEM,
+      user: `以下是对同一部${genre}题材小说《${title || '未命名'}》不同段落的分析结果，请综合为一份完整报告：\n\n${JSON.stringify(partialResults, null, 2)}`,
+      sse
+    });
+
+    const analysis = r?.content || '';
+    const parsed = extractJson(analysis);
+    if (!parsed) {
+      updateCorpusStatus(corpusId, 'failed');
+      throw new Error('合成分析结果无法解析，请重试或更换模型。');
+    }
+
+    // LLM 批量打标样本切片（规则标签已兜底，此处升级为 AI 标签）
+    if (slices.length && !ctrl.signal.aborted) {
+      send({ type: 'progress', progress: 88, message: `正在为 ${slices.length} 片样本打场景标签…` });
+      const { tagged, failed } = await tagSlicesRateLimited({ config, ctrl, slices, sse });
+      for (const s of slices) updateSampleTags(corpusId, s.slice_index, s.scene_tags);
+      setCorpusTagStatus(corpusId, failed > 0 ? 'partial' : 'tagged');
+      send({ type: 'status', message: `打标完成（成功 ${tagged} 片${failed ? `，失败 ${failed} 片已用规则分类兜底` : ''}）` });
+    }
+
+    send({ type: 'progress', progress: 100, message: '学习完成！' });
+    updateCorpusStatus(corpusId, 'learned', { analysis: JSON.stringify(parsed, null, 2), learnedAt: new Date().toISOString().slice(0, 19).replace('T', ' ') });
+    send({ type: 'status', message: '学习完成！该知识库已可在新建小说时勾选使用。' });
+
+    return { corpusId, analysis: parsed };
+  } catch (e) {
+    try { updateCorpusStatus(corpusId, 'failed'); } catch { /* 状态更新失败忽略 */ }
+    throw e;
+  }
 }
 
 /**
@@ -4696,87 +4891,18 @@ router.post('/styles', async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   const { ctrl, send, end } = startSSE(req, res);
-  send({ type: 'progress', progress: 2, message: '正在分块处理全文…' });
-
-  const text = String(sourceText);
-
-  // 分块处理：将全文按固定大小分块，保证不遗漏任何内容
-  // 最多 50 块，每块至少 50K 字，超大文本自动增大块大小
-  const maxChunks = 50;
-  const minChunkSize = 50000;
-  const chunkSize = Math.max(minChunkSize, Math.ceil(text.length / maxChunks));
-  const chunks = [];
-  for (let i = 0; i < text.length; i += chunkSize) {
-    chunks.push(text.slice(i, i + chunkSize));
-  }
-
-  send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析写作风格（全文 ${text.length} 字，${chunks.length} 块，每块约 ${chunkSize} 字，已开启限速保护避免触发 API 限流）…` });
-
   try {
-    const partialResults = await analyzeChunksRateLimited({
+    const result = await runStyleAnalysisPipeline({
       config,
       ctrl,
-      chunks,
-      sse: { send },
-      buildUserMessage: (chunk, chunkIndex) => `以下是小说《${String(name).trim()}》的第 ${chunkIndex + 1} 段文本：\n\n${chunk}`
+      name,
+      notes,
+      text: String(sourceText),
+      onProgress: (progress, message) => send({ type: 'progress', progress, message }),
+      onStatus: (message) => send({ type: 'status', message }),
+      onDelta: (content) => send({ type: 'delta', content })
     });
-
-    if (!partialResults.length) {
-      return end({ type: 'error', message: '所有块分析均失败，请稍后重试或更换模型。' });
-    }
-
-    send({ type: 'progress', progress: 78, message: `分块分析完成（${partialResults.length}/${chunks.length} 块成功），正在综合结果…` });
-
-    const r = await synthesizeWithRateLimit({
-      config,
-      ctrl,
-      system: STYLE_ANALYZE_SYSTEM,
-      user: `以下是对同一部小说《${String(name).trim()}》不同段落的分析结果，请综合为一份统一的风格分析 JSON：\n\n${JSON.stringify(partialResults, null, 2)}`,
-      sse: { send }
-    });
-
-    const rawAnalysis = extractJson(r?.content || '');
-    if (!rawAnalysis) {
-      return end({ type: 'error', message: '风格分析综合失败：AI 返回内容无法解析，请重试或更换模型。' });
-    }
-
-    send({ type: 'progress', progress: 100, message: '分析完成！' });
-
-    // 从分析结果中提取 example 句段作为 style_samples 独立存储
-    const examples = Array.isArray(rawAnalysis.example) ? rawAnalysis.example.join('\n') : '';
-    const analysis = { ...rawAnalysis };
-    delete analysis.example;
-
-    // 原文样本：放宽到 20 万字，供后续切片库/重新打标使用（SQLite TEXT 可承载）
-    const sampleText = text.slice(0, 200000);
-
-    // 风格 DNA：纯统计计算（抽样开头/中间/结尾控制耗时）
-    send({ type: 'status', message: '正在计算风格 DNA（量化文风画像）…' });
-    let styleDNA = null;
-    try {
-      const dnaSample = text.length > 120000
-        ? text.slice(0, 50000) + '\n' + text.slice(Math.floor(text.length * 0.35), Math.floor(text.length * 0.35) + 40000) + '\n' + text.slice(-30000)
-        : text;
-      styleDNA = computeStyleDNA(dnaSample);
-    } catch { /* DNA 计算失败不影响风格入库 */ }
-
-    // 样本切片入库 + LLM 打标
-    send({ type: 'status', message: '正在建立样本切片库…' });
-    const slices = sliceText(text, { minLen: 500, maxLen: 2000, limit: 2000 });
-    for (const s of slices) s.scene_tags = preClassify(s.text);
-    if (slices.length) {
-      send({ type: 'status', message: `已切片 ${slices.length} 片，正在 AI 打场景标签…` });
-      await tagSlicesRateLimited({ config, ctrl, slices, sse: { send } });
-    }
-
-    const info = db.prepare('INSERT INTO styles (name, notes, analysis, source_text, style_samples, style_dna) VALUES (?,?,?,?,?,?)')
-      .run(String(name).trim(), notes || '', JSON.stringify(analysis), sampleText, examples, styleDNA ? JSON.stringify(styleDNA) : '');
-    const styleId = info.lastInsertRowid;
-    if (slices.length) {
-      try { saveStyleSlices(styleId, slices); } catch { /* 切片入库失败不影响风格保存 */ }
-    }
-
-    end({ type: 'done', data: { style: normalizeStyle(getStyle(styleId)), slices: slices.length } });
+    return end({ type: 'done', data: { style: result.style, slices: result.sliceCount } });
   } catch (e) {
     if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止' });
     return end({ type: 'error', message: e.message });
@@ -5561,98 +5687,23 @@ router.post('/knowledge/import', async (req, res) => {
   if (!content || !content.trim()) return res.status(400).json({ error: '小说内容不能为空' });
   if (!genre) return res.status(400).json({ error: '请选择小说题材' });
 
-  const corpusId = createCorpus({ title: title || '未命名作品', genre, author });
   const { ctrl, send, end } = startSSE(req, res);
-  send({ type: 'status', message: '正在解析文本并分块…' });
-
   try {
-    const text = String(content);
-
-    // 样本切片入库（500-2000 字/片，覆盖全书，供动态检索与回退注入）
-    const slices = sliceText(text, { minLen: 500, maxLen: 2000, limit: 2000 });
-    for (const s of slices) s.scene_tags = preClassify(s.text);
-    clearSamples(corpusId);
-    saveSamples(corpusId, slices.map((s) => ({ ...s, keywords: extractKeywords(s.text) })));
-    setCorpusTagStatus(corpusId, slices.length ? 'rule-tagged' : 'empty');
-
-    // 分块处理：将全文按固定大小分块，保证不遗漏任何内容
-    // 最多 50 块，每块至少 50K 字，超大文本自动增大块大小
-    const maxChunks = 50;
-    const minChunkSize = 50000;
-    const chunkSize = Math.max(minChunkSize, Math.ceil(text.length / maxChunks));
-    const chunks = [];
-    for (let i = 0; i < text.length; i += chunkSize) {
-      chunks.push(text.slice(i, i + chunkSize));
-    }
-
-    updateCorpusStatus(corpusId, 'learning', { totalWords: text.length });
-    send({ type: 'status', message: `已切片 ${slices.length} 片，全文 ${text.length} 字，分成 ${chunks.length} 块（每块约 ${chunkSize} 字），自动限速分析，避免触发 API 限流。` });
-
-    // 无云端 LLM 时用离线统计分析
-    if (useOffline) {
-      send({ type: 'status', message: '离线模式：正在用统计分析引擎学习文笔特征…' });
-      const report = offlineAnalyzeStyle(text.slice(0, 100000));
-      const analysisText = JSON.stringify(report, null, 2);
-      updateCorpusStatus(corpusId, 'learned', { analysis: analysisText, learnedAt: new Date().toISOString().slice(0, 19).replace('T', ' ') });
-      send({ type: 'status', message: '离线学习完成（统计分析模式）。连接大模型后可重新深入学习获得更精细的分析。' });
-      const corpus = getCorpus(corpusId);
-      return end({ type: 'done', data: { corpus, analysis: report, offline: true } });
-    }
-
-    send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析（全文 ${text.length} 字，${chunks.length} 块，已开启限速保护避免触发 API 限流）…` });
-
-    const partialResults = await analyzeChunksRateLimited({
+    const result = await runKnowledgePipeline({
       config,
+      useOffline,
       ctrl,
-      chunks,
-      sse: { send },
-      buildUserMessage: (chunk, chunkIndex) => `以下是${genre}题材小说《${title || '未命名'}》的第 ${chunkIndex + 1} 段文本：\n\n${chunk}`
+      title,
+      genre,
+      author,
+      text: String(content),
+      onProgress: (progress, message) => send({ type: 'progress', progress, message }),
+      onStatus: (message) => send({ type: 'status', message }),
+      onDelta: (c) => send({ type: 'delta', content: c })
     });
-
-    if (!partialResults.length) {
-      updateCorpusStatus(corpusId, 'failed');
-      return end({ type: 'error', message: '所有段落分析均失败，请稍后重试或检查模型状态。' });
-    }
-
-    send({ type: 'progress', progress: 75, message: '正在综合各段分析结果…' });
-
-    const r = await synthesizeWithRateLimit({
-      config,
-      ctrl,
-      system: FINAL_SYNTHESIS_SYSTEM,
-      user: `以下是对同一部${genre}题材小说《${title || '未命名'}》不同段落的分析结果，请综合为一份完整报告：\n\n${JSON.stringify(partialResults, null, 2)}`,
-      sse: { send }
-    });
-
-    const analysis = r?.content || '';
-    const parsed = extractJson(analysis);
-    if (!parsed) {
-      updateCorpusStatus(corpusId, 'failed');
-      return end({ type: 'error', message: '合成分析结果无法解析，请重试或更换模型。' });
-    }
-
-    // LLM 批量打标样本切片（规则标签已兜底，此处升级为 AI 标签）
-    if (slices.length && !ctrl.signal.aborted) {
-      send({ type: 'progress', progress: 88, message: `正在为 ${slices.length} 片样本打场景标签…` });
-      const { tagged, failed } = await tagSlicesRateLimited({ config, ctrl, slices, sse: { send } });
-      for (const s of slices) updateSampleTags(corpusId, s.slice_index, s.scene_tags);
-      setCorpusTagStatus(corpusId, failed > 0 ? 'partial' : 'tagged');
-      send({ type: 'status', message: `打标完成（成功 ${tagged} 片${failed ? `，失败 ${failed} 片已用规则分类兜底` : ''}）` });
-    }
-
-    send({ type: 'progress', progress: 100, message: '学习完成！' });
-    updateCorpusStatus(corpusId, 'learned', { analysis: JSON.stringify(parsed, null, 2), learnedAt: new Date().toISOString().slice(0, 19).replace('T', ' ') });
-    send({ type: 'status', message: '学习完成！该知识库已可在新建小说时勾选使用。' });
-
-    const corpus = getCorpus(corpusId);
-    return end({ type: 'done', data: { corpus, analysis: parsed } });
+    return end({ type: 'done', data: { corpus: getCorpus(result.corpusId), analysis: result.analysis, offline: result.offline } });
   } catch (e) {
-    const userAborted = e.name === 'AbortError' && ctrl.signal.aborted;
-    if (userAborted) {
-      updateCorpusStatus(corpusId, 'failed');
-      return end({ type: 'aborted', message: '已停止' });
-    }
-    updateCorpusStatus(corpusId, 'failed');
+    if (e.name === 'AbortError') return end({ type: 'aborted', message: '已停止' });
     return end({ type: 'error', message: e.message });
   }
 });
@@ -5738,6 +5789,103 @@ router.get('/knowledge/by-genres', (req, res) => {
   const genres = String(req.query.genres || '').split(',').filter(Boolean);
   const rows = getKnowledgeByGenres(genres, 20);
   res.json(rows);
+});
+
+// ---------- 番茄小说批量导入 ----------
+
+// 注入队列的分析管线：风格库走 LLM 分析；知识库支持离线统计降级
+setImportRunner(async ({ job, content, meta, ctrl, onProgress }) => {
+  const onStatus = (message) => onProgress(undefined, message);
+  const { config, error } = requireLLM();
+  if (job.target === 'style') {
+    if (error) throw new Error(`未配置大模型：${error.message}（风格分析必须使用大模型）`);
+    const r = await runStyleAnalysisPipeline({
+      config,
+      ctrl,
+      name: meta.title || '番茄导入',
+      text: content,
+      onProgress,
+      onStatus
+    });
+    return { styleId: r.styleId };
+  }
+  const useOffline = error && shouldUseLocal();
+  if (error && !useOffline) throw new Error(`未配置大模型：${error.message}`);
+  const r = await runKnowledgePipeline({
+    config,
+    useOffline,
+    ctrl,
+    title: meta.title || '未命名作品',
+    genre: job.genre || '通用',
+    author: meta.author || '',
+    text: content,
+    onProgress,
+    onStatus
+  });
+  return { corpusId: r.corpusId };
+});
+
+// 服务启动恢复：中断的任务重排队
+resumeFanqieQueue();
+
+// 解析粘贴的书籍链接/ID 预览（串行抓取书页避免触发风控）
+router.post('/import/fanqie/parse', async (req, res) => {
+  const { inputs } = req.body || {};
+  const list = parseBookInputs(inputs);
+  if (!list.length) return res.json({ items: [], hint: '未识别到书籍链接或 ID，请粘贴 fanqienovel.com 书籍页链接或纯数字书籍 ID' });
+  const items = [];
+  for (const { bookId } of list) {
+    try {
+      const meta = await fetchBookMeta(bookId);
+      items.push({ bookId, ...meta, error: '' });
+    } catch (e) {
+      items.push({
+        bookId, title: '', author: '', intro: '', wordCount: 0,
+        chapterCount: 0, freeCount: 0, chapters: [],
+        error: e instanceof FanqieError ? e.message : `解析失败: ${e.message}`
+      });
+    }
+  }
+  res.json({ items });
+});
+
+// 创建批量导入任务并入队（target: style | knowledge）
+router.post('/import/fanqie/batch', (req, res) => {
+  const { items, target, genre } = req.body || {};
+  if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: '请先解析书籍' });
+  if (!['style', 'knowledge'].includes(target)) return res.status(400).json({ error: '请选择导入目标' });
+  if (target === 'knowledge' && !genre) return res.status(400).json({ error: '知识库导入需选择题材' });
+  const jobs = items.map((it) => {
+    const r = enqueueFanqieJob({ bookId: String(it.bookId || ''), target, genre: target === 'knowledge' ? String(genre) : '' });
+    const { content, ...safe } = r.job || {};
+    return { ...safe, duplicated: r.duplicated, reason: r.reason || '' };
+  });
+  res.json({ jobs });
+});
+
+// 任务列表（队列 + 历史）
+router.get('/import/fanqie/jobs', (req, res) => {
+  res.json({ jobs: listFanqieJobs() });
+});
+
+// 取消当前与剩余队列
+router.post('/import/fanqie/cancel', (req, res) => {
+  res.json({ jobs: cancelFanqieAll() });
+});
+
+// 重试失败/已取消任务
+router.post('/import/fanqie/jobs/:id/retry', (req, res) => {
+  const r = retryFanqieJob(Number(req.params.id));
+  if (r.error) return res.status(400).json({ error: r.error });
+  const { content, ...safe } = r.job || {};
+  res.json({ job: safe });
+});
+
+// 删除任务记录（进行中的任务需先取消）
+router.delete('/import/fanqie/jobs/:id', (req, res) => {
+  const r = deleteFanqieJob(Number(req.params.id));
+  if (r.error) return res.status(400).json({ error: r.error });
+  res.json(r);
 });
 
 // ---------- 本地大模型 ----------

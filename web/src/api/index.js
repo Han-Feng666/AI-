@@ -281,6 +281,14 @@ export const api = {
   deleteKnowledge: (id) => http.delete(`/knowledge/corpora/${id}`),
   listKnowledgeByGenres: (genres) => http.get('/knowledge/by-genres', { params: { genres } }),
 
+  // 番茄小说批量导入
+  parseFanqieInputs: (inputs) => http.post('/import/fanqie/parse', { inputs }, { timeout: 120000 }),
+  createFanqieBatch: (items, target, genre) => http.post('/import/fanqie/batch', { items, target, genre }),
+  getFanqieJobs: () => http.get('/import/fanqie/jobs'),
+  cancelFanqieJobs: () => http.post('/import/fanqie/cancel'),
+  retryFanqieJob: (id) => http.post(`/import/fanqie/jobs/${id}/retry`),
+  deleteFanqieJob: (id) => http.delete(`/import/fanqie/jobs/${id}`),
+
   // 本地大模型
   getLocalModelStatus: () => http.get('/local-model/status'),
   detectOllama: () => http.post('/local-model/detect-ollama', {}),

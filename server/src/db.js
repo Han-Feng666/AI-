@@ -599,6 +599,29 @@ CREATE TABLE IF NOT EXISTS adaptation_candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_adapt_cand_job ON adaptation_candidates(job_id, chapter_index);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_adapt_cand_unique ON adaptation_candidates(job_id, chapter_index);
+
+CREATE TABLE IF NOT EXISTS import_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id TEXT NOT NULL,
+  title TEXT DEFAULT '',
+  author TEXT DEFAULT '',
+  genre TEXT DEFAULT '',
+  target TEXT NOT NULL DEFAULT 'style',
+  status TEXT DEFAULT 'pending',
+  progress INTEGER DEFAULT 0,
+  message TEXT DEFAULT '',
+  total_chapters INTEGER DEFAULT 0,
+  fetched_chapters INTEGER DEFAULT 0,
+  skipped_chapters INTEGER DEFAULT 0,
+  deobf_unknown INTEGER DEFAULT 0,
+  content TEXT DEFAULT '',
+  result_ref TEXT DEFAULT '',
+  error TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_import_jobs_book ON import_jobs(book_id, target);
+CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON import_jobs(status, id);
 `);
 ensureColumn('adaptation_jobs', 'plans', "plans TEXT DEFAULT ''");
 
