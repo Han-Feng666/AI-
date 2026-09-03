@@ -1,8 +1,14 @@
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 // 使用临时数据目录，避免污染 src/data 下的真实库
 process.env.NOVEL_DATA_DIR = '/tmp/novel-test-data';
+
+// 限速/重试链路会遗留最长 30s 的冷却定时器，测试结束后强制退出子进程
+after(() => {
+  resetLimiter?.();
+  process.exit(0);
+});
 
 let acquire, onRateLimited, getLimiterState, resetLimiter;
 let chat;
@@ -70,7 +76,7 @@ test('llm.js 的 429 错误携带 Retry-After 头信息', async () => {
   const orig = globalThis.fetch;
   globalThis.fetch = async () => new Response(
     JSON.stringify({ error: { message: 'rpm exhausted' } }),
-    { status: 429, headers: { 'Retry-After': '30' } }
+    { status: 429, headers: { 'Retry-After': '1' } }
   );
   try {
     await assert.rejects(
@@ -79,7 +85,7 @@ test('llm.js 的 429 错误携带 Retry-After 头信息', async () => {
         messages: [{ role: 'user', content: 'hi' }]
       }),
       (err) => {
-        assert.equal(err.retryAfter, 30, '应解析 Retry-After=30');
+        assert.equal(err.retryAfter, 1, '应解析 Retry-After=1');
         assert.match(err.message, /rpm exhausted/);
         return true;
       }

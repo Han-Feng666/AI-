@@ -172,3 +172,11 @@ describe('searchBook / fetchToc / fetchContent（mock 网络）', () => {
     assert.equal(content, '正文内容');
   });
 });
+
+describe('递归 JSON 路径 $..key', () => {
+  test('递归键查找与通配组合', () => {
+    const obj = { data: { bookList: [{ t: 'a' }, { t: 'b' }], meta: { bookList: [{ t: 'c' }] } } };
+    assert.deepEqual(evalJsonPath(obj, '$..bookList[*].t'), ['a', 'b', 'c']);
+    assert.deepEqual(evalJsonPath(obj, '$..t'), ['a', 'b', 'c']);
+  });
+});

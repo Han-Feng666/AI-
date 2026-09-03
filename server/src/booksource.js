@@ -130,15 +130,32 @@ function applyPurify(text, purify, multiline = false) {
   }
 }
 
-/** JSON 路径求值：$.a.b[*].c -> 数组（单值也在数组中） */
+/** 深度优先收集对象树上所有 key 匹配的值（Legado `$..key` 递归语法） */
+function collectByKey(node, key, out) {
+  if (Array.isArray(node)) {
+    for (const x of node) collectByKey(x, key, out);
+  } else if (node && typeof node === 'object') {
+    if (key in node) out.push(node[key]);
+    for (const v of Object.values(node)) collectByKey(v, key, out);
+  }
+}
+
+/** JSON 路径求值：$.a.b[*].c / $..key -> 数组（单值也在数组中） */
 export function evalJsonPath(root, path) {
   const norm = String(path || '').trim().replace(/^\$\.?/, '');
   if (!norm) return [root];
   const tokens = [];
+  let pendingRecursive = false;
   for (const seg of norm.split('.')) {
+    if (seg === '') {
+      pendingRecursive = true; // '..' 递归标记，附着到下一个 key 段
+      continue;
+    }
     const m = seg.match(/^([^\[\]]*)((?:\[[^\]]*\])*)$/);
     if (!m) return [];
-    if (m[1]) tokens.push({ key: m[1] });
+    if (m[1]) tokens.push({ key: m[1], recursive: pendingRecursive });
+    else if (pendingRecursive) return [];
+    pendingRecursive = false;
     for (const ix of m[2].match(/\[([^\]]*)\]/g) || []) {
       tokens.push({ index: ix.slice(1, -1) });
     }
@@ -151,7 +168,14 @@ export function evalJsonPath(root, path) {
     const next = [];
     for (const it of items) {
       if (it == null) continue;
-      if ('key' in tok) {
+      if (tok.recursive) {
+        if (isLast) collectByKey(it, tok.key, next);
+        else {
+          const hits = [];
+          collectByKey(it, tok.key, hits);
+          next.push(...hits);
+        }
+      } else if ('key' in tok) {
         // 数组形态保持整体（由后续索引/通配 token 处理），isLast 时原样返回
         const v = Array.isArray(it) ? it.map((x) => (x == null ? undefined : x[tok.key])) : it[tok.key];
         next.push(v);
@@ -262,7 +286,7 @@ function evalRuleParts(rule, ctx) {
       else vals = evalHtmlRule(ctx.$, ctx.nodes, main);
       for (const v of vals) {
         if (v == null) continue;
-        const s = typeof v === 'string' ? v : JSON.stringify(v);
+        const s = Array.isArray(v) ? v.filter((x) => x != null).map(String).join(' / ') : typeof v === 'string' ? v : JSON.stringify(v);
         if (s.trim()) out.push(applyPurify(s, purify).trim());
       }
     }
@@ -271,15 +295,18 @@ function evalRuleParts(rule, ctx) {
   return [];
 }
 
-/** 字段求值：||/&& 合并后的首个非空字符串；JSON 项支持 {{@json:field}} 模板插值 */
+/** 字段求值：||/&& 合并后的首个非空字符串；JSON 项支持 {{@json:field}} / {{$..field}} / {{field}} 模板插值 */
 function evalField(rule, ctx) {
   if (!rule) return '';
-  if (ctx.kind === 'json' && String(rule).includes('{{@json:') && typeof ctx.json === 'object' && ctx.json) {
-    const s = String(rule).replace(/\{\{@json:([^}]+)\}\}/g, (_, key) => {
-      const v = key.split('.').reduce((o, k) => (o == null ? undefined : o[k]), ctx.json);
-      return v == null ? '' : String(v);
+  if (ctx.kind === 'json' && String(rule).includes('{{') && typeof ctx.json === 'object' && ctx.json) {
+    const { main: tplMain, purify } = splitPurify(rule);
+    const s = tplMain.replace(/\{\{([^}]+)\}\}/g, (_, expr) => {
+      let e = expr.trim();
+      if (e.startsWith('@json:')) e = e.slice(6).trim();
+      const vals = evalJsonPath(ctx.json, e);
+      const v = vals.find((x) => x != null);
+      return v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
     });
-    const { purify } = splitPurify(rule);
     return purify ? applyPurify(s, purify).trim() : s.trim();
   }
   const vals = evalRuleParts(rule, ctx);
