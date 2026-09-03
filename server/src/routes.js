@@ -5963,6 +5963,21 @@ router.delete('/sources/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// 聚合搜索：向所有启用书源并发搜索，单源失败不阻塞其余结果。
+// 并发池限制同时请求数：书源量大（数百条）时避免打爆本机文件描述符与下游站点
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 // 聚合搜索：向所有启用书源并发搜索，单源失败不阻塞其余结果
 router.post('/sources/search', async (req, res) => {
   const { keyword } = req.body || {};
@@ -5971,7 +5986,7 @@ router.post('/sources/search', async (req, res) => {
   const rows = db.prepare("SELECT * FROM book_sources WHERE status = 'enabled' ORDER BY id ASC").all();
   if (!rows.length) return res.status(400).json({ error: '还没有可用的书源，请先导入' });
 
-  const tasks = rows.map(async (row) => {
+  const values = await mapLimit(rows, 16, async (row) => {
     const source = getSourceById(row.id);
     try {
       const { results } = await searchBook(source, kw);
@@ -5984,13 +5999,11 @@ router.post('/sources/search', async (req, res) => {
       return { ok: false, sourceId: row.id, sourceName: row.name, error: msg };
     }
   });
-  const settled = await Promise.allSettled(tasks);
   const results = [];
   const failures = [];
-  for (const s of settled) {
-    if (s.status !== 'fulfilled') continue;
-    if (s.value.ok) results.push(...s.value.items);
-    else failures.push({ sourceId: s.value.sourceId, sourceName: s.value.sourceName, error: s.value.error });
+  for (const v of values) {
+    if (v.ok) results.push(...v.items);
+    else failures.push({ sourceId: v.sourceId, sourceName: v.sourceName, error: v.error });
   }
   res.json({ results, failures });
 });

@@ -350,7 +350,10 @@ const AI_BLACKLIST = [
   '氛围一下子', '气氛瞬间', '空气突然安静', '画面感极强', '镜头一转', '时间仿佛静止',
   '一切仿佛', '似乎一切', '仿佛回到了', '仿佛置身于', '似曾相识', '一股暖流',
   '心头一暖', '心里暖暖的', '感慨道', '喃喃道', '轻声道', '低声道', '沉声道',
-  '冷冷道', '淡漠道', '平静道', '淡然道', '缓缓道', '一字一句道', '开口道'
+  '冷冷道', '淡漠道', '平静道', '淡然道', '缓缓道', '一字一句道', '开口道',
+  // 2026-09 扩充：情绪反应模板词（AI 让角色用同一套身体反应表达震惊/紧张）
+  '如遭雷击', '大脑一片空白', '心脏漏了一拍', '呼吸一窒', '浑身一僵', '瞳孔骤缩',
+  '喉结滚动', '指节捏得发白', '指节泛白', '周身一寒', '遍体生寒', '头皮发麻'
 ];
 
 // ---------- AI 高频句式模板（正则级，比词级黑名单更能抓"AI 腔调"） ----------
@@ -714,6 +717,8 @@ export function scanAiPatterns(text) {
   hits.push(...scanSimileOveruse(text));
   hits.push(...scanFrozenGaze(text));
   hits.push(...scanDialogueEllipsis(text));
+  hits.push(...scanQuantifierStack(text));
+  hits.push(...scanNearbyRepeat(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -739,6 +744,81 @@ export function scanDialogueEllipsis(text) {
   const ratio = withEll / dialogues.length;
   if (ratio >= 0.35) {
     hits.push({ word: `对话省略号过密(${withEll}/${dialogues.length} 句对话带"……"(${Math.round(ratio * 100)}%)，AI 让角色频繁用省略号表示欲言又止/沉默，真人只在关键处用。删去大部分省略号，让停顿由内容和场景带出)`, count: withEll, template: true });
+  }
+  return hits;
+}
+
+// 模糊量词「一X」堆叠检测：一丝/一抹/一股/一阵/一缕 是 AI 垫描写的标志性拐杖，
+// 真人也用但密度远低。整章密度超过每千字 3.5 处且总量足够大时判 AI 腔。
+const QUANTIFIER_WORDS = ['一丝', '一抹', '一股', '一阵', '一缕', '一丝丝', '一缕缕'];
+
+export function scanQuantifierStack(text) {
+  const s = String(text || '');
+  if (s.length < 1000) return [];
+  let total = 0;
+  const parts = [];
+  for (const w of QUANTIFIER_WORDS) {
+    let count = 0;
+    let from = 0;
+    while ((from = s.indexOf(w, from)) !== -1) { count++; from += w.length; }
+    if (count > 0) { total += count; parts.push(`${w}×${count}`); }
+  }
+  const hits = [];
+  const perK = (total / s.length) * 1000;
+  if (total >= 8 && perK > 3.5) {
+    hits.push({
+      word: `模糊量词堆叠(${parts.join('、')}，共 ${total} 处，每千字 ${perK.toFixed(1)} 处；AI 爱用「一丝/一抹/一股」垫描写，真人密度远低。删掉大半，只留最有效的一两处，其余直接白描)`,
+      count: total,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 近距离重复用词检测：同一双字词在 300 字窗口内出现 ≥4 次属机械复现（真人会换词或删减）。
+// 全章出现超 15 次的词大概率是主角名等专名，自动排除；常见功能词走停用表。
+const NEARBY_STOPWORDS = new Set([
+  '他们', '她们', '自己', '什么', '没有', '一个', '这个', '那个', '已经', '就是',
+  '还是', '知道', '时候', '东西', '起来', '出来', '过来', '一下', '有些', '一点',
+  '这样', '那样', '这么', '那么', '现在', '地方', '身体', '声音', '眼睛', '看着',
+  '说道', '的话', '一声', '也不', '也是', '都是', '只是', '但是', '如果', '因为',
+  '所以', '不过', '似乎', '像是', '好像', '然后', '突然', '顿时', '终于', '竟然',
+  '居然', '真的', '开始', '继续', '直接', '慢慢', '轻轻', '缓缓', '进来', '出去',
+  '回去', '下来', '上来', '所有', '每次', '有时', '两个', '三个', '第一', '他的',
+  '她的', '我的', '自己', '一是', '不能', '不会', '不是', '不知', '就是', '一人'
+]);
+
+export function scanNearbyRepeat(text) {
+  const s = String(text || '').replace(/\s+/g, '');
+  if (s.length < 1500) return [];
+  const hits = [];
+  const reported = new Set();
+  const globalFreq = new Map();
+  const WINDOW = 300;
+  const STEP = 150;
+  for (let start = 0; start + WINDOW <= s.length; start += STEP) {
+    const win = s.slice(start, start + WINDOW);
+    const local = new Map();
+    for (let i = 0; i + 2 <= win.length; i++) {
+      const g = win.slice(i, i + 2);
+      local.set(g, (local.get(g) || 0) + 1);
+    }
+    for (const [g, c] of local) {
+      if (c < 4 || reported.has(g) || NEARBY_STOPWORDS.has(g)) continue;
+      if (!globalFreq.has(g)) {
+        let gf = 0;
+        let from = 0;
+        while ((from = s.indexOf(g, from)) !== -1) { gf++; from += g.length; }
+        globalFreq.set(g, gf);
+      }
+      if (globalFreq.get(g) > 15) continue; // 全章高频词大概率是主角名等专名
+      reported.add(g);
+      hits.push({
+        word: `近距离重复用词("${g}"在相邻 300 字内出现 ${c} 次；同词近距离高频复现是 AI 机械感来源，真人会换近义表达或删减。替换其中两处或直接删一处)`,
+        count: c,
+        template: true
+      });
+    }
   }
   return hits;
 }

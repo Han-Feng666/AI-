@@ -294,7 +294,7 @@ export const api = {
   listSources: () => http.get('/sources'),
   updateSource: (id, status) => http.patch(`/sources/${id}`, { status }),
   deleteSource: (id) => http.delete(`/sources/${id}`),
-  searchSources: (keyword) => http.post('/sources/search', { keyword }, { timeout: 60000 }),
+  searchSources: (keyword) => http.post('/sources/search', { keyword }, { timeout: 300000 }),
   importFromSource: (payload) => http.post('/import/source', payload),
 
   // 本地大模型
