@@ -177,15 +177,16 @@ async function executeJobInner(job, ctrl) {
       title: meta.title,
       author: meta.author,
       total_chapters: meta.chapterCount,
-      message: `免费章节 ${meta.freeCount}/${meta.chapterCount}`,
+      message: `网页端可读 ${meta.readableCount}/${meta.chapterCount} 章`,
     });
 
-    const freeChapters = meta.chapters.filter((c) => !c.needPay);
-    skipped = meta.chapterCount - freeChapters.length;
-    if (!freeChapters.length) {
+    // 番茄网页端统一只开放部分章节（通常前 10 章），锁定章节仅有试读残片
+    const readableChapters = meta.chapters.filter((c) => !c.locked);
+    skipped = meta.chapterCount - readableChapters.length;
+    if (!readableChapters.length) {
       touch(job.id, {
         status: 'failed',
-        error: '该书没有可抓取的免费章节',
+        error: '该书在番茄网页端没有可读章节（全部被锁定为试读）',
         skipped_chapters: skipped,
       });
       return;
@@ -195,10 +196,10 @@ async function executeJobInner(job, ctrl) {
     let consecutiveRisk = 0;
     let failedChapters = 0;
     let fetchedCount = 0;
-    for (let i = 0; i < freeChapters.length; i++) {
+    for (let i = 0; i < readableChapters.length; i++) {
       if (isCancelled(job.id)) return;
-      const ch = freeChapters[i];
-      touch(job.id, { message: `抓取章节 ${i + 1}/${freeChapters.length}` });
+      const ch = readableChapters[i];
+      touch(job.id, { message: `抓取章节 ${i + 1}/${readableChapters.length}` });
       try {
         const r = await fetchChapter(job.book_id, ch.itemId);
         consecutiveRisk = 0;
@@ -207,13 +208,16 @@ async function executeJobInner(job, ctrl) {
           parts.push(`${r.title}\n${r.text}`);
           touch(job.id, {
             fetched_chapters: fetchedCount,
-            progress: 5 + Math.round(((i + 1) / freeChapters.length) * 55),
+            progress: 5 + Math.round(((i + 1) / readableChapters.length) * 55),
             deobf_unknown: deobfUnknown + (r.residual || 0),
           });
           deobfUnknown += r.residual || 0;
         }
       } catch (e) {
-        failedChapters++;
+        // 锁定章节残片：静默跳过，计入 skipped
+        if (e.code !== 'CHAPTER_LOCKED') {
+          failedChapters++;
+        }
         touch(job.id, { skipped_chapters: skipped + failedChapters });
         if (e.code === 'RISK_LIMITED') {
           consecutiveRisk++;

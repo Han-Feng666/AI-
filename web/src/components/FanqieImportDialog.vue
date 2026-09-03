@@ -182,7 +182,7 @@ function jobRefLabel(j) {
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="parsing" @click="doParse">解析书籍</el-button>
-          <span class="hint">仅抓取免费章节；抓取在后台逐本进行，可关闭窗口</span>
+          <span class="hint">导入网页端可读章节，后台逐本处理，可关闭窗口</span>
         </el-form-item>
       </el-form>
     </template>
@@ -199,7 +199,8 @@ function jobRefLabel(j) {
               <el-tag v-if="it.error" size="small" type="danger">{{ it.error }}</el-tag>
             </div>
             <div v-if="!it.error" class="parse-meta">
-              共 {{ it.chapterCount }} 章 · 免费 {{ it.freeCount }} 章 · {{ formatNumber(it.wordCount) }} 字
+              共 {{ it.chapterCount }} 章 · 网页可读 {{ it.readableCount }} 章 · {{ formatNumber(it.wordCount) }} 字
+              <span v-if="it.lockedCount" class="lock-hint">（番茄网页端仅开放前几章试读，其余在 APP 内）</span>
             </div>
           </div>
           <el-button size="small" text type="danger" @click="removeItem(idx)">移除</el-button>
@@ -253,6 +254,7 @@ function jobRefLabel(j) {
 
 <style scoped>
 .hint { margin-left: 12px; color: var(--el-text-color-secondary); font-size: 12px; }
+.lock-hint { color: var(--el-text-color-secondary); }
 .parse-list { max-height: 300px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
 .parse-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border: 1px solid var(--el-border-color-lighter); border-radius: 8px; }
 .parse-item.err { border-color: var(--el-color-danger-light-5); background: var(--el-color-danger-light-9); }

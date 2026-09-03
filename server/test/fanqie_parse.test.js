@@ -64,8 +64,12 @@ describe('fetchBookMeta（mock 网络）', () => {
       assert.ok(meta.author, '应有作者');
       assert.ok(meta.chapterCount > 0, '应有章节');
       assert.ok(meta.chapters.length === meta.chapterCount);
-      assert.ok(meta.chapters.every((c) => c.itemId && typeof c.needPay === 'boolean'));
-      assert.ok(meta.freeCount > 0, '应有免费章节');
+      assert.ok(meta.chapters.every((c) => c.itemId && typeof c.locked === 'boolean'));
+      assert.ok(meta.readableCount > 0, '应有网页端可读章节');
+      assert.equal(meta.readableCount + meta.lockedCount, meta.chapterCount);
+      // fixture（真实书页）网页端仅前 10 章解锁，其余 isChapterLock=true
+      assert.equal(meta.readableCount, 10, 'fixture 应有 10 章网页端可读');
+      assert.equal(meta.lockedCount, meta.chapterCount - 10);
     } finally {
       delete globalThis.fetch;
     }

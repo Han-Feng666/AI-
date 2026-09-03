@@ -23,11 +23,12 @@ async function waitFor(fn, timeoutMs = 8000, label = 'condition') {
 }
 
 /** 伪造番茄书页/阅读页响应（最小可用结构，避免网络） */
-function mockFanqieFetch({ chapterCount = 3, failChapter = -1 } = {}) {
+function mockFanqieFetch({ chapterCount = 3, failChapter = -1, unlockedCount = chapterCount } = {}) {
   const chapters = Array.from({ length: chapterCount }, (_, i) => ({
     itemId: `item_${i + 1}`,
     title: `第${i + 1}章 测试`,
-    needPay: false
+    needPay: 0,
+    isChapterLock: i >= unlockedCount
   }));
   const pageState = {
     page: {
@@ -127,7 +128,7 @@ describe('import_queue', () => {
   });
 
   test('单章失败跳过并计数，队列继续', async () => {
-    globalThis.fetch = mockFanqieFetch({ chapterCount: 3, failChapter: 1 }); // 第 2 章风控
+    globalThis.fetch = mockFanqieFetch({ chapterCount: 3, failChapter: 1 }); // 第 2 章解析失败
     try {
       const { job } = enqueue({ bookId: '1004', target: 'style' });
       await waitFor(() => getJob(job.id).status === 'done', 8000, 'job done');
@@ -136,6 +137,28 @@ describe('import_queue', () => {
       assert.equal(j.skipped_chapters, 1, '失败章节计入 skipped');
       assert.ok(j.content.includes('第1章 测试'));
       assert.ok(!j.content.includes('第2章 测试'), '失败章节内容不应出现');
+    } finally {
+      delete globalThis.fetch;
+    }
+  });
+
+  test('网页端锁定章节直接跳过（不发起阅读页请求）', async () => {
+    const readerCalls = [];
+    globalThis.fetch = async (url) => {
+      const resp = mockFanqieFetch({ chapterCount: 4, unlockedCount: 2 })(url);
+      if (String(url).includes('/reader/')) readerCalls.push(String(url));
+      return resp;
+    };
+    try {
+      const { job } = enqueue({ bookId: '1008', target: 'style' });
+      await waitFor(() => getJob(job.id).status === 'done', 8000, 'job done');
+      const j = getJob(job.id);
+      assert.equal(j.fetched_chapters, 2, '仅解锁章节被抓取');
+      assert.equal(j.skipped_chapters, 2, '锁定章节计入 skipped');
+      assert.equal(j.total_chapters, 4);
+      assert.equal(readerCalls.length, 2, '锁定章节不应发起阅读页请求');
+      assert.ok(j.content.includes('第2章 测试'));
+      assert.ok(!j.content.includes('第3章 测试'));
     } finally {
       delete globalThis.fetch;
     }

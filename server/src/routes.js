@@ -5841,7 +5841,7 @@ router.post('/import/fanqie/parse', async (req, res) => {
     } catch (e) {
       items.push({
         bookId, title: '', author: '', intro: '', wordCount: 0,
-        chapterCount: 0, freeCount: 0, chapters: [],
+        chapterCount: 0, readableCount: 0, lockedCount: 0, chapters: [],
         error: e instanceof FanqieError ? e.message : `解析失败: ${e.message}`
       });
     }

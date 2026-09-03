@@ -5,13 +5,13 @@ Updated: 2026-09-01
 
 ## Description
 
-在「AI 小说工坊」内新增「从番茄批量导入」能力：用户一次粘贴多条番茄书籍链接（或书籍 ID），系统在后台队列中逐本抓取全书免费章节正文、按内置映射表还原防爬混淆字符，然后自动复用既有的风格分析（含风格 DNA 与切片打标）或知识学习（全书切片与场景打标）管线，完成后直接进入风格库 / 知识学习库。全程持久化任务状态，支持取消、失败重试与服务重启恢复。
+在「AI 小说工坊」内新增「从番茄批量导入」能力：用户一次粘贴多条番茄书籍链接（或书籍 ID），系统在后台队列中逐本抓取网页端可读章节正文、按内置映射表还原防爬混淆字符，然后自动复用既有的风格分析（含风格 DNA 与切片打标）或知识学习（全书切片与场景打标）管线，完成后直接进入风格库 / 知识学习库。全程持久化任务状态，支持取消、失败重试与服务重启恢复。
 
 PoC 已验证的抓取链路（2026-09-01，实机验证通过）：
 
 | 环节 | 接口 / 方法 | 结论 |
 |---|---|---|
-| 书籍目录 | `GET https://fanqienovel.com/page/{bookId}`，解析 `window.__INITIAL_STATE__.page` | 可用：书名/作者/简介/字数/全部章节（含 `needPay`、`itemId`） |
+| 书籍目录 | `GET https://fanqienovel.com/page/{bookId}`，解析 `window.__INITIAL_STATE__.page` | 可用：书名/作者/简介/字数/全部章节（含 `isChapterLock`、`itemId`；番茄全免费，`needPay` 恒 0） |
 | 章节正文 | `GET https://fanqienovel.com/reader/{itemId}`，解析 `__INITIAL_STATE__.reader.chapterData` | 可用：SSR 直出正文 HTML 与明文标题 |
 | 正文混淆 | 高频字替换为私用区字符（U+E3E8 起），由自定义字体映射 | 字体 URL 全局固定（awesome-font/c/*.woff2），母字体为思源黑体，gid 序号可反查目标字 |
 | 反混淆 | 内置映射表（362 条 code→char） | PoC 字形匹配准确率约 95%，两章实文还原通顺；实现阶段需做一次多字体投票修正 |
@@ -53,7 +53,7 @@ export function parseBookInputs(rawText) // -> [{ raw, bookId?, itemId?, error? 
 
 // 书页抓取：解析 __INITIAL_STATE__.page（括号配平提取 JSON）
 export async function fetchBookMeta(bookId, { signal }) 
-// -> { bookId, title, author, desc, wordCount, chapters: [{ itemId, title, needPay }] }
+// -> { bookId, title, author, intro, wordCount, readableCount, lockedCount, chapters: [{ itemId, title, locked }] }
 
 // 章节抓取：解析 reader.chapterData，正文去 img/占位符/HTML 标签 + 混淆还原
 export async function fetchChapter(itemId, { signal })
@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS import_jobs (
   message TEXT DEFAULT '',
   total_chapters INTEGER DEFAULT 0,
   fetched_chapters INTEGER DEFAULT 0,
-  skipped_chapters INTEGER DEFAULT 0,        -- 付费/失败跳过
+  skipped_chapters INTEGER DEFAULT 0,        -- 锁定/失败跳过
   deobf_unknown INTEGER DEFAULT 0,           -- 无法还原字符计数
   content TEXT DEFAULT '',                   -- 抓取全文（重试复用）
   result_ref TEXT DEFAULT '',                -- 完成后指向 styleId 或 corpusId
@@ -170,7 +170,7 @@ CREATE TABLE IF NOT EXISTS import_jobs (
 
 ## Correctness Properties
 
-1. **免费章节全覆盖**：`needPay = 0` 的章节全部尝试抓取；付费章节全部跳过并计入 `skipped_chapters`
+1. **可读章节全覆盖**：网页端可读章节（`isChapterLock = false`）全部尝试抓取；锁定章节全部跳过并计入 `skipped_chapters`；正文短于 200 字的残片（锁定章节试读残片）丢弃不计入语料
 2. **混淆还原完整性**：抓取正文中出现的全部私用区字符均能在映射表中命中；无法命中的保留原字符且计入 `deobf_unknown`；`deobf_unknown / 总字符 > 5%` 时任务失败（判定映射失效），乱码文本不进入目标库
 3. **队列互斥**：任意时刻至多一个任务处于 `fetching|analyzing`
 4. **任务幂等**：同一 bookId 重复提交不产生重复任务
@@ -196,7 +196,7 @@ CREATE TABLE IF NOT EXISTS import_jobs (
    - 用 PoC 保存的真实阅读页 HTML 作为 fixture，验证 `fetchChapter` 提取 + `deobfuscate` 还原后正文与已知明文关键句一致
    - 映射表覆盖测试：fixture 中全部私用区字符 ∈ 映射表 keys
 2. **输入解析单测**：`parseBookInputs` 对 page 链接、reader 链接、纯数字、混合分隔、非法输入的处理
-3. **书页解析单测**：用保存的书页 HTML fixture 验证 `fetchBookMeta`（书名/作者/章节数/needPay 过滤）
+3. **书页解析单测**：用保存的书页 HTML fixture 验证 `fetchBookMeta`（书名/作者/章节数/isChapterLock 过滤）
 4. **队列逻辑单测**（mock fetch）：串行互斥、失败跳过、取消中断、重启恢复、幂等提交
 5. **管线一致性**：mock LLM 下队列产出的 styles / knowledge_corpora 记录与手工导入字段结构一致
 6. **回归**：全量 `node --test` 保持通过（当前基线 50/50）
