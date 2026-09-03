@@ -88,6 +88,7 @@ import {
   resumeOnBoot as resumeFanqieQueue, setImportRunner
 } from './import_queue.js';
 import { parseSourceBatch, searchBook, BookSourceError } from './booksource.js';
+import { seedBuiltinSources } from './booksource_seed.js';
 import {
   detectOllama, ollamaListModels, getLocalModelStatus,
   localChat, shouldUseLocal, autoLearnInBackground
@@ -5826,7 +5827,8 @@ setImportRunner(async ({ job, content, meta, ctrl, onProgress }) => {
   return { corpusId: r.corpusId };
 });
 
-// 服务启动恢复：中断的任务重排队
+// 服务启动恢复：中断的任务重排队；同步内置书源（幂等，保留用户禁用状态）
+seedBuiltinSources();
 resumeFanqieQueue();
 
 // 解析粘贴的书籍链接/ID 预览（串行抓取书页避免触发风控）

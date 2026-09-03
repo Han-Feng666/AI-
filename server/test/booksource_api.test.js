@@ -12,6 +12,7 @@ process.env.NOVEL_DATA_DIR = dataDir;
 
 const { db } = await import('../src/db.js');
 const { setImportRunner, getJob } = await import('../src/import_queue.js');
+const { seedBuiltinSources } = await import('../src/booksource_seed.js');
 const { default: routes } = await import('../src/routes.js');
 
 const SEARCH_HTML = `<!doctype html><html><body>
@@ -41,8 +42,12 @@ const SOURCE_B = {
 
 let baseUrl;
 let server;
+let baselineCount = 0;
 
 before(async () => {
+  baselineCount = db.prepare('SELECT COUNT(*) n FROM book_sources').get().n;
+  // 隔离：禁用 seed 出来的内置源，测试只保留自己导入的两条 enabled 源
+  db.prepare("UPDATE book_sources SET status = 'disabled'").run();
   const app = express();
   app.use(express.json({ limit: '5mb' }));
   app.use('/api', routes);
@@ -71,6 +76,14 @@ async function api(method, url, body) {
 }
 
 describe('书源导入与管理', () => {
+  test('内置书源 seed 幂等：重复执行行数不变且状态保留', async () => {
+    const n1 = db.prepare('SELECT COUNT(*) n FROM book_sources').get().n;
+    const r = seedBuiltinSources();
+    const n2 = db.prepare('SELECT COUNT(*) n FROM book_sources').get().n;
+    assert.ok(r.seeded > 0, `应 seed 到书源，实际 ${r.seeded}`);
+    assert.equal(n1, n2, '重复 seed 不应增加行数');
+  });
+
   test('批量导入：坏条目报错，好条目入库；重复导入覆盖', async () => {
     const broken = { bookSourceName: '坏源' };
     let r = await api('POST', '/sources', { json: JSON.stringify([SOURCE_A, broken, SOURCE_B]) });
@@ -87,12 +100,12 @@ describe('书源导入与管理', () => {
     const rows = r.data.sources.filter((s) => s.sourceUrl === SOURCE_A.bookSourceUrl);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].name, '源A改');
-    assert.equal(r.data.sources.length, 2, '总计应为 2 条书源');
+    assert.equal(r.data.sources.length, baselineCount + 2, '应新增 2 条（含内置书源基线）');
   });
 
   test('启用/禁用与删除', async () => {
     let r = await api('GET', '/sources');
-    const id = r.data.sources.find((s) => s.name === '源B').id;
+    const id = r.data.sources.find((s) => s.sourceUrl === SOURCE_B.bookSourceUrl).id;
     r = await api('PATCH', `/sources/${id}`, { status: 'disabled' });
     assert.equal(r.status, 200);
     r = await api('GET', '/sources');
@@ -139,8 +152,9 @@ describe('书源整本导入（队列集成）', () => {
       return { ok: true, status: 200, arrayBuffer: async () => Buffer.from(body, 'utf-8') };
     };
     try {
+      const srcAId = (await api('GET', '/sources')).data.sources.find((s) => s.sourceUrl === SOURCE_A.bookSourceUrl).id;
       let r = await api('POST', '/import/source', {
-        sourceId: 1, bookUrl: 'https://a.test/book/1', name: '测试小说甲', author: '作者甲', target: 'style'
+        sourceId: srcAId, bookUrl: 'https://a.test/book/1', name: '测试小说甲', author: '作者甲', target: 'style'
       });
       assert.equal(r.status, 200);
       const jobId = r.data.job.id;
@@ -168,7 +182,7 @@ describe('书源整本导入（队列集成）', () => {
 
       // 幂等：已完成的书再次入队 409
       r = await api('POST', '/import/source', {
-        sourceId: 1, bookUrl: 'https://a.test/book/1', name: '测试小说甲', target: 'style'
+        sourceId: srcAId, bookUrl: 'https://a.test/book/1', name: '测试小说甲', target: 'style'
       });
       assert.equal(r.status, 409, `重复入队应 409，实际 ${r.status}: ${JSON.stringify(r.data)}`);
     } finally {
@@ -186,9 +200,10 @@ describe('书源整本导入（队列集成）', () => {
     };
     try {
       // 禁用源A后入队新书
-      await api('PATCH', '/sources/1', { status: 'disabled' });
+      const srcAId = (await api('GET', '/sources')).data.sources.find((s) => s.sourceUrl === SOURCE_A.bookSourceUrl).id;
+      await api('PATCH', `/sources/${srcAId}`, { status: 'disabled' });
       const r = await api('POST', '/import/source', {
-        sourceId: 1, bookUrl: 'https://a.test/book/2', name: '另一本', target: 'style'
+        sourceId: srcAId, bookUrl: 'https://a.test/book/2', name: '另一本', target: 'style'
       });
       assert.equal(r.status, 200);
       const jobId = r.data.job.id;

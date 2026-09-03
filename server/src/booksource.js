@@ -64,10 +64,19 @@ export function validateSource(raw) {
       throw new Error(`缺少必填字段 ${f}（Legado 格式：bookSourceName/bookSourceUrl/searchUrl/ruleSearch/ruleToc/ruleContent）`);
     }
   }
+  // 书源自定义请求头（JSON 字符串或对象），用于过站点基础校验
+  let headers = {};
+  if (raw.header) {
+    try {
+      const h = typeof raw.header === 'string' ? JSON.parse(raw.header) : raw.header;
+      if (h && typeof h === 'object' && !Array.isArray(h)) headers = h;
+    } catch { /* 非法 header 忽略 */ }
+  }
   return {
     name: String(raw.bookSourceName || hostOf(raw.bookSourceUrl) || '未命名书源'),
     sourceUrl: raw.bookSourceUrl.trim(),
     searchUrl: raw.searchUrl.trim(),
+    headers,
     rules: {
       ruleSearch: raw.ruleSearch || {},
       ruleBookInfo: raw.ruleBookInfo || {},
@@ -174,12 +183,18 @@ function segToSelector(seg) {
     const i = seg.indexOf('=');
     return { type: 'attr', attr: seg.slice(0, i).trim() };
   }
-  const m = seg.match(/^(class|tag|id)\.([^.\s]+)(?:\.(-?\d+))?$/);
+  // class/tag/id 前缀：名字可含空格（多 class 组合，如 class.col-12 col-md-6）
+  let m = seg.match(/^(class|tag|id)\.(.+?)(?:\.(-?\d+))?$/);
   if (m) {
     const [, kind, name, idx] = m;
-    const css = kind === 'class' ? `.${name}` : kind === 'id' ? `#${name}` : name;
+    const css = kind === 'class'
+      ? name.trim().split(/\s+/).map((c) => `.${c}`).join('')
+      : kind === 'id' ? `#${name.trim()}` : name.trim().split(/\s+/).join('');
     return { type: 'css', css, idx: idx ? parseInt(idx, 10) : null };
   }
+  // 裸 tag + 索引（如 dt.0 / h3.-1）
+  m = seg.match(/^([a-z][a-z0-9-]*)\.(-?\d+)$/);
+  if (m) return { type: 'css', css: m[1], idx: parseInt(m[2], 10) };
   // 裸段：含选择器特征按 CSS 处理，否则视为属性名
   if (/[.\s#[>:]/.test(seg) || /^[a-z][a-z0-9-]*$/i.test(seg)) return { type: 'css', css: seg, idx: null };
   return { type: 'attr', attr: seg };
@@ -256,9 +271,17 @@ function evalRuleParts(rule, ctx) {
   return [];
 }
 
-/** 字段求值：||/&& 合并后的首个非空字符串 */
+/** 字段求值：||/&& 合并后的首个非空字符串；JSON 项支持 {{@json:field}} 模板插值 */
 function evalField(rule, ctx) {
   if (!rule) return '';
+  if (ctx.kind === 'json' && String(rule).includes('{{@json:') && typeof ctx.json === 'object' && ctx.json) {
+    const s = String(rule).replace(/\{\{@json:([^}]+)\}\}/g, (_, key) => {
+      const v = key.split('.').reduce((o, k) => (o == null ? undefined : o[k]), ctx.json);
+      return v == null ? '' : String(v);
+    });
+    const { purify } = splitPurify(rule);
+    return purify ? applyPurify(s, purify).trim() : s.trim();
+  }
   const vals = evalRuleParts(rule, ctx);
   return vals.length ? vals[0] : '';
 }
@@ -414,6 +437,7 @@ function resolveUrl(u, base) {
 /** 按书源搜索，返回 { name, author, latest, intro, bookUrl } 列表 */
 export async function searchBook(source, keyword, fetchImpl) {
   const { url, init, charset } = buildSearchRequest(source.searchUrl, keyword);
+  init.headers = { ...(source.headers || {}), ...init.headers };
   const text = await requestPage(url, init, charset, fetchImpl);
   const parsed = parseResponse(text);
   const rs = source.rules.ruleSearch;
@@ -447,7 +471,7 @@ export async function fetchBookInfo(source, bookUrl, fetchImpl) {
   if (!rb.name && !rb.author && !rb.intro) return {};
   try {
     await throttleHost(bookUrl);
-    const text = await requestPage(bookUrl, { method: 'GET' }, 'utf-8', fetchImpl);
+    const text = await requestPage(bookUrl, { method: 'GET', headers: source.headers || {} }, 'utf-8', fetchImpl);
     const parsed = parseResponse(text);
     const ctx = rootCtx(parsed);
     return {
@@ -487,7 +511,7 @@ export async function fetchToc(source, bookUrl, fetchImpl) {
     seen.add(url);
     pages++;
     await throttleHost(url);
-    const text = await requestPage(url, { method: 'GET' }, 'utf-8', fetchImpl);
+    const text = await requestPage(url, { method: 'GET', headers: source.headers || {} }, 'utf-8', fetchImpl);
     const parsed = parseResponse(text);
     const list = evalList(rt.chapterList, parsed);
     for (const item of list) {
@@ -521,7 +545,7 @@ export async function fetchContent(source, chapterUrl, fetchImpl) {
     seen.add(url);
     pages++;
     await throttleHost(url);
-    const text = await requestPage(url, { method: 'GET' }, 'utf-8', fetchImpl);
+    const text = await requestPage(url, { method: 'GET', headers: source.headers || {} }, 'utf-8', fetchImpl);
     const parsed = parseResponse(text);
     const { main, purify } = splitPurify(rc.content);
     let raw;
