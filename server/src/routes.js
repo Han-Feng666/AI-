@@ -877,7 +877,7 @@ ${
 }
 
 function buildContinuePrompt(full, targetWordsN, characters) {
-  const tail = String(full).slice(-1200);
+  const tail = String(full).slice(-800);
   const anchor = buildCharacterAnchor(characters);
   return `你是本章小说的作者。下面是本章已经写好的正文末尾，你正在一贯地继续往下写，绝无其他人会插入或提供内容——请直接从最后一句话的最后一个字往后接，用同样的人称、视角和文风继续铺陈剧情。
 
@@ -3450,8 +3450,8 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       let det = { score: 0, issues: [] };
       let bl = [];
       try {
-        // 检测时只取前4000字+后1000字，减少内存占用
-        const detectText = full.length > 5000 ? full.slice(0, 4000) + '\n...\n' + full.slice(-1000) : full;
+        // 检测时只取前3000字+后500字，减少内存占用
+        const detectText = full.length > 3500 ? full.slice(0, 3000) + '\n...\n' + full.slice(-500) : full;
         det = await runDetection(config, detectText);
         const hits = scanAiPatterns(full);
         bl = blacklistFlagWords(hits, full.length);
@@ -3470,7 +3470,9 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       // 2b) 故事可读性检测：文笔干净但平铺直叙、无张力、无欲望尖点也判 rewrite
       let rd = { average: 0, verdict: 'pass', issues: [] };
       try {
-        rd = await runReadability(config, full);
+        // 可读性检测也只取前3000字+后500字
+        const rdText = full.length > 3500 ? full.slice(0, 3000) + '\n...\n' + full.slice(-500) : full;
+        rd = await runReadability(config, rdText);
         if (rd.verdict === 'rewrite') {
           const rdIssues = (rd.issues || []).slice(0, 4)
             .map((i) => `[${i.dimension || '可读性'}] ${i.suggestion || i.problem || ''}`)
