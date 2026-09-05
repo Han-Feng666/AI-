@@ -46,7 +46,8 @@ export function buildNovelContext(novel, characters = [], recentChapters = [], h
   if (recentChapters.length) {
     const base = parts.join('\n\n');
     const baseTokens = estimateTokens(base);
-    let budget = contextBudget > 0 ? contextBudget - baseTokens - estimateTokens('\n\n【最近章节全文（需衔接）】\n') : -1;
+    // 最近章节全文最多占上下文预算的40%，避免内存峰值过高
+    let budget = contextBudget > 0 ? Math.min(contextBudget - baseTokens - estimateTokens('\n\n【最近章节全文（需衔接）】\n'), Math.floor(contextBudget * 0.4)) : -1;
     const kept = [];
     for (const c of recentChapters) {
       const txt = `第${c.chapter_index}章 ${escapePromptInput(c.title)}\n${escapePromptInput(c.content)}`;

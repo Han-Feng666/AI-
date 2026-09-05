@@ -2883,7 +2883,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
   // 已有章节（用于记忆），过滤掉正在生成的章及其之后的章节（重新生成某章时，
   // 其后的章节尚未发生，不得作为前情注入，否则会把后面的剧情提前写进本章）
   const existing = getChapter(novel.id, idx);
-  const recentChapters = getRecentChapters(novel.id, 3, idx);
+  const recentChapters = getRecentChapters(novel.id, 2, idx);
   const historySummaries = buildHistorySummaries(novel.id, Math.floor(contextBudget(config) * 0.6), idx);
   const characters = getCharacters(novel.id);
   const novelFactions = getFactions(novel.id);
@@ -2951,7 +2951,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         const memText = await readMemoryFile(novel);
         if (memText) {
           const memFiltered = trimMemoryToIndex(memText, idx);
-          memoryBlock = trimMemoryToBudget(memFiltered, Math.floor(contextBudget(config) * 0.55));
+          memoryBlock = trimMemoryToBudget(memFiltered, Math.floor(contextBudget(config) * 0.3));
         }
       } catch { memoryBlock = ''; }
     }
@@ -3176,7 +3176,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         }
       } catch { /* 解析失败不阻塞 */ }
     }
-    const prevTailLen = mode === 'regenerate' ? 2000 : 1200;
+    const prevTailLen = mode === 'regenerate' ? 1000 : 600;
     const prevTailBlock = prevChapter
       ? `【上一章结尾（本章必须从上一章结尾的场面直接续写，严格延续时间/地点/人物/悬念，不得倒回上一章开头重新描写同一场景，不得重复已经发生过的事件）】
 上一章《${prevChapter.title}》${prevChapterSummary}${prevBeatsBlock}
@@ -3246,7 +3246,7 @@ ${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水
     let finalRounds = [];
     let lastProblems = [];
     let structureFixes = []; // 表达层结构问题（失衡/口癖/复述），注入润色定向修复，不触发整章重生成
-    const perMax = Math.max(2000, Math.min(16000, Math.round(targetWordsN * 1.8)));
+    const perMax = Math.max(2000, Math.min(8000, Math.round(targetWordsN * 1.2)));
 
     const buildRegenFeedback = (problems) => `【上一版未通过自动检查，本次整章重新生成必须修正的问题】
 ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
@@ -3278,15 +3278,18 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       if (isRegen && lastProblems.some((p) => /AI 味|文笔|生硬|不自然|套路|模板/.test(String(p.desc)))) {
         regenSysOpts = { ...regenSysOpts, autoPolish: true };
       }
+      // 缓存 system prompt，避免每轮续写重复构建（减少内存分配）
+      const chapterSystemPrompt = buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), regenSysOpts);
       // 自动续写：单次输出被 max_tokens 截断（finish_reason=length）或模型提前停止时继续往下写，直到达到目标字数
-      for (let round = 0; round < 12; round++) {
+      // 续写轮数上限从12降到6，减少内存峰值
+      for (let round = 0; round < 6; round++) {
         const msgs = round === 0
           ? [
-              { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), regenSysOpts) },
+              { role: 'system', content: chapterSystemPrompt },
               { role: 'user', content: attemptPrompt }
             ]
           : [
-              { role: 'system', content: buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), regenSysOpts) },
+              { role: 'system', content: chapterSystemPrompt },
               { role: 'user', content: buildContinuePrompt(full, targetWordsN, characters) }
             ];
         if (round > 0) {
@@ -3450,17 +3453,24 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       let det = { score: 0, issues: [] };
       let bl = [];
       try {
-        // 检测时只取前3000字+后500字，减少内存占用
-        const detectText = full.length > 3500 ? full.slice(0, 3000) + '\n...\n' + full.slice(-500) : full;
-        det = await runDetection(config, detectText);
+        // 先做正则检测，正则评分直接达标就不调 LLM 检测，节省一次 LLM 调用
         const hits = scanAiPatterns(full);
         bl = blacklistFlagWords(hits, full.length);
-        // 客观正则评分：统计各类AI模板句式命中数，每命中一类加5分
         const templateHits = hits.filter((h) => h.template).length;
         const regexScore = Math.min(50, templateHits * 5);
-        const total = Math.min(100, det.score + blacklistPenalty(hits, full.length) + regexScore);
-        if (total > aiScorePass() || bl.length > 0) {
-          problems.push({ desc: `AI 味明显（${total} 分，阈值 ${aiScorePass()}${bl.length ? '；高频复用词语：' + bl.join('、') : ''}${templateHits ? `；模板句式命中 ${templateHits} 类` : ''}）` });
+        const regexTotal = Math.min(100, blacklistPenalty(hits, full.length) + regexScore);
+        // 正则评分已达阈值，直接判定，跳过 LLM 检测
+        if (regexTotal > aiScorePass() || bl.length > 0) {
+          det = { score: regexTotal, issues: [] };
+          problems.push({ desc: `AI 味明显（${regexTotal} 分，阈值 ${aiScorePass()}${bl.length ? '；高频复用词语：' + bl.join('、') : ''}${templateHits ? `；模板句式命中 ${templateHits} 类` : ''}）` });
+        } else {
+          // 正则检测通过，再做 LLM 深度检测
+          const detectText = full.length > 3500 ? full.slice(0, 3000) + '\n...\n' + full.slice(-500) : full;
+          det = await runDetection(config, detectText);
+          const total = Math.min(100, det.score + regexScore);
+          if (total > aiScorePass()) {
+            problems.push({ desc: `AI 味明显（${total} 分，阈值 ${aiScorePass()}；模板句式命中 ${templateHits} 类）` });
+          }
         }
         finalDetect = det;
         finalBlacklist = bl;
@@ -3468,28 +3478,33 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       } catch { /* 检测失败不阻塞 */ }
 
       // 2b) 故事可读性检测：文笔干净但平铺直叙、无张力、无欲望尖点也判 rewrite
-      let rd = { average: 0, verdict: 'pass', issues: [] };
-      try {
-        // 可读性检测也只取前3000字+后500字
-        const rdText = full.length > 3500 ? full.slice(0, 3000) + '\n...\n' + full.slice(-500) : full;
-        rd = await runReadability(config, rdText);
-        if (rd.verdict === 'rewrite') {
-          const rdIssues = (rd.issues || []).slice(0, 4)
-            .map((i) => `[${i.dimension || '可读性'}] ${i.suggestion || i.problem || ''}`)
-            .join('；');
-          problems.push({ desc: `故事可读性不达标（平均 ${rd.average}/10${rdIssues ? '，' + rdIssues : ''}）：章节平铺直叙、缺乏冲突与欲望钩子，须重写注入戏剧张力` });
-        }
-      } catch { /* 可读性检测失败不阻塞 */ }
+      // 只在 AI 味检测通过时才做可读性检测，避免重复 LLM 调用
+      if (problems.length === 0) {
+        let rd = { average: 0, verdict: 'pass', issues: [] };
+        try {
+          // 可读性检测也只取前3000字+后500字
+          const rdText = full.length > 3500 ? full.slice(0, 3000) + '\n...\n' + full.slice(-500) : full;
+          rd = await runReadability(config, rdText);
+          if (rd.verdict === 'rewrite') {
+            const rdIssues = (rd.issues || []).slice(0, 4)
+              .map((i) => `[${i.dimension || '可读性'}] ${i.suggestion || i.problem || ''}`)
+              .join('；');
+            problems.push({ desc: `故事可读性不达标（平均 ${rd.average}/10${rdIssues ? '，' + rdIssues : ''}）：章节平铺直叙、缺乏冲突与欲望钩子，须重写注入戏剧张力` });
+          }
+        } catch { /* 可读性检测失败不阻塞 */ }
+      }
 
-      // 3) 剧情一致性校验
-      try {
-        const consistency = await checkPlotConsistency(novel.id, idx, full, config);
-        const cs = consistency?.overall_consistency;
-        if (cs && cs !== 'consistent') {
-          const issueLines = (consistency.issues || []).slice(0, 6).map((i) => `【${i.type || '逻辑'}】${i.description || ''}`).join('；');
-          problems.push({ desc: `剧情逻辑问题（${cs}）${issueLines ? '：' + issueLines : ''}` });
-        }
-      } catch { /* 校验失败不阻塞 */ }
+      // 3) 剧情一致性校验（只在 AI 味和可读性都通过时才做，避免重复 LLM 调用）
+      if (problems.length === 0) {
+        try {
+          const consistency = await checkPlotConsistency(novel.id, idx, full, config);
+          const cs = consistency?.overall_consistency;
+          if (cs && cs !== 'consistent') {
+            const issueLines = (consistency.issues || []).slice(0, 6).map((i) => `【${i.type || '逻辑'}】${i.description || ''}`).join('；');
+            problems.push({ desc: `剧情逻辑问题（${cs}）${issueLines ? '：' + issueLines : ''}` });
+          }
+        } catch { /* 校验失败不阻塞 */ }
+      }
 
       // 4) 行为逻辑规则检查（轻量级，不调 LLM，用正则匹配常见行为逻辑矛盾）
       try {
