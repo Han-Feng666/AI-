@@ -197,7 +197,73 @@ Entries discovered by the Agent during task execution should follow this format:
 - Instructions:
   - 硬性写作约束（6条）：①不凭空创造没铺垫的人物/宝物/奇遇/冲突，突发剧情须有伏笔；②角色行动符合人设/实力/处境，禁止行为前后矛盾；③禁止开辟与主线无关的新支线；④不强行造无逻辑反转，冲突循序渐进；⑤不清楚前文信息时不脑补设定，维持现状；⑥不随意结束/开启恩怨与势力斗争，重大转折循序渐进。
   - 人物逻辑硬性规则（5条）：①角色认知局限，无上帝视角，不知道的事会有疑问；②初次相遇必带生疏警惕，禁止初识就如老友；③遇到反常现象（深夜闯入等）第一反应是疑惑/警惕/主动发问；④剧情承接上一章结尾事态，重大互动须有过渡铺垫；⑤所有行动对话贴合身份处境，杜绝脱离常识的无脑反应。
-  - 落地位置：CHAPTER_SYSTEM 新增【硬性写作约束】(23-27条) 与【人物逻辑硬性规则】(28-32条)，以及流程要求第8条"硬性约束执行检查"；PLOT_CONSISTENCY_CHECK_SYSTEM 检测维度扩到14类（新增 invention凭空创造/side_plot无关支线/abrupt_turn越级转折/assumption脑补设定）；PLOT_FIX_SYSTEM 修法对照表补齐这4类修法。
+   - 落地位置：CHAPTER_SYSTEM 新增【硬性写作约束】(23-27条) 与【人物逻辑硬性规则】(28-32条)，以及流程要求第8条"硬性约束执行检查"；PLOT_CONSISTENCY_CHECK_SYSTEM 检测维度扩到14类（新增 invention凭空创造/side_plot无关支线/abrupt_turn越级转折/assumption脑补设定）；PLOT_FIX_SYSTEM 修法对照表补齐这4类修法。
+
+[Project Knowledge Summary]
+- Date: 2026-09-05
+- Context: 持续增强小说生成质量，让文笔更自然、逻辑更严密
+- Category: Build Methods / Quality Enhancement
+- Instructions:
+  - 质量门加严：
+    1. AI_SCORE_PASS_DEFAULT 15→10（更严格的达标阈值）
+    2. AI_MAX_ROUNDS 3→4（增加润色迭代轮数）
+    3. MAX_AUTO_REGENERATE 2→3（增加整章重生成次数）
+  - 章节创作提示词增强：
+    1. CHAPTER_SYSTEM 新增 12 条"拒绝"规则：形容词堆叠、情绪标签化、对话修饰语堆叠、心理活动长篇、句式重复、副词堆砌、空泛搭配、时间套话、场景无锚点、收尾升华
+    2. CHAPTER_BEAT_SYSTEM 新增：场景地点与剧情逻辑一致、时间递进、角色行为符合常理
+  - 润色系统增强：
+    1. POLISH_SYSTEM 新增 6 条：心理活动克制、情绪外化、叙述留白、口语化停顿、场景锚定、收尾不升华
+    2. WRITING_QUALITY_SYSTEM 新增 3 个维度：情感表达、场景构建、段落节奏
+  - AI 检测系统增强：
+    1. AI_DETECT_SYSTEM 新增 6 类：程度副词堆砌、空泛形容词套用、时间套话、场景元素错位、角色行为违背常理、对话修饰语堆叠
+    2. ANTI_AI_STYLE 黑名单扩展至 200+ 高频词
+  - 重生成优化：
+    1. 因 AI 味/文笔生硬被拒时，强化首稿人味要求
+    2. regenNote 区分 idx===1 的情况
+
+[Project Knowledge Summary]
+- Date: 2026-09-05
+- Context: 全面审计代码并修复潜在问题 + 增强小说生成质量
+- Category: Troubleshooting / Build Methods / Architecture
+- Instructions:
+  - 高危修复：
+    1. longestCommonSubstring 完整 DP 矩阵（50000×50000 ≈ 20GB OOM）→ 改为滚动数组
+    2. SSE keepalive 定时器异常循环 → 异常时调用 stopKeepalive
+  - 中危修复：
+    1. 新增 escapePromptInput 函数，转义用户输入中的【】──防止 prompt injection
+    2. 前端 _abortHandlers Map 独立存储 abort 函数，避免 Pinia 序列化问题
+    3. saveGenDraft/clearGenDraft 使用 originId 防止切书后草稿写入错误小说
+    4. saveSamples/saveStyleSlices 使用事务包裹确保数据完整性
+    5. tryCreateJob 时区问题：SQLite 本地时间字符串不加 Z 解析
+    6. llm.js onDelta 回调异常时终止流并抛出，避免静默中断
+    7. llm.js retryMax 限制为模型上下文窗口 80%，避免超限 400
+    8. getKnowledgeByGenres LIKE 通配符转义防止非预期匹配
+  - 质量增强：
+    1. ANTI_AI_STYLE 黑名单扩展：新增动词类/神态类/修饰类共 200+ 高频词
+    2. 新增 scanClauseMonotony（句式单调检测）、scanAdverbStack（副词堆叠检测）、scanEmptyAdjective（空泛形容词检测）
+    3. POLISH_SYSTEM 新增 5 条改写要求：句式多样化、副词克制、空泛形容词替换、对话自然化、段落节奏
+    4. 行为逻辑检测新增：普通人做出超能力行为、外行做出专业级的事、活人出现在不该出现的地方
+    5. scanSceneElementMismatch 扩展：增加太平间/停尸房/火化炉等场景，增加 bridge 词
+    6. regenNote 区分 idx===1 的情况：明确提示"本章是全书第一章，不得从上一章结尾续写"
+
+[Project Knowledge Summary]
+- Date: 2026-09-05
+- Context: 用户反馈「风格库和知识学习库导入小说经常失败，生成创作方案有时候也会失败」
+- Category: Troubleshooting & Debugging / Build Methods
+- Instructions:
+  - 风格库/知识库导入失败根因：
+    1. `chunkWholeText` 分块过大（min 50K 字/块），单块 LLM 分析容易超时或返回截断
+    2. `analyzeChunksRateLimited` 在 LLM 返回非 JSON 时静默丢块，导致全部块失败时抛「所有块分析均失败」
+    3. `tagSlicesRateLimited` 计数逻辑错误：JSON 解析失败时既设了 fallback 又计为 failed
+  - 创作方案生成失败根因：
+    1. 预算裁剪 `sysContent.slice(0, ...)` 可能截断 UTF-8 多字节字符中间，导致系统提示词乱码，模型无法解析
+    2. 新增的 conceptRule 增加了 userPrompt 长度，加剧了截断风险
+  - 修复方案：
+    1. `chunkWholeText`: minChunkSize 50K→15K，maxChunks 50→80，减少单块大小
+    2. `analyzeChunksRateLimited`: JSON 解析失败时重试（最多 4 次），不再静默丢块
+    3. `tagSlicesRateLimited`: 重写计数逻辑，每批结束后统一统计 tagged/failed
+    4. 新增 `safeTruncateUtf8` 函数，避免截断 UTF-8 字符
+    5. 预算裁剪改用 `safeTruncateUtf8` 替代 `sysContent.slice`
 
 [Project Knowledge Summary]
 - Date: 2026-08-13
@@ -419,7 +485,28 @@ Entries discovered by the Agent during task execution should follow this format:
   - 思考残留（推理型模型如 deepseek-v4-flash 把"复述任务要求"当正文开头输出，如"我们需要回答用户：重写《X》第一章正文，约2000字，直接正文"）：routes.js 新增 detectThinkingResidue（逐句扫描开头 600 字，THINK_RESIDUE_SENTENCE 正则数组）+ stripThinkingResidue（落库前剥离开头思考句段）+ isThinkingResidueSentence；cleanAiText 之后、落库前调用 strip；质检 problems 循环加 0c 检测，命中即整章重生成。剥离后为空则返回原文交质检判失败。
   - 章节衔接：prevTailLen 从 next=800/regenerate=2000 提升为 1200/2000；prevTailBlock 增加【衔接要求】（第一句必须紧接上一章结尾动作/对话/悬念）；质检新增 0a 开头跳转/脱节检测（时间过了很久/与此同时/镜头一转/另一边等开头话术→判重生成）。
   - AI 味标点/分段：lib.js scanAiPunctuation 新增破折号过密检测（≥8 处且密度 > 每 400 字 2 处）；cleanAiText 规则 8 破折号清洗的陈述起始词扩展（整间/整个/铺里/屋里/房里/店里/门外/窗外/身后/身前/脚下/头顶/眼前/街/巷/房间/屋子等）。
-  - prompts.js CHAPTER_SYSTEM 写作流程新增 1b【严禁输出思考/任务复述】铁律（只输出故事正文，禁止复述/规划/解释任务）。
+   - prompts.js CHAPTER_SYSTEM 写作流程新增 1b【严禁输出思考/任务复述】铁律（只输出故事正文，禁止复述/规划/解释任务）。
+
+[Project Knowledge Summary]
+- Date: 2026-09-05
+- Context: 全面排查代码潜在问题并修复
+- Category: Troubleshooting / Build Methods / Architecture
+- Instructions:
+  - 修复高危问题：
+    1. longestCommonSubstring 完整 DP 矩阵改为滚动数组，避免大文本 OOM
+    2. SSE keepalive 定时器异常时调用 stopKeepalive 防止循环异常
+  - 修复中危问题：
+    1. 新增 escapePromptInput 函数，转义用户输入中的【】──防止 prompt injection
+    2. 前端 _abortHandlers Map 独立存储 abort 函数，避免 Pinia 序列化问题
+    3. saveGenDraft/clearGenDraft 使用 originId 防止切书后草稿写入错误小说
+    4. saveSamples/saveStyleSlices 使用事务包裹确保数据完整性
+    5. tryCreateJob 时区问题：SQLite 本地时间字符串不加 Z 解析
+    6. llm.js onDelta 回调异常时终止流并抛出，避免静默中断
+    7. llm.js retryMax 限制为模型上下文窗口 80%，避免超限 400
+    8. getKnowledgeByGenres LIKE 通配符转义防止非预期匹配
+  - 修复低危问题：
+    1. consumeStream idleTimeout 在 reader.read() 成功后重置
+    2. buildNovelContext 所有用户输入经 escapePromptInput 处理
   - 测试：独立 node 脚本复刻上述正则逻辑验证（思考剥离 10 用例、破折号 4 用例、衔接 6 用例全过）；语法 node --check 通过。server node_modules 未装、无法起真实服务端到端，验证靠独立正则测试。
 
 [User Instruction Summary]
@@ -434,4 +521,17 @@ Entries discovered by the Agent during task execution should follow this format:
     4. 打包：`cd desktop && export WINEPREFIX=/tmp/winefresh USE_SYSTEM_WINE=true WINEDEBUG=-all && npx electron-builder --win nsis`。
     5. 产物校验：`desktop/release/*.exe` 应为完整安装包（几十 MB 级，非 ~143KB 失败残留）；`win-unpacked/resources/web/dist/assets/` 含前端哈希产物、`resources/server/` 含完整后端代码与 node_modules。
   - 关键环境依赖：需要 wine32 + wine64（`dpkg --add-architecture i386 && apt-get install -y wine32:i386 wine64`），且必须用干净前缀 `WINEPREFIX=/tmp/winefresh`（`wineboot --init` 初始化，首次约 3-5 分钟）；必须设 `USE_SYSTEM_WINE=true`，禁用 electron-builder 自带的 toolsets.wine。桌面端镜像源在 `desktop/.npmrc`（electron 与 electron-builder-binaries 指向 npmmirror）。
-  - 打包前若需递增版本：同步递增 `desktop/package.json` 与 `server/package.json` 的 version 字段（满十进一）。
+   - 打包前若需递增版本：同步递增 `desktop/package.json` 与 `server/package.json` 的 version 字段（满十进一）。
+
+[User Instruction Summary]
+- Date: 2026-09-05
+- Context: 用户反馈「生成创作方案有问题」——灵感明确写「主角是现代人意外死亡后身穿玄幻世界、没有家人」，但方案总是魂穿进某某身上 + 家族废物嫡子
+- Instructions:
+  - 根本原因：方案生成的提示词缺少「灵感忠实度」硬约束，LLM 默认套用网文常见模板（魂穿+家族废物）
+  - 修复方案：
+    1. prompts.js 新增 `buildConceptFidelityRule(concept)` 函数：解析灵感原文，生成「灵感优先铁律」文本块，包含身穿/魂穿区分、无家人/家族废物区分等硬约束
+    2. prompts.js 新增 `detectConceptViolations(concept, plan)` 函数：检测方案是否违反灵感约束（身穿写成魂穿/没家人写成家族废物）
+    3. 将 `CONCEPT_FIDELITY_CORE` 注入 NOVEL_PLAN_SYSTEM / PLAN_SKELETON_SYSTEM / PLAN_CHAPTERS_SYSTEM / PLAN_REVISE_SYSTEM 四个系统提示词
+    4. routes.js 生成骨架时调用 `detectConceptViolations` 校验，若违反则自动重试一次，前端提示冲突内容
+    5. userPrompt（骨架/章节/修订/细纲）统一注入 `buildConceptFidelityRule(conceptText)` 作为最高优先级约束
+    6. GENRE_GUIDE_REBIRTH 新增第60b条：身穿与魂穿必须按灵感区分，严禁把身穿默认写成魂穿进世家废物

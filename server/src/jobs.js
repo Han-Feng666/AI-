@@ -86,7 +86,8 @@ export function tryCreateJob(novelId, stage, params = '') {
     `SELECT id, created_at FROM generation_jobs WHERE novel_id = ? AND stage = ? AND status = 'running' ORDER BY id DESC LIMIT 1`
   ).get(novelId, stage);
   if (existing) {
-    const createdAt = new Date(existing.created_at + 'Z').getTime();
+    // SQLite datetime('now','localtime') 返回本地时间字符串，直接解析为本地时间（不加 Z）
+    const createdAt = new Date(existing.created_at.replace(' ', 'T')).getTime();
     const now = Date.now();
     const elapsed = (now - createdAt) / 60000;
     if (elapsed > STALE_JOB_MINUTES) {

@@ -49,13 +49,21 @@ export function updateCorpusStatus(id, status, extra = {}) {
 
 export function saveSamples(corpusId, chunks) {
   const stmt = db.prepare('INSERT INTO knowledge_samples (corpus_id, chunk_index, text, scene_tags, keywords) VALUES (?,?,?,?,?)');
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i];
-    if (typeof c === 'string') {
-      stmt.run(corpusId, i, c, '', '');
-    } else {
-      stmt.run(corpusId, c.slice_index ?? i, c.text, JSON.stringify(c.scene_tags || []), c.keywords || '');
+  // 使用 exec 包裹事务，确保数据完整性
+  db.exec('BEGIN');
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      const c = chunks[i];
+      if (typeof c === 'string') {
+        stmt.run(corpusId, i, c, '', '');
+      } else {
+        stmt.run(corpusId, c.slice_index ?? i, c.text, JSON.stringify(c.scene_tags || []), c.keywords || '');
+      }
     }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
   }
 }
 
@@ -91,8 +99,9 @@ export function getCorpusAnalysis(id) {
  */
 export function getKnowledgeByGenres(genres, limit = 3) {
   if (!genres || !genres.length) return [];
-  const conditions = genres.map(() => 'genre LIKE ?').join(' OR ');
-  const params = genres.map((g) => `%${g}%`);
+  const conditions = genres.map(() => 'genre LIKE ? ESCAPE \'\\\'').join(' OR ');
+  // 转义 LIKE 通配符，防止用户输入 % 或 _ 触发非预期匹配
+  const params = genres.map((g) => `%${String(g).replace(/[\\%_]/g, (c) => '\\' + c)}%`);
   const rows = db.prepare(
     `SELECT id, title, genre, analysis, total_words FROM knowledge_corpora WHERE status = 'learned' AND (${conditions}) ORDER BY total_words DESC LIMIT ?`
   ).all(...params, limit);

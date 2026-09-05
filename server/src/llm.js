@@ -411,7 +411,9 @@ export async function chat(opts) {
     // 检测到这种情况时自动用更大的 max_tokens 重试一次
     if (!content && finishReason === 'length' && !toolCalls.length && effectiveMax < 4000) {
       cleanup();
-      const retryMax = Math.max(4000, effectiveMax * 4);
+      // 限制重试 max_tokens 不超过模型上下文窗口的 80%，避免部分模型硬上限返回 400
+      const ctxMax = Number(cfg?.contextLength) || 32768;
+      const retryMax = Math.min(Math.max(4000, effectiveMax * 4), Math.floor(ctxMax * 0.8));
       const retryBody = { ...body, max_tokens: retryMax };
       const retryResp = await fetch(endpoint, {
         method: 'POST',
@@ -514,7 +516,13 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
           const delta = unescapeUnicode(json?.choices?.[0]?.delta?.content ?? '');
           if (delta) {
             full += delta;
-            onDelta(delta);
+            try {
+              onDelta(delta);
+            } catch (deltaErr) {
+              // onDelta 回调抛异常（如 SSE 写入失败），终止流并抛出
+              cancelReader();
+              throw new Error(`流式输出回调失败：${deltaErr.message}`);
+            }
           }
           if (json?.choices?.[0]?.finish_reason) {
             finishReason = json.choices[0].finish_reason;

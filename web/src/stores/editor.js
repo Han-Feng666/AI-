@@ -69,7 +69,8 @@ export const useEditorStore = defineStore('editor', {
     adaptTargetChapter: null,
     adaptCompare: null,
 
-    _slices: new Map()
+    _slices: new Map(),
+    _abortHandlers: new Map() // 独立存储 abort 函数，避免被 Pinia 序列化
   }),
 
   getters: {
@@ -90,8 +91,7 @@ export const useEditorStore = defineStore('editor', {
       const slice = {};
       for (const f of this._persistentFields) slice[f] = this.$state[f];
       slice._chapterReq = this._chapterReq;
-      slice._genAbort = this._genAbort;
-      slice._chatAbort = this._chatAbort;
+      // abort 函数存储在独立的 _abortHandlers Map 中，不存入 slice
       this._slices.set(String(novelId), slice);
     },
 
@@ -115,8 +115,9 @@ export const useEditorStore = defineStore('editor', {
         this.$state[f] = slice[f] !== undefined ? slice[f] : _defaultSliceState[f];
       }
       this._chapterReq = slice._chapterReq || 0;
-      this._genAbort = slice._genAbort || null;
-      this._chatAbort = slice._chatAbort || null;
+      // abort 函数从独立 Map 恢复，或置为 null
+      this._genAbort = this._abortHandlers.get(String(novelId) + '_gen') || null;
+      this._chatAbort = this._abortHandlers.get(String(novelId) + '_chat') || null;
     },
 
     // 切到指定 novel：保存旧顶层 slice → 清顶层 → 顶层目标Activated → loadNovel 拉最新数据 + 读 Job 状态恢复 busy
@@ -526,11 +527,12 @@ export const useEditorStore = defineStore('editor', {
             const cur = String(this.novelId) === String(originId) ? (this.$state.genStream || '') : ((this._slices.get(String(originId)) || {}).genStream || '');
             const updated = cur + unescapeUnicode(d);
             this._commit(originId, { genStream: updated });
-            saveGenDraft(this.novelId, updated, params.chapterIndex ?? null);
+            // 使用 originId 而非 this.novelId，防止切书后草稿写入错误小说
+            saveGenDraft(originId, updated, params.chapterIndex ?? null);
           },
           onReset: () => {
             this._commit(originId, { genStream: '' });
-            clearGenDraft(this.novelId);
+            clearGenDraft(originId);
           },
           onError: (m) => { throw new Error(m); }
         });

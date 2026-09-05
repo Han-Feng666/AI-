@@ -1,37 +1,45 @@
 // 提示词组装：将小说设定、角色、历史记忆组装成系统提示词
 import { estimateTokens } from './lib.js';
 
+// 转义用户输入，防止 prompt injection：将可能破坏提示词结构的字符替换为全角
+function escapePromptInput(text) {
+  return String(text || '')
+    .replace(/【/g, '［')
+    .replace(/】/g, '］')
+    .replace(/──/g, '━━');
+}
+
 export function buildNovelContext(novel, characters = [], recentChapters = [], historySummaries = [], contextBudget = 0, memoryBlock = '', factions = []) {
   const parts = [];
-  parts.push(`【作品名称】${novel.title || '未命名'}`);
-  parts.push(`【类型】${novel.genre || '未设定'}`);
-  if (novel.world_view) parts.push(`【世界观设定】\n${novel.world_view}`);
-  if (novel.outline) parts.push(`【剧情大纲】\n${novel.outline}`);
+  parts.push(`【作品名称】${escapePromptInput(novel.title || '未命名')}`);
+  parts.push(`【类型】${escapePromptInput(novel.genre || '未设定')}`);
+  if (novel.world_view) parts.push(`【世界观设定】\n${escapePromptInput(novel.world_view)}`);
+  if (novel.outline) parts.push(`【剧情大纲】\n${escapePromptInput(novel.outline)}`);
 
   if (memoryBlock && String(memoryBlock).trim()) {
-    parts.push(`【作品记忆（全书长效记忆，包含历史章节摘要与人物状态，创作时必须遵循，不得与既定事实冲突）】\n${String(memoryBlock).trim()}`);
+    parts.push(`【作品记忆（全书长效记忆，包含历史章节摘要与人物状态，创作时必须遵循，不得与既定事实冲突）】\n${escapePromptInput(String(memoryBlock).trim())}`);
   }
 
   if (factions && factions.length) {
-    const facLines = factions.map((f) => `- ${f.name}（${f.type || '势力'}）${f.stance ? '[' + f.stance + ']' : ''}：${f.description || ''}${f.leader ? ' 首领：' + f.leader : ''}`);
+    const facLines = factions.map((f) => `- ${escapePromptInput(f.name)}（${escapePromptInput(f.type || '势力')}）${f.stance ? '[' + escapePromptInput(f.stance) + ']' : ''}：${escapePromptInput(f.description || '')}${f.leader ? ' 首领：' + escapePromptInput(f.leader) : ''}`);
     parts.push(`【势力/组织】\n${facLines.join('\n')}`);
   }
 
   if (characters.length) {
     const charLines = characters.map((c) => {
-      let line = `- ${c.name}（${c.role_type}）：${c.personality || ''}`;
-      if (c.background) line += '；背景：' + c.background;
-      if (c.description) line += '；简介：' + c.description;
-      if (c.faction) line += '；势力：' + c.faction;
-      if (c.goal) line += '；目标：' + c.goal;
-      if (c.ability) line += '；能力：' + c.ability;
+      let line = `- ${escapePromptInput(c.name)}（${escapePromptInput(c.role_type)}）：${escapePromptInput(c.personality || '')}`;
+      if (c.background) line += '；背景：' + escapePromptInput(c.background);
+      if (c.description) line += '；简介：' + escapePromptInput(c.description);
+      if (c.faction) line += '；势力：' + escapePromptInput(c.faction);
+      if (c.goal) line += '；目标：' + escapePromptInput(c.goal);
+      if (c.ability) line += '；能力：' + escapePromptInput(c.ability);
       return line;
     });
     parts.push(`【主要角色】\n${charLines.join('\n')}`);
   }
 
   if (historySummaries.length) {
-    const sum = historySummaries.map((s) => `第${s.chapter_index}章 ${s.title}：${s.summary}`).join('\n');
+    const sum = historySummaries.map((s) => `第${s.chapter_index}章 ${escapePromptInput(s.title)}：${escapePromptInput(s.summary)}`).join('\n');
     parts.push(`【前情摘要】\n${sum}`);
   }
 
@@ -41,7 +49,7 @@ export function buildNovelContext(novel, characters = [], recentChapters = [], h
     let budget = contextBudget > 0 ? contextBudget - baseTokens - estimateTokens('\n\n【最近章节全文（需衔接）】\n') : -1;
     const kept = [];
     for (const c of recentChapters) {
-      const txt = `第${c.chapter_index}章 ${c.title}\n${c.content}`;
+      const txt = `第${c.chapter_index}章 ${escapePromptInput(c.title)}\n${escapePromptInput(c.content)}`;
       const t = estimateTokens(txt);
       if (budget <= 0) break;
       if (t <= budget) {
@@ -49,7 +57,7 @@ export function buildNovelContext(novel, characters = [], recentChapters = [], h
         budget -= t;
       } else if (budget > 600 && c.content) {
         const cut = Math.max(200, Math.floor((budget / Math.max(1, t)) * c.content.length));
-        kept.push(`第${c.chapter_index}章 ${c.title}\n${c.content.slice(0, cut)}…（本章内容较长，已按上下文上限截断）`);
+        kept.push(`第${c.chapter_index}章 ${escapePromptInput(c.title)}\n${escapePromptInput(c.content.slice(0, cut))}…（本章内容较长，已按上下文上限截断）`);
         budget = 0;
       } else {
         break;
@@ -70,7 +78,7 @@ AI 写小说和真人的最大区别：AI 什么都要交代清楚，真人只�
 - 一段话里只写一件事，写透就停。不把角色从头到脚描写一遍，不把环境从远到近罗列一遍，不把心理活动从起因到结果分析一遍。选一个细节写出来，剩下的让读者自己补。
 - 对话不是一问一答交接信息。真人的对话里有打断、有沉默、有答非所问、有说到一半不说了。角色说话时在做别的事——倒茶、擦刀、翻手机。对话标签绝大多数就是"他说""她说"，五个里面才有一个动作描写。
 - 情绪靠动作，不靠形容词。角色生气就摔东西、沉默、声音变低，不写"他愤怒了""她感到一阵委屈"。情绪越不挑明，读者越觉得真。
-- 句子长短错落。高朝用短句砸，舒缓用长句拉。不写"他伸出手，够到杯子，端起来，送到嘴边"——真人只写"他端起杯子"，中间步骤读者自己会补。
+- 句子长短错落。高潮用短句砸，舒缓用长句拉。不写"他伸出手，够到杯子，端起来，送到嘴边"——真人只写"他端起杯子"，中间步骤读者自己会补。
 - 段落是呼吸。重要时刻一个极短段砸下去（"他没说话。""走廊那头有人站着。"），日常叙述用自然中长段。不写通篇一样长的段，也不写通篇两三字一段的碎片。
 - 标点朴素。省略号留给对话里的停顿，破折号留给解释，感叹号留给真正需要喊的时候。不用省略号吊味，不用破折号耍帅，不用感叹号刷屏。
 - 允许闲笔。角色会停下来系鞋带、把茶水吹凉、走神想起不相干的旧事。这些跟主线无关的细节让人物"活着"。
@@ -78,15 +86,92 @@ AI 写小说和真人的最大区别：AI 什么都要交代清楚，真人只�
 - 禁止刻意完美收尾、强行升华段落：保留真人连载随笔感，章节正常留悬念，不要过度规整。
 - 行文允许细微的自然口语停顿，不追求极致书面完美语句；避免连续多句结构相同，形容词不要重复复用。
 - 禁止"上帝视角"反复解释剧情、强行剖析人物心理；心理活动点到为止，不要大段冗余独白。
+- 真人写对话不会每句都加修饰语，偶尔"他说"后面直接接引号内容，干净利落。
+- 环境描写不堆砌，一两句带过，让读者自己想象。不写"空气中弥漫着XX的气息，XX的声响在耳边回荡"这类套路句。
+- 不写"时间仿佛静止了""仿佛一切都不曾发生"这类空话套话，用具体细节传递感受。
 
 【AI高频词和套路词黑名单 —— 以下词汇不要高频使用，偶尔出现正常，密集出现即属AI痕迹】
-动词类：不由得、闻言、见状、殊不知、霎时间、旋即、下一刻、与此同时、不由自主、心中暗道
-神态类：心头一凛、神色一凝、微微蹙眉、眼底闪过一丝
-修饰类：宛如、仿佛、交织、羁绊、宿命感、深邃、熠熠生辉、值得一提的是、总而言之、综上所述
+动词类：不由得、闻言、见状、殊不知、霎时间、旋即、下一刻、与此同时、不由自主、心中暗道、不禁、顿时、忽然、猛地、缓缓地、渐渐地、慢慢地、徐徐、悄然、默默、静静、怔怔、呆呆、愣愣、定定、死死、紧紧、牢牢、牢牢地、深深地、重重地、轻轻地、柔柔地、暖暖地、冷冷地、淡淡地、浓浓地、满满地、空空地、静静、默默地、悄悄地、偷偷地、暗暗地、慌慌张张、匆匆忙忙、急急忙忙、跌跌撞撞、踉踉跄跄、摇摇晃晃、颤颤巍巍、哆哆嗦嗦、战战兢兢、瑟瑟发抖、浑身颤抖、浑身一震、浑身一颤、心头一震、心头一紧、心头一沉、心头一凛、神色一凝、面色一沉、脸色一变、眉头一皱、嘴角一勾、眼底闪过、眸中闪过、眼中闪过、唇边泛起、唇角微微、微微一怔、微微一笑、轻轻一笑、淡淡一笑、冷冷一笑、苦涩一笑、无奈一笑、淡然一笑、温柔一笑、浅浅一笑、抿嘴一笑、嫣然一笑、回眸一笑、粲然一笑、会心一笑、相视一笑、哈哈大笑、放声大笑、仰天大笑、捧腹大笑、皮笑肉不笑、笑而不答、笑而不语、笑里藏刀、笑容可掬、笑容满面、春风拂面、如沐春风、心旷神怡、心花怒放、喜出望外、喜上眉梢、喜笑颜开、兴高采烈、欢天喜地、手舞足蹈、活蹦乱跳、欢呼雀跃、奔走相告、沸沸扬扬、人声鼎沸、热闹非凡、门庭若市、车水马龙、人来人往、川流不息、络绎不绝、摩肩接踵、熙熙攘攘、人山人海、水泄不通、风雨交加、电闪雷鸣、狂风暴雨、倾盆大雨、瓢泼大雨、绵绵细雨、淅淅沥沥、滴滴答答、噼里啪啦、叮叮当当、叽叽喳喳、嘻嘻哈哈、哭哭啼啼、吵吵嚷嚷、轰轰烈烈、浩浩荡荡、堂堂正正、轰轰烈烈、风风火火、匆匆忙忙、忙忙碌碌、辛苦苦苦、酸甜苦辣、悲欢离合、生离死别、喜怒哀乐、阴晴圆缺、沧海桑田、岁月蹉跎、光阴似箭、日月如梭、白驹过隙、弹指之间、转瞬之间、刹那间、一眨眼、一瞬间、顷刻间、须臾间、片刻间、不多时、没多久、没多久、不一会儿、过了一会儿、又过了一会儿、时间一分一秒地过去、时间在流逝、时间在一点点过去、时间在悄然流逝、时间在无声无息地流逝、时间在不知不觉中过去、时间在指尖悄然溜走、时间在指缝间悄然流逝
 
 全中文写，不要掺杂英文单词或英文标点。`;
 
+export const CONCEPT_FIDELITY_CORE = `【灵感优先铁律 —— 高于一切网文套路，先读完再构思】
+1. 用户「灵感想法」是本作唯一真相来源。灵感里写明的身份、穿越方式、有无家人、开局处境、金手指、时代背景，必须原样执行，不得改写成网文默认模板。
+2. 灵感没写的设定可以补世界观与后遇配角，但严禁擅自套用：魂穿进原身、占据他人身体、原身是世家废物嫡子/庶子、开局被族人嘲讽退婚打脸、灵感未提却塞系统。
+3. 灵感写了「没有/并非/不要」的内容，方案里必须保持没有。
+4. 「身穿」= 现代人的肉体直接出现在异世界，仍是本人的身体与外貌；异世界没有「原身」，没有可继承的原身身份与原身家族。「魂穿」= 灵魂进入另一个已存在之人的身体，会继承那人的家人、身份、记忆。二者完全不同。灵感写身穿时严禁写成魂穿/夺舍/附身/穿越到某某身上。
+5. 灵感说没有家人：主角开局孤身一人，早期关系只能来自后遇的路人/雇主/同门/旅伴，不得编造血缘家族作为开局身份。别人可以有家族，那不是主角的家。`;
+
+const BODY_TRANS_RE = /身穿|肉身穿越|肉体穿越|带着?(自己的)?(身体|肉身)穿越|整个人穿越|本体穿越/;
+const SOUL_TRANS_RE = /魂穿|夺舍|附身/;
+const NO_FAMILY_RE = /没(有)?家人|无家人|没有亲人|没亲人|无亲无故|没有父母|无父无母|没(有)?家族|孤身一人|独自一人|没有血缘|无依无靠/;
+const SOUL_TROPE_RE = /魂穿|夺舍|附身|穿越到.{0,12}身上|占据.{0,10}(身体|身躯|肉身)|寄宿.{0,8}体内|原身(是|乃|的记忆|的身份|的家人|家族)/;
+const FAMILY_TROPE_RE = /家族(嫡子|庶子|弃子|废物|少主|少爷|子弟)|废物(嫡子|少主|少爷)|世家(嫡子|废物|子弟)|退婚|族中废物|(父亲|爷爷|祖父)(是|乃|为)族长/;
+
+export function analyzeConceptConstraints(concept = '') {
+  const t = String(concept || '');
+  const bodyTransmigration = BODY_TRANS_RE.test(t);
+  const soulTransmigration = SOUL_TRANS_RE.test(t) && !bodyTransmigration;
+  return {
+    bodyTransmigration,
+    soulTransmigration,
+    noFamily: NO_FAMILY_RE.test(t),
+    modernPerson: /现代人/.test(t),
+    accidentalDeath: /意外死亡|死后|死亡后/.test(t)
+  };
+}
+
+export function buildConceptFidelityRule(concept = '') {
+  const t = String(concept || '').trim();
+  const safeT = escapePromptInput(t);
+  const flags = analyzeConceptConstraints(t);
+  const extra = [];
+  if (flags.bodyTransmigration) {
+    extra.push('【穿越方式锁定：身穿】主角必须以本人肉体直接出现在异世界，保留现代人外貌与身体。严禁魂穿、夺舍、附身、穿越到某某身上、继承原身记忆/身份/家族。异世界开局时这个人此前不存在于该世界，没有原配家人。');
+  }
+  if (flags.noFamily) {
+    extra.push('【家人设定锁定：没有家人】主角开局是孤身一人。主角 background/faction 不得写成某家族嫡子、庶子、废物少主、父母族长。可以后遇师友雇主，不得编造血缘至亲作为开局身份。');
+  }
+  if (flags.modernPerson) {
+    extra.push('【主角身份锁定：现代人】主角本尊是现代人，穿越后仍是这个现代人，只是环境换成了异世界。不要改成异世界土著少爷。');
+  }
+  const header = `【用户灵感原文 —— 必须逐字遵守，不得稀释】\n${safeT || '（空）'}\n`;
+  return header + CONCEPT_FIDELITY_CORE + (extra.length ? `\n${extra.join('\n')}` : '');
+}
+
+function planTextBlob(plan) {
+  if (!plan || typeof plan !== 'object') return { all: '', protag: '' };
+  const chars = Array.isArray(plan.characters) ? plan.characters : [];
+  const protagonist = chars.find((c) => /主角/.test(String(c.role_type || ''))) || chars[0] || {};
+  const protag = [protagonist.name, protagonist.background, protagonist.description, protagonist.faction, protagonist.personality, protagonist.ability].filter(Boolean).join(' ');
+  const chapters = Array.isArray(plan.chapters) ? plan.chapters : [];
+  const all = [
+    plan.title, plan.world_view, plan.outline,
+    chars.map((c) => [c.name, c.background, c.description, c.faction].filter(Boolean).join(' ')).join('\n'),
+    chapters.slice(0, 8).map((c) => `${c.title || ''} ${c.summary || ''}`).join('\n')
+  ].join('\n');
+  return { all, protag };
+}
+
+export function detectConceptViolations(concept, plan) {
+  const flags = analyzeConceptConstraints(concept);
+  const { all, protag } = planTextBlob(plan);
+  const issues = [];
+  if (flags.bodyTransmigration && SOUL_TROPE_RE.test(all)) {
+    issues.push('灵感是身穿，方案写成了魂穿/夺舍/穿越到他人身上/继承原身');
+  }
+  if (flags.noFamily && FAMILY_TROPE_RE.test(protag)) {
+    issues.push('灵感说没有家人，主角却被写成某家族嫡子/废物少主');
+  }
+  if (flags.noFamily && flags.bodyTransmigration && /穿越到.{0,8}(家|族).{0,6}(身上|体内|嫡子|废物)/.test(all)) {
+    issues.push('灵感是身穿且没家人，方案仍写成穿越进某家族原身');
+  }
+  return issues;
+}
+
 export const NOVEL_PLAN_SYSTEM = `你是一位资深中文小说创作主编，擅长宏大世界观构建、多线剧情编织与立体人物塑造。请根据用户提供的灵感与要求，输出一份完整、专业的小说创作方案。
+
+${CONCEPT_FIDELITY_CORE}
 
 【世界观构建要求 —— 扎实、立体、可生长】
 1. 核心规则：明确本作独有的核心设定与规则体系，如超自然规则、科技水平、社会等级等，每级/每层的特征与门槛。规则来源要有逻辑，体系要有上限和代价。
@@ -145,6 +230,8 @@ export const NOVEL_PLAN_SYSTEM = `你是一位资深中文小说创作主编，�
 
 // 分阶段方案生成·第一阶段：作品骨架（不含章节规划，保持输出轻量稳定，避免长章节列表截断）
 export const PLAN_SKELETON_SYSTEM = `你是一位资深中文小说创作主编。请根据用户提供的灵感与要求，输出小说的核心设定。
+
+${CONCEPT_FIDELITY_CORE}
 
 【书名铁律 —— 先想书名，再构思其他】
 - 书名必须贴合所选题材气质、有辨识度、有记忆点，严禁与烂大街套路重名（如"xxx之都市至尊""惊悚：xxxx""开局xxxx"等）。
@@ -209,6 +296,10 @@ export const PLAN_SKELETON_SYSTEM = `你是一位资深中文小说创作主编�
 // 分阶段方案生成·第二阶段：章节规划。每次只生成一段章节，保持输出可解析
 export const PLAN_CHAPTERS_SYSTEM = `你是一位中文小说剧情规划师，擅长设计有节奏感的章节序列。请根据作品骨架，规划指定编号范围的章节。
 
+【灵感与开局身份 —— 必须遵守】
+- 第一章必须按骨架里的主角身份开写。若骨架是现代人身穿、孤身落入异世界，开篇就是这个现代人带着自己的身体出现，严禁改成「穿越到某某身上」「醒来发现自己成了某家族废物」。
+- 章节概要不得给「没有家人」的主角补父母族人嫡系血脉，早期人际关系只能后遇，不能开局就有家族内斗。
+
 【章节规划要求】
 1. 每一章给出自然、不套路的章节标题，以及 1-2 句剧情概要，概要要具体到人物与事件——谁做了什么、遇到什么。
 2. 严格按照要求的起始章节号到结束章节号输出，不得遗漏或重复；这是整部小说的第 N 章，需承接之前的剧情进展。
@@ -244,6 +335,9 @@ export const PLAN_CHAPTERS_SYSTEM = `你是一位中文小说剧情规划师，�
 // 方案修订专用 system：注入"不可变锚点"约束防止 AI 擅自改角色名/换主线
 export const PLAN_REVISE_SYSTEM = `你是中文小说创作主编。用户已有一份创作方案，请你按用户的修改意见对其进行修订。修订必须严格遵循以下锚点规则，避免方案记忆错乱：
 
+${CONCEPT_FIDELITY_CORE}
+修订时：灵感写身穿就不得改成魂穿；灵感写没家人就不得给主角补家族，除非用户本次意见明确要求改这些。
+
 【强制锚点 —— 严禁擅改】
 1. 当前列表中的角色名（含 role_type）MUST 保持不变，除非用户反馈中明确指明替换/删除该角色。AI 自行调整角色名属严重错误。
 2. 当前列表中的章节标题 MUST 保持不变，除非用户反馈明确提及该章应改名/拆分/合并。
@@ -273,6 +367,16 @@ ${ANTI_AI_STYLE}
 - 拒绝"NPC 旁白"：不要用"她这才意识到，眼前的人就是当年救过他的那个少年"这种把线索掰碎了喂到嘴边的句子。线索给出画面就行——"她看清他耳后那道疤"，剩下的让读者自己拼。
 - 拒绝"满配描写"：一场戏开头不需交代天色/温度/陈设/衣着四件套。真人开头张嘴就说话、抬脚就走路。环境细节只在角色注意到它时才写——天为什么凉？因为他在发抖。
 - 拒绝"清单式动作流"：不要"他推开门。走进屋里。放下包。坐下。端起水杯。"真人只挑一个关键动作写——"他把包摔在桌上，一屁股坐下"，中间全是读者会自己补的空。
+- 拒绝"形容词堆叠"：不写"目光深邃而悠远""声音低沉而富有磁性"。一个具体的细节比三个形容词更有力——"他说话时总爱用指甲敲桌面"比"他性格沉稳内敛"有血有肉。
+- 拒绝"情绪标签化"：不写"他愤怒了""她感到一阵委屈"。让身体说话——"他把筷子往桌上一拍""她别过脸，半天没出声"。情绪越不挑明，读者越觉得真。
+- 拒绝"对话修饰语堆叠"：对话标签绝大多数就是"他说""她说"，偶尔加一个动作——"他说着点了根烟"。不要每句都"他冷笑道""她苦涩地微笑着说""他语气沉重地道"。
+- 拒绝"心理活动长篇"：不要整段内心独白。心理活动零敲碎打穿插在动作和对话之间，一次一个短念头，角色不会在心里写分析报告。
+- 拒绝"句式重复"：连续三句以上不用相同句式，连续三句以上不以相同字开头。高潮用短句砸，舒缓用长句拉。
+- 拒绝"副词堆砌"：删去多余的"非常/十分/特别/极其"，用更精准的动词替代。"他非常生气"→"他把手里的杯子捏碎了"。
+- 拒绝"空泛搭配"：不写"深邃的目光""沉重的步伐""温暖的笑容"，用具体细节替代——"他眼睛下面青了一圈""拖着左腿往外走""笑起来露一颗虎牙"。
+- 拒绝"时间套话"：不写"时间仿佛静止了""仿佛一切都不曾发生""时间一分一秒地过去"，用具体细节传递时间流逝——"茶凉了""窗外的天从黑转灰"。
+- 拒绝"场景无锚点"：每个场景先建立空间感——在哪里、什么时间、光线/温度/声音/气味，用1-2个感官细节把读者放进场景，然后再让角色动起来。
+- 拒绝"收尾升华"：不写"这一天注定改变了一切""他不知道，这只是开始"式总结，故事自己会说话，让读者自己感受。
 - 拒绝"高级感词缀堆砌"：不写"目光深邃而悠远""声音低沉而富有磁性""背影高大而孤寂"。专有名词、能闻能摸的细节，永远比形容词叠罗汉真实。一个"脏话连天的木匠"比"气质沉稳内敛的中年男子"有血有肉。
 - 允许口水话与破绽：真人会写"手机没电了，靠。"会写"他想起昨天吃的锅包肉。"会接不上上一句突然插一个新念头。这种"毛边"才是人的体温。别把每句话都修成广告语。
 - 情绪宁可欠着写，不要写满：把"他心里很不是滋味"改成"他往嘴里塞了口饭，嚼了很久"。把"她感动极了"改成"她别过脸，半天没说话"。
@@ -502,7 +606,8 @@ const GENRE_GUIDE_XIANXIA = `【玄幻/仙侠/修真类型写作指南 —— �
 const GENRE_GUIDE_REBIRTH = `【重生/穿越类型写作指南 —— 本指南仅适用于重生/穿越/架空历史题材】
 58. 重生者的"信息差"要合理利用：主角重生后带回来的记忆是最大优势，但优势有限——重大历史事件可以预知，但日常细节（某个人说了什么话、某个东西放在哪里）不可能全记得。不写"他记得上一世所有人都对他做了什么"——写"他记得那场大雨，记得粮仓被淹的惨状，但记不清具体是哪一天下的雨。他只能提前半个月开始囤粮，赌老天爷给不给面子"。
 59. 穿越者的"现代知识"要有边界：穿越者带去的现代知识（造纸、制玻璃、火药、肥皂）不能一蹴而就。每个技术发明都要写"尝试→失败→改进→成功"的完整过程。不写"他用现代方法造出了玻璃"——写"他让工匠烧了第三窑，出来的还是绿色浑浊的玻璃块。他蹲在窑口想了半天，才想起来是不是原料里的铁含量太高了——得加二氧化锰脱色，但他不知道二氧化锰在哪找"。
-60. 蝴蝶效应：主角的每次行动都会改变原历史走向。不能写了"主角替代了某人的位置"之后，其他人还按原剧情走。主角每做一件事，都要写周围人因为这件事产生的连锁反应。主角的优势会随着时间推移逐渐减弱——历史变了，他的记忆就不准了。`;
+60. 蝴蝶效应：主角的每次行动都会改变原历史走向。不能写了"主角替代了某人的位置"之后，其他人还按原剧情走。主角每做一件事，都要写周围人因为这件事产生的连锁反应。主角的优势会随着时间推移逐渐减弱——历史变了，他的记忆就不准了。
+60b. 身穿与魂穿必须按灵感区分：灵感写身穿时，主角带着自己的身体进入异世界，开局没有原身、没有原身家族、不是废物嫡子；灵感写魂穿/重生到某人身上时，才继承那人的身份与家人。严禁把身穿默认写成魂穿进世家废物。`;
 
 const GENRE_GUIDE_SYSTEM = `【系统流/无限流/数据流类型写作指南 —— 本指南仅适用于系统流/无限流/数据流/第四天灾题材】
 61. 系统要有"规则感"：系统不是万能许愿机。每个系统功能都要有明确的触发条件、使用限制、冷却时间、消耗代价。不写"系统奖励了他一把神剑"——写"系统提示：主线任务'击杀血狼王'完成。奖励：血狼王之刃（紫色品质），攻击+85，特效：对狼族生物伤害+30%。他打开背包看了一眼，把剑装备上，顺手把旧的白板剑分解成了材料"。
@@ -748,7 +853,18 @@ export const POLISH_SYSTEM = `你是一位要求苛刻的中文小说编辑，�
 4. 贴近中文小说的自然文风，读起来像真人作家一口气写下来的。
 5. 直接输出改写后的正文，不要任何解释、说明或前后缀。
 6. 标点自然：连贯动作/心理描写用逗号衔接，不要句号切成碎片；对话标点使用标准格式。省略号只用"……"，分号尽量不用。
-7. 禁止掺杂英文：全文必须纯中文写作，不得出现任何英文单词、短语、句子或中英混写。角色的对话、心理活动、旁白叙述全部使用中文。英文专有名词（品牌名、产品名、技术术语等）应使用中文译名；角色名、地名等专有名词若原文为英文，须保持原文，但其余正文必须全部为中文。`;
+7. 禁止掺杂英文：全文必须纯中文写作，不得出现任何英文单词、短语、句子或中英混写。角色的对话、心理活动、旁白叙述全部使用中文。英文专有名词（品牌名、产品名、技术术语等）应使用中文译名；角色名、地名等专有名词若原文为英文，须保持原文，但其余正文必须全部为中文。
+8. 句式多样化：避免连续三句以上使用相同句式结构（如"他X了，他Y了，他Z了"），避免连续三句以上以相同字开头。
+9. 副词克制：删去多余的"非常/十分/特别/极其/异常/相当"等程度副词，用更精准的动词和细节替代。
+10. 空泛形容词替换：将"深邃的目光""沉重的步伐""温暖的笑容"等AI高频搭配替换为具体、独特的细节描写。
+11. 对话自然化：减少对话中的省略号和修饰语，让角色说话更干脆，像真人日常对话。
+12. 段落节奏：长短段落交替，重要时刻用短段制造冲击，日常叙述用自然中长段，避免通篇碎片化或通篇长段。
+13. 心理活动克制：不要大段内心独白，心理活动零敲碎打穿插在动作和对话之间，一次一个短念头。
+14. 情绪外化：不写"他愤怒了""她感到委屈"，用动作和身体反应传递情绪——摔东西、沉默、声音变低、别过脸。
+15. 叙述留白：跳过读者能补的中间步骤，不把每帧动作都拍一遍，让读者自己脑补。
+16. 口语化停顿：允许"就是那个……咳，算了"这类口语疙瘩，对话不是写演讲稿。
+17. 场景锚定：每个场景先建立空间感（在哪里、什么时间、光线/温度/声音/气味），用1-2个感官细节把读者放进场景。
+18. 收尾不升华：不写"这一天注定改变了一切"式总结，故事自己会说话。`;
 
 export const REVISE_CHAPTER_SYSTEM = `你是一位资深中文小说编辑，负责按照作者的修改要求精准改写章节。
 
@@ -925,6 +1041,12 @@ export const AI_DETECT_SYSTEM = `你是反 AI 味审查员，检测标准严苛�
 17. 对话标点错误：动作与对话的标点连接不规范（如""走吧。"他说。站起身。"这种在对话标签后又用句号切开动作），应为""走吧，"他说着站起身。"；分号滥用（全文 6 处以上"；"应改逗号）
 18. 模糊量词堆叠：「一丝/一抹/一股/一阵/一缕」这类模糊量词全文超过每千字 3 处（如"一丝不安、一丝疑虑、一丝笑意、一丝苦涩"连环出现），是 AI 垫描写的标志性拐杖。真人只在最有效的一两处使用，其余直接白描
 19. 近距离重复用词：同一个双字词在相邻几段内反复出现（300 字内 3 次以上），如连续用"灯火"写夜景、连续用"皱纹"写老人。真人会换近义表达或干脆删减，同词近距离高频复现是机械感的直接来源
+20. 程度副词堆砌：全文"非常/十分/特别/极其/异常/相当/格外/越发/更加"等程度副词超过每千字 4 处，AI 爱用程度副词堆砌，真人用词更克制
+21. 空泛形容词套用："深邃的目光""沉重的步伐""温暖的笑容""冰冷的语气""锐利的目光"等AI高频搭配全文出现 4 种以上，真人描写更具体更个人化
+22. 时间套话："时间仿佛静止了""仿佛一切都不曾发生""时间一分一秒地过去"等空话套话，用具体细节传递时间流逝
+23. 场景元素错位：医院场景出现殡仪馆元素（监护仪出现在太平间），或殡仪馆场景出现医院设备，且无转运/回忆等合理交代
+24. 角色行为违背常理：普通人做出超能力行为、重伤后若无其事、活人出现在不该出现的地方（太平间冷藏室）且无合理解释
+25. 对话修饰语堆叠：每句对话都带"他冷笑道""她苦涩地微笑着说"，真人对话标签绝大多数就是"他说""她说"
 
 评分标准（严格）：
 - 0-10：接近真人手笔
@@ -937,7 +1059,7 @@ export const AI_DETECT_SYSTEM = `你是反 AI 味审查员，检测标准严苛�
   "score": 0-100 的 AI 味严重程度,
   "issues": [
     {
-      "category": "从上述 17 类中选择最贴切的一类",
+      "category": "从上述类别中选择最贴切的一类",
       "quote": "从原文逐字截取的句段，必须能在原文中找到，30字以内",
       "problem": "具体是什么问题",
       "suggestion": "如何改写"
@@ -1626,6 +1748,9 @@ export const CHAPTER_BEAT_SYSTEM = `你是中文小说场景设计师。请将�
 - 最后一个 beat 要留出向下一章的钩子或悬念（一句未完成的对话、一个异常发现、一个转身的陌生人）
 - 每个 beat 都必须有 1 个可写的视觉/感官锚点，避免空泛地写"他们聊天、他们移动"
 - 对话不能只是交代信息，要标注对话的潜台词方向（如"嘴上劝阻，手上却替他收拾行李"）
+- 场景地点必须与剧情逻辑一致：医院场景不应出现殡仪馆元素，殡仪馆场景不应出现医院设备
+- 时间必须递进：同一章内的时间不可倒流（如先写凌晨三点后写凌晨两点）
+- 角色行为必须符合常理：普通人不能做出超能力行为，重伤后不能若无其事
 
 只输出 JSON 数组，不要其他文字`;
 
@@ -1659,6 +1784,9 @@ export const WRITING_QUALITY_SYSTEM = `你是资深中文小说编辑。请对�
 3. 句式多样性：长短句是否搭配，是否有节奏感
 4. 描写生动性：环境、动作、心理描写是否具体可感，是否有画面感
 5. 对话自然度：对话是否符合人物身份，是否自然
+6. 情感表达：情绪是否通过动作和细节外化，而非直接标签化
+7. 场景构建：每个场景是否有空间感和感官锚点
+8. 段落节奏：长短段落是否交替，是否有呼吸感
 
 对每个明显低于 7 分的维度，必须给出「引用级」的具体问题与改写方向，而不是泛泛而谈。
 
@@ -1669,6 +1797,9 @@ export const WRITING_QUALITY_SYSTEM = `你是资深中文小说编辑。请对�
   "sentence": {"score": 0, "issues": [], "suggestions": []},
   "description": {"score": 0, "issues": [], "suggestions": []},
   "dialogue": {"score": 0, "issues": [], "suggestions": []},
+  "emotion": {"score": 0, "issues": [], "suggestions": []},
+  "scene": {"score": 0, "issues": [], "suggestions": []},
+  "pace": {"score": 0, "issues": [], "suggestions": []},
   "overall": {"score": 0, "weaknesses": ["主要短板（写清"哪个维度差在哪"，如"描写空泛：通篇形容词堆砌，无具体动作与感官"）"], "strengths": ["主要亮点"]}
 }
 

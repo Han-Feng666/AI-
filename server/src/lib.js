@@ -719,6 +719,9 @@ export function scanAiPatterns(text) {
   hits.push(...scanDialogueEllipsis(text));
   hits.push(...scanQuantifierStack(text));
   hits.push(...scanNearbyRepeat(text));
+  hits.push(...scanClauseMonotony(text));
+  hits.push(...scanAdverbStack(text));
+  hits.push(...scanEmptyAdjective(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -744,6 +747,93 @@ export function scanDialogueEllipsis(text) {
   const ratio = withEll / dialogues.length;
   if (ratio >= 0.35) {
     hits.push({ word: `对话省略号过密(${withEll}/${dialogues.length} 句对话带"……"(${Math.round(ratio * 100)}%)，AI 让角色频繁用省略号表示欲言又止/沉默，真人只在关键处用。删去大部分省略号，让停顿由内容和场景带出)`, count: withEll, template: true });
+  }
+  return hits;
+}
+
+// 句式单调检测：连续多句使用相同句式结构（如"他X了，他Y了，他Z了"），AI 标志性写法
+export function scanClauseMonotony(text) {
+  const s = String(text || '');
+  if (s.length < 1000) return [];
+  const hits = [];
+  const sentences = s.split(/[。！？\n]+/).map(x => x.trim()).filter(x => x.length > 3);
+  if (sentences.length < 6) return hits;
+  // 检测"X了Y了Z了"句式
+  let lianxuLe = 0;
+  for (const sent of sentences) {
+    const leCount = (sent.match(/了/g) || []).length;
+    if (leCount >= 3 && sent.length / leCount < 8) lianxuLe++;
+  }
+  if (lianxuLe >= 4) {
+    hits.push({ word: `句式单调("…了…了…了"连续${lianxuLe}句，AI 标志性句式重复，真人句式长短错落)`, count: lianxuLe, template: true });
+  }
+  // 检测"他/她+动词"连续开头
+  let sameStart = 1, bestStart = 1;
+  for (let i = 1; i < sentences.length; i++) {
+    const prev = sentences[i - 1].slice(0, 2);
+    const curr = sentences[i].slice(0, 2);
+    if (prev === curr && /^[他她它那这]/.test(prev)) {
+      sameStart++;
+      bestStart = Math.max(bestStart, sameStart);
+    } else {
+      sameStart = 1;
+    }
+  }
+  if (bestStart >= 5) {
+    hits.push({ word: `句式单调(连续${bestStart}句以相同字开头，AI 标志性句式重复，真人句式多样)`, count: bestStart, template: true });
+  }
+  return hits;
+}
+
+// 副词堆叠检测：AI 爱用"非常/十分/特别/极其/异常/相当"等程度副词堆砌，真人用得更少
+export function scanAdverbStack(text) {
+  const s = String(text || '');
+  if (s.length < 1500) return [];
+  const hits = [];
+  const adverbs = ['非常', '十分', '特别', '极其', '异常', '相当', '格外', '越发', '更加', '最为', '极度', '超', '太', '很'];
+  let total = 0;
+  const parts = [];
+  for (const adv of adverbs) {
+    let count = 0;
+    let from = 0;
+    while ((from = s.indexOf(adv, from)) !== -1) { count++; from += adv.length; }
+    if (count >= 3) { total += count; parts.push(`${adv}×${count}`); }
+  }
+  const perK = (total / s.length) * 1000;
+  if (total >= 10 && perK > 4) {
+    hits.push({ word: `程度副词堆砌(${parts.join('、')}，每千字${perK.toFixed(1)}处；AI 爱用程度副词堆砌，真人用词更克制。删去大半，只留关键处)`, count: total, template: true });
+  }
+  return hits;
+}
+
+// 空泛形容词检测：AI 爱写"深邃的目光""沉重的步伐""温暖的笑容"等空套搭配
+export function scanEmptyAdjective(text) {
+  const s = String(text || '');
+  if (s.length < 1000) return [];
+  const hits = [];
+  const emptyPairs = [
+    /深邃的?(目光|眼神|眼眸|眼睛)/, /沉重的?(步伐|脚步|心情|叹気)/,
+    /温暖的?(笑容|阳光|怀抱|目光|话语)/, /冰冷的?(目光|语气|空气|手指)/,
+    /锐利的?(目光|眼神|视线)/, /迷茫的?(目光|眼神|表情)/,
+    /沧桑的?(面容|脸庞|眼神|背影)/, /瘦削的?(身影|脸庞|肩膀)/,
+    /高大?的?(身影|背影|男人|身躯)/, /柔软的?(长发|发丝|身体)/,
+    /明亮?的?(眼睛|目光|眼眸)/, /颤抖的?(声音|手指|身体|肩膀)/,
+    /沙哑的?(声音|嗓音|语气)/, /低沉的?(声音|嗓音|语气)/,
+    /急促的?(呼吸|脚步|心跳)/, /缓慢的?(步伐|动作|转身)/,
+    /轻轻?地?(叹|笑|说|摇头|点头|抚摸|推开|关上|放下)/,
+    /默默?地?(注视|看着|走|站|坐|流泪|承受|付出)/
+  ];
+  let total = 0;
+  const samples = [];
+  for (const re of emptyPairs) {
+    const m = s.match(re);
+    if (m) {
+      total++;
+      if (samples.length < 3) samples.push(m[0]);
+    }
+  }
+  if (total >= 4) {
+    hits.push({ word: `空泛形容词堆砌(套用"${samples.join('"、"')}…"等AI高频搭配共${total}种；真人描写更具体更个人化，不依赖这些空套搭配。替换为具体细节描写)`, count: total, template: true });
   }
   return hits;
 }
@@ -1017,15 +1107,15 @@ export function scanSceneElementMismatch(text) {
   const issues = [];
   const pairs = [
     {
-      scene: /(殡仪馆|灵堂|告别室|守灵|灵棚|挽联|寿衣店|纸扎铺)/,
-      alien: /(监护仪|心电图|点滴|输液管|住院部|查房|值班医生|门诊|挂号|手术台|无影灯|病床|查体|听诊器)/,
-      bridge: /(从医院|从病房|医院运来|转到|送来|抬来|回忆|想起|生前|住院那会儿|当时|昨天|前一天|救护车|运到|遗体|太平间)/,
+      scene: /(殡仪馆|灵堂|告别室|守灵|灵棚|挽联|寿衣店|纸扎铺|太平间|停尸房|火化炉|焚化炉)/,
+      alien: /(监护仪|心电图|点滴|输液管|住院部|查房|值班医生|门诊|挂号|手术台|无影灯|病床|查体|听诊器|护士站|急诊)/,
+      bridge: /(从医院|从病房|医院运来|转到|送来|抬来|回忆|想起|生前|住院那会儿|当时|昨天|前一天|救护车|运到|遗体|太平间|曾经|之前|以前|那时|转运|运送|拉来|接来)/,
       sceneName: '殡仪/丧仪场景', alienName: '医院元素'
     },
     {
-      scene: /(病房|住院|门诊|点滴)/,
-      alien: /(纸扎|寿衣|挽联|花圈|骨灰|灵位|道场|超度|经幡)/,
-      bridge: /(回忆|想起|生前|母亲|父亲|爷爷|奶奶|去世|老人提起|柜里|库房|旁边|隔壁|楼下|陪护|带来的)/,
+      scene: /(病房|住院|门诊|点滴|急诊|手术|ICU|重症监护|病危|病重)/,
+      alien: /(纸扎|寿衣|挽联|花圈|骨灰|灵位|道场|超度|经幡|灵堂|守灵|出殡|下葬|火化)/,
+      bridge: /(回忆|想起|生前|母亲|父亲|爷爷|奶奶|去世|老人提起|柜里|库房|旁边|隔壁|楼下|陪护|带来的|去世前|临终|遗嘱|告别|最后|最后时光|以前|从前|过去)/,
       sceneName: '医院场景', alienName: '丧仪元素'
     }
   ];

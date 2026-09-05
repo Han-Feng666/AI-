@@ -28,6 +28,7 @@ import {
 } from './model_router.js';
 import {
   NOVEL_PLAN_SYSTEM, PLAN_SKELETON_SYSTEM, PLAN_CHAPTERS_SYSTEM, PLAN_REVISE_SYSTEM,
+  buildConceptFidelityRule, detectConceptViolations,
   CHAPTER_SYSTEM, CHAPTER_TITLE_SYSTEM,
   CHAPTER_SUMMARY_SYSTEM, POLISH_SYSTEM, STYLE_ANALYZE_SYSTEM,
   CHAT_SYSTEM, COMPRESS_SYSTEM, COMPRESS_UPDATE_SYSTEM,
@@ -143,16 +144,20 @@ function startSSE(req, res) {
   // keepalive：每 15 秒发心跳注释，防止前端 idle 超时误杀长耗时任务
   keepaliveTimer = setInterval(() => {
     if (!finished && !res.writableEnded && !res.destroyed) {
-      try { res.write(`:keepalive\n\n`); } catch { ctrl.abort(); }
+      try { res.write(`:keepalive\n\n`); } catch { 
+        // 写入失败说明连接已断开，清理定时器并 abort
+        stopKeepalive();
+        ctrl.abort();
+      }
     }
   }, 15000);
   return { ctrl, send, end };
 }
 
 // ---------- AI 味检测与质量门（铁律模式） ----------
-const AI_SCORE_PASS_DEFAULT = 15; // 达标阈值（原 20，进一步调严）：该分以下视为合格的人类文风
-const AI_MAX_ROUNDS = 3;  // 质量门最多迭代轮数
-const MAX_AUTO_REGENERATE = 2; // 整章重生成最多额外重试次数（共生成 1+2=3 版）
+const AI_SCORE_PASS_DEFAULT = 10; // 达标阈值（进一步调严）：该分以下视为合格的人类文风
+const AI_MAX_ROUNDS = 4;  // 质量门最多迭代轮数（增加一轮）
+const MAX_AUTO_REGENERATE = 3; // 整章重生成最多额外重试次数（共生成 1+3=4 版）
 
 // 质量门评分阈值（可配置，设置页 ai_score_pass 覆盖默认值）
 function aiScorePass() {
@@ -453,9 +458,20 @@ async function analyzeChunksRateLimited({ config, ctrl, chunks, buildUserMessage
               maxTokens: 1500,
               streamIdleTimeout: 600000
             });
-            totalDone++;
-            report();
-            return r ? extractJson(r.content) : null;
+            if (r?.content) {
+              const parsed = extractJson(r.content);
+              if (parsed) {
+                totalDone++;
+                report();
+                return parsed;
+              }
+              // JSON 解析失败，还有重试次数则重试
+              if (attempt < 4) {
+                sse.send({ type: 'status', message: `分析返回格式异常，正在重试（第 ${attempt} 次）…` });
+                continue;
+              }
+            }
+            return null;
           } catch (e) {
             if (ctrl?.signal?.aborted) throw new Error('AbortError');
             if (isRateLimitError(e) && attempt < 4) {
@@ -539,16 +555,27 @@ async function synthesizeWithRateLimit({ config, ctrl, system, user, sse }) {
   throw new Error('综合合成请求多次失败，请稍后重试或检查模型状态。');
 }
 
-/** 全文分块：最多 50 块，每块至少 50K 字，超大文本自动增大块大小 */
+/** 全文分块：最多 80 块，每块至少 15K 字，超大文本自动增大块大小 */
 function chunkWholeText(text) {
-  const maxChunks = 50;
-  const minChunkSize = 50000;
+  const maxChunks = 80;
+  const minChunkSize = 15000;
   const chunkSize = Math.max(minChunkSize, Math.ceil(text.length / maxChunks));
   const chunks = [];
   for (let i = 0; i < text.length; i += chunkSize) {
     chunks.push(text.slice(i, i + chunkSize));
   }
   return chunks;
+}
+
+/** 安全截断文本，避免截断 UTF-8 多字节字符 */
+function safeTruncateUtf8(text, maxBytes) {
+  if (!text) return '';
+  const buf = Buffer.from(text, 'utf-8');
+  if (buf.length <= maxBytes) return text;
+  let end = maxBytes;
+  // 避免截断在多字节 UTF-8 字符中间：回退到字符边界
+  while (end > 0 && (buf[end] & 0xC0) === 0x80) end--;
+  return buf.slice(0, end).toString('utf-8');
 }
 
 /** 管线事件适配器：把内部 sse.send 事件分发给 onProgress/onStatus/onDelta 回调 */
@@ -785,6 +812,7 @@ async function tagSlicesRateLimited({ config, ctrl, slices, sse }) {
     if (ctrl?.signal?.aborted) break;
     const batch = slices.slice(i, i + BATCH);
     const user = batch.map((s, j) => `[片段${j}]（${s.text.length} 字）\n${s.text.slice(0, 1200)}`).join('\n\n');
+    let batchTagged = 0;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         await rateLimitAcquire(ctrl?.signal);
@@ -801,14 +829,8 @@ async function tagSlicesRateLimited({ config, ctrl, slices, sse }) {
               ? item.scene_tags.map((t) => String(t).trim()).filter((t) => SCENE_TAGS.includes(t)).slice(0, 3)
               : [];
             batch[idx].scene_tags = tags.length ? tags : preClassify(batch[idx].text);
-            tagged++;
+            batchTagged++;
           }
-          // 未被返回的片用规则预分类兜底
-          for (const s of batch) {
-            if (!s.scene_tags) { s.scene_tags = preClassify(s.text); tagged++; }
-          }
-        } else {
-          for (const s of batch) { if (!s.scene_tags) { s.scene_tags = preClassify(s.text); } failed++; }
         }
         break;
       } catch (e) {
@@ -818,8 +840,16 @@ async function tagSlicesRateLimited({ config, ctrl, slices, sse }) {
           sse?.send?.({ type: 'status', message: `打标触发限流，降低速率后重试（第 ${attempt} 次）…` });
           continue;
         }
-        for (const s of batch) { if (!s.scene_tags) { s.scene_tags = preClassify(s.text); } failed++; }
         break;
+      }
+    }
+    // 统计本批结果
+    for (const s of batch) {
+      if (s.scene_tags && s.scene_tags.length) {
+        tagged++;
+      } else {
+        s.scene_tags = preClassify(s.text);
+        failed++;
       }
     }
     if (slices.length > BATCH) {
@@ -951,18 +981,27 @@ function longestCommonSubstring(a, b) {
   const aa = String(a || '');
   const bb = String(b || '');
   const n = aa.length, m = bb.length;
-  let best = '', dp = new Array(n + 1).fill(0).map(() => new Array(m + 1).fill(0));
+  if (!n || !m) return '';
+  // 滚动数组 DP，内存 O(min(n,m))，避免大文本时 OOM
+  if (m > n) return longestCommonSubstring(b, a);
+  let prev = new Uint32Array(m + 1);
+  let cur = new Uint32Array(m + 1);
+  let bestLen = 0, bestEnd = 0;
   for (let i = 1; i <= n; i++) {
+    cur.fill(0);
+    const ai = aa[i - 1];
     for (let j = 1; j <= m; j++) {
-      if (aa[i - 1] === bb[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-        if (dp[i][j] > best.length) {
-          best = aa.slice(i - dp[i][j], i);
+      if (ai === bb[j - 1]) {
+        cur[j] = prev[j - 1] + 1;
+        if (cur[j] > bestLen) {
+          bestLen = cur[j];
+          bestEnd = i;
         }
       }
     }
+    const tmp = prev; prev = cur; cur = tmp;
   }
-  return best;
+  return aa.slice(bestEnd - bestLen, bestEnd);
 }
 
 // 标题是否为"第一章/第2章"式占位（未真正生成标题）
@@ -1731,7 +1770,11 @@ router.post('/novels/:id/plan', async (req, res) => {
     ? stylePresets.map((s) => String(s).trim()).filter(Boolean)
     : parseStylePresets(novel);
 
-const userPrompt = `用户的灵感想法：${concept || novel.concept || ''}
+const conceptText = concept || novel.concept || '';
+const conceptRule = buildConceptFidelityRule(conceptText);
+const userPrompt = `${conceptRule}
+
+【方案参数】
  类型：${genre || novel.genre || '不限（请根据内容判断）'}
  创作风格：${presets.length ? presets.join('、') : '由你判断，选择适合该题材的风格基调'}
  计划章节数：${target} 章
@@ -1739,10 +1782,10 @@ const userPrompt = `用户的灵感想法：${concept || novel.concept || ''}
  ${protagonistName || novel.protagonist_name ? `\n男主角名字：${protagonistName || novel.protagonist_name}（方案中男主必须用这个名字）` : ''}
  ${heroineName || novel.heroine_name ? `\n女主角名字：${heroineName || novel.heroine_name}（方案中女主必须用这个名字）` : ''}
  ${referenceNotes ? `\n同类小说参考（借鉴其题材套路与节奏，但不要抄袭情节）：\n${referenceNotes}` : ''}
-  
+   
 【题材边界强调】所选类型为：${genre || novel.genre || '未指定'}。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等超凡标签，则本书为现实向，力量体系只能是武功谋略，严禁把"学习/修炼"写成玄幻修仙境界（灵气、金丹、元婴、御剑等等一概禁止）；意外死亡穿越也不是获得超凡能力的理由。
  
-请输出创作方案骨架 JSON。`;
+ 请输出创作方案骨架 JSON。`;
 
   if (presets.length) {
     db.prepare('UPDATE novels SET style_presets = ? WHERE id = ?').run(presets.join(','), novel.id);
@@ -1923,7 +1966,7 @@ ${parts.join('\n\n')}
     const sysTokens = estimateTokens(sysContent);
     const budget = contextBudget(config);
     const trimmedSys = sysTokens > budget - estimateTokens(userPrompt) - 1024
-      ? sysContent.slice(0, Math.max(2000, Math.floor((budget - estimateTokens(userPrompt) - 1024) * 1.5)))
+      ? safeTruncateUtf8(sysContent, Math.max(2000, Math.floor((budget - estimateTokens(userPrompt) - 1024) * 1.5)))
       : sysContent;
     let skeleton = await jsonFrom(
       [
@@ -1934,6 +1977,30 @@ ${parts.join('\n\n')}
       skeletonMaxOut,
       { cap: skeletonMaxOut }
     );
+    // 概念忠实度校验：骨架若违反灵感（身穿写成魂穿 / 没家人写成家族废物），重试一次
+    if (skeleton) {
+      const violations = detectConceptViolations(conceptText, skeleton);
+      if (violations.length) {
+        send({ type: `status`, message: `骨架与灵感冲突：${violations.join('；')}，正在按灵感重生成…` });
+        const retryPrompt = userPrompt + `\n\n【强制修正】上一次骨架违反了灵感：${violations.join('；')}。请严格按灵感重写，主角必须是身穿且无家人，不得写魂穿/夺舍/原身/家族废物嫡子。`;
+        const retry = await jsonFrom(
+          [
+            { role: 'system', content: trimmedSys },
+            { role: 'user', content: retryPrompt }
+          ],
+          '正在按灵感重写骨架…',
+          skeletonMaxOut,
+          { cap: skeletonMaxOut }
+        );
+        if (retry) {
+          const retryViolations = detectConceptViolations(conceptText, retry);
+          if (retryViolations.length < violations.length) {
+            skeleton = retry;
+            send({ type: 'status', message: '骨架已按灵感修正。' });
+          }
+        }
+      }
+    }
     if (!skeleton) {
       // 骨架降级：基于用户输入生成基础骨架（临时书名，供占位，后续可用「修改方案」完善）
       send({ type: 'status', message: '骨架多次解析失败，已生成基础骨架（临时书名）…' });
@@ -1984,7 +2051,21 @@ ${parts.join('\n\n')}
         const batch = await jsonFrom(
           [
             { role: 'system', content: PLAN_CHAPTERS_SYSTEM },
-            { role: 'user', content: `作品骨架：\n${brief}\n\n计划章节数：${target} 章。\n请规划第 ${start} 至第 ${batchEnd} 章的标题与剧情概要（共 ${batchSize} 章），必须完整覆盖此编号范围。\n\n【当前规划所处全书阶段】\n本批覆盖第 ${start}-${batchEnd} 章，全书 ${target} 章，对应阶段：${chapterStageLabel(start, target)}。规划时应让剧情节奏符合该阶段（开篇直接抛出钩子、中期渐紧、高潮高密度、终局收束）。\n\n【前情（此前已规划的章节，剧情必须自然承接，不得与之重复或冲突）】\n${prevBlock || '（无，这是开头章节）'}\n\n第 ${start} 章紧接前情结尾继续推进。` }
+            { role: 'user', content: `${conceptRule}
+
+作品骨架：
+${brief}
+
+计划章节数：${target} 章。
+请规划第 ${start} 至第 ${batchEnd} 章的标题与剧情概要（共 ${batchSize} 章），必须完整覆盖此编号范围。
+
+【当前规划所处全书阶段】
+本批覆盖第 ${start}-${batchEnd} 章，全书 ${target} 章，对应阶段：${chapterStageLabel(start, target)}。规划时应让剧情节奏符合该阶段（开篇直接抛出钩子、中期渐紧、高潮高密度、终局收束）。
+
+【前情（此前已规划的章节，剧情必须自然承接，不得与之重复或冲突）】
+${prevBlock || '（无，这是开头章节）'}
+
+第 ${start} 章紧接前情结尾继续推进。` }
           ],
           `正在规划章节 ${start}-${batchEnd}（已完成 ${allChapters.length}/${target}）…`,
           chapterMaxOut
@@ -2052,7 +2133,7 @@ ${parts.join('\n\n')}
           const idx = batchStart + i + 1;
           beatsReq[idx] = { title: ch.title, summary: ch.summary, emotion: ch.emotion, arc_hint: ch.arc_hint, hook: ch.hook };
         });
-        batches.push({ batchStart, batchEnd, userContent: `作品骨架：\n${brief}\n\n请为第 ${batchStart + 1} 至第 ${batchEnd} 章生成细纲（场景级 beat），每章 3-6 个场景。\n\n各章信息：\n${JSON.stringify(beatsReq, null, 2)}` });
+         batches.push({ batchStart, batchEnd, userContent: `${conceptRule}\n\n作品骨架：\n${brief}\n\n请为第 ${batchStart + 1} 至第 ${batchEnd} 章生成细纲（场景级 beat），每章 3-6 个场景。\n\n各章信息：\n${JSON.stringify(beatsReq, null, 2)}` });
       }
       const runBatch = async (b) => {
         // 每批最多重试 2 次，失败不阻塞，正文创作时按大纲兜底
@@ -2138,11 +2219,13 @@ router.post('/novels/:id/plan/revise', async (req, res) => {
   const curChapters = getChapters(novel.id).map((c) => `第${c.chapter_index}章 ${c.title}`);
   const anchor = `\n\n【不可变锚点】\n当前角色名清单：${curChars.length ? curChars.join('、') : '（无）'}\n当前章节标题清单：${curChapters.length ? curChapters.join('；') : '（无）'}\n（用户未明确提及替换的角色名/章节标题 MUST 保持不变。）`;
 
-  const userPrompt = `以下是当前的小说创作方案：
+  const userPrompt = `${buildConceptFidelityRule(novel.concept || '')}
+
+以下是当前的小说创作方案：
 
 ${snapshot}${anchor}
 
-用户提出的修改意见（请据此修订；除用户明确指明的改动外，其他字段 MUST 保持原样，绝不让角色改名或主线错位）：
+用户提出的修改意见（请据此修订；除用户明确指出的改动外，其他字段 MUST 保持原样，绝不让角色改名或主线错位）：
 ${feedback}
 
 【题材边界提醒】本书类型为「${novel.genre || '未注明'}」。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等标签，则本书为现实向：世界观与角色的"修炼/能力"只能是武术、谋略、医术等现实可及的能力，严禁引入修炼境界、灵气、金丹、御剑、系统面板等玄幻修行元素。请仅依据用户意见修订，不要顺手把现实向设定改成玄幻修行。
@@ -3104,11 +3187,13 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 - 若上一章结尾主角正处在某个地点/某个动作中，本章开头就从这个地点/动作继续。`
       : '';
 
-const regenNote = mode === 'regenerate'
-      ? '\n【本章为重新生成——请基于剧情大纲和上一章结尾重新创作本章，严格遵循本章的剧情概要/场景规划/情绪基调/剧情线，确保与前文剧情一致，不得偏离既定故事走向】'
+    const regenNote = mode === 'regenerate'
+      ? (idx === 1
+        ? '\n【本章为重新生成——本章是全书第一章，请基于剧情大纲重新创作故事开篇，只写开篇引子/初始场景/主角登场，不得引入中后期剧情、势力、角色或冲突，不得从上一章结尾续写（因为前面没有任何章节）】'
+        : '\n【本章为重新生成——请基于剧情大纲和上一章结尾重新创作本章，严格遵循本章的剧情概要/场景规划/情绪基调/剧情线，确保与前文剧情一致，不得偏离既定故事走向】')
       : '';
     const ch1Note = idx === 1 && mode === 'regenerate'
-      ? '\n【重要：本章是全书第一章，必须从故事开头写起，只写开篇引子/初始场景/主角登场，禁止提前引入中后期剧情、势力、角色或冲突。大纲中的中后期内容全部跳过，不要提前使用】'
+      ? '' // 已在 regenNote 中处理
       : '';
 
     const userPrompt = `${context}
@@ -3185,6 +3270,10 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
         try {
           regenSysOpts = { ...chapterSysOpts, knowledgeBlock: formatKnowledgeBlock(knowledgeIds) };
         } catch { /* 保持原样 */ }
+      }
+      // 若上一版因"AI味/文笔生硬"被拒，强化首稿人味要求
+      if (isRegen && lastProblems.some((p) => /AI 味|文笔|生硬|不自然|套路|模板/.test(String(p.desc)))) {
+        regenSysOpts = { ...regenSysOpts, autoPolish: true };
       }
       // 自动续写：单次输出被 max_tokens 截断（finish_reason=length）或模型提前停止时继续往下写，直到达到目标字数
       for (let round = 0; round < 12; round++) {
@@ -3422,6 +3511,27 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
           const placeMatch = txt.match(publicPlace);
           if (!hasWitness.test(txt)) {
             behaviorIssues.push(`行为逻辑：角色在${placeMatch[0]}等公共场合使用超自然/暴力能力，但周围没有任何旁观者反应——公共场合发生异常事件，必须有围观/尖叫/报警等反应`);
+          }
+        }
+        // 角色做出违反物理规律的事（没有超凡设定的情况下）
+        const normalPerson = /普通人|凡人|常人|一般/;
+        const superpower = /飞起来|悬浮|穿墙|瞬移|隐身|掐诀|念咒|画符|施法/;
+        if (normalPerson.test(txt) && superpower.test(txt)) {
+          behaviorIssues.push('行为逻辑：角色被描述为普通人，却做出了违反物理规律的事（飞行/穿墙/瞬移等），需要交代能力来源或改为合理行为');
+        }
+        // 普通人做出专业的事（没有铺垫）
+        const amateur = /从未学过|第一次|新手|外行|普通人|不懂/;
+        const professional = /手术|开刀|诊断|处方|法律判决|审判|破解.{0,3}密码|解码|拆弹/;
+        if (amateur.test(txt) && professional.test(txt)) {
+          behaviorIssues.push('行为逻辑：角色是外行/新手，却做出了专业级的事（手术/诊断/解码等），需要交代学习过程或改为请教专业人士');
+        }
+        // 活人出现在不该出现的地方
+        const livingPerson = /他|她|主角|主人公/;
+        const weirdPlace = /太平间冷藏室|停尸房|火化炉|焚化炉|深埋|坟墓里|棺材里/;
+        if (weirdPlace.test(txt)) {
+          const hasExplanation = /梦|回忆|幻想|穿越|灵魂出窍|昏迷|濒死|体验|昏迷中|意识/;
+          if (!hasExplanation.test(txt)) {
+            behaviorIssues.push('行为逻辑：角色出现在活人不该出现的地方（太平间冷藏室/火化炉等），且没有梦境/穿越/濒死体验等合理解释');
           }
         }
         for (const desc of behaviorIssues) {

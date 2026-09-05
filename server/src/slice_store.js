@@ -90,8 +90,16 @@ export function extractKeywords(text, n = 10) {
 export function saveStyleSlices(styleId, slices) {
   db.prepare('DELETE FROM style_slices WHERE style_id = ?').run(styleId);
   const ins = db.prepare('INSERT INTO style_slices (style_id, slice_index, text, scene_tags, keywords) VALUES (?,?,?,?,?)');
-  for (const s of slices) {
-    ins.run(styleId, s.slice_index, s.text, JSON.stringify(s.scene_tags || preClassify(s.text)), extractKeywords(s.text));
+  // 使用 exec 包裹事务，确保数据完整性
+  db.exec('BEGIN');
+  try {
+    for (const s of slices) {
+      ins.run(styleId, s.slice_index, s.text, JSON.stringify(s.scene_tags || preClassify(s.text)), extractKeywords(s.text));
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
   }
   return slices.length;
 }
