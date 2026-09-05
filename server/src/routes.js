@@ -1261,6 +1261,7 @@ router.get('/novels', (req, res) => {
 
 router.post('/novels', async (req, res) => {
   const { title = '', genre = '', concept = '', chapterWordCount = 2000, targetChapters = 20, stylePresets = [], styleIds = [], knowledgeCorpusIds = [], skillIds = [] } = req.body || {};
+  const genreStr = Array.isArray(genre) ? genre.filter(Boolean).join(',') : String(genre || '');
   const stylePresetsStr = Array.isArray(stylePresets)
     ? stylePresets.map((s) => String(s).trim()).filter(Boolean).join(',')
     : '';
@@ -1275,7 +1276,7 @@ router.post('/novels', async (req, res) => {
     : '[]';
   const info = db.prepare(
     'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, style_ids, knowledge_corpus_ids, skill_ids) VALUES (?,?,?,?,?,?,?,?,?)'
-  ).run(title, genre, concept, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr, skillIdsStr);
+  ).run(title, genreStr, concept, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr, skillIdsStr);
   const novel = getNovel(info.lastInsertRowid);
   // 创建独立作品文件夹（以小说名命名）
   try {
@@ -3230,7 +3231,9 @@ ${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水
 - 小说类型：${novel.genre || '未设定'}，本章的题材基调必须严格符合该类型（恐怖小说要有恐怖氛围与惊悚逻辑，玄幻要有修炼体系，都市要有现实感，不得脱离类型写走样）
 - 目标字数：约 ${targetWordsN} 字
 
-请开始创作本章正文。`;
+ 重要：正文开头不要写章节标题（如"第X章 XXX"），直接从故事内容开始。标题由系统独立管理。
+
+ 请开始创作本章正文。`;
 
     send({ type: 'status', message: '上下文准备完成，正在生成正文…' });
     send({ type: 'progress', progress: 20, message: `正在生成第 ${idx} 章正文…` });
@@ -3447,12 +3450,17 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
       let det = { score: 0, issues: [] };
       let bl = [];
       try {
-        det = await runDetection(config, full);
+        // 检测时只取前4000字+后1000字，减少内存占用
+        const detectText = full.length > 5000 ? full.slice(0, 4000) + '\n...\n' + full.slice(-1000) : full;
+        det = await runDetection(config, detectText);
         const hits = scanAiPatterns(full);
         bl = blacklistFlagWords(hits, full.length);
-        const total = Math.min(100, det.score + blacklistPenalty(hits, full.length));
+        // 客观正则评分：统计各类AI模板句式命中数，每命中一类加5分
+        const templateHits = hits.filter((h) => h.template).length;
+        const regexScore = Math.min(50, templateHits * 5);
+        const total = Math.min(100, det.score + blacklistPenalty(hits, full.length) + regexScore);
         if (total > aiScorePass() || bl.length > 0) {
-          problems.push({ desc: `AI 味明显（${total} 分，阈值 ${aiScorePass()}${bl.length ? '；高频复用词语：' + bl.join('、') : ''}）` });
+          problems.push({ desc: `AI 味明显（${total} 分，阈值 ${aiScorePass()}${bl.length ? '；高频复用词语：' + bl.join('、') : ''}${templateHits ? `；模板句式命中 ${templateHits} 类` : ''}）` });
         }
         finalDetect = det;
         finalBlacklist = bl;
