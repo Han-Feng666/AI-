@@ -157,6 +157,7 @@ const form = ref({
   stylePresets: [],
   styleIds: [],
   concept: '',
+  memeElements: '',
   chapterWordCount: 2000,
   targetChapters: 20,
   knowledgeCorpusIds: []
@@ -245,7 +246,7 @@ async function createNovel() {
       cover_color: coverColors[Math.floor(Math.random() * coverColors.length)]
     });
     dialogOpen.value = false;
-    form.value = { title: '', genre: ['玄幻'], stylePresets: [], styleIds: [], concept: '', chapterWordCount: 2000, targetChapters: 20, knowledgeCorpusIds: [] };
+    form.value = { title: '', genre: ['玄幻'], stylePresets: [], styleIds: [], concept: '', memeElements: '', chapterWordCount: 2000, targetChapters: 20, knowledgeCorpusIds: [] };
     availableKnowledge.value = [];
     router.push(`/novel/${novel.id}`);
   } catch (e) {
@@ -452,6 +453,15 @@ onBeforeUnmount(() => { if (jobsTimer) clearInterval(jobsTimer); if (jobStream) 
             :rows="4"
             placeholder="一句话或一段话描述你的想法，例如：一个少年在废土末世觉醒空间异能，靠着收集物资和建造避难所，一步步重建文明…"
           />
+        </el-form-item>
+        <el-form-item label="网络梗/元素">
+          <el-input
+            v-model="form.memeElements"
+            type="textarea"
+            :rows="2"
+            placeholder="可选：输入想融入的网络梗、热梗或元素，例如：显眼包、遥遥领先、泼天的富贵、city不city、班味。多个用逗号分隔"
+          />
+          <span class="tip-text">AI 会在创作方案中自然融入这些元素，让小说更有趣味性和网感</span>
         </el-form-item>
         <el-form-item label="每章字数">
           <el-slider

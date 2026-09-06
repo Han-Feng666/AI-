@@ -10,11 +10,15 @@ export const useManagerStore = defineStore('manager', {
     pendingToolCalls: [],   // 当前待授权工具调用列表
     busy: false,
     replyStream: '',
-    loadedNovelId: null
+    loadedNovelId: null,
+    progress: 0,            // 0-100，当前工作进度
+    statusText: '',         // 当前状态描述
+    currentTool: ''         // 当前正在执行的工具名
   }),
 
   getters: {
-    hasPending: (s) => s.pendingToolCalls.length > 0
+    hasPending: (s) => s.pendingToolCalls.length > 0,
+    isWorking: (s) => s.busy || s.progress > 0
   },
 
   actions: {
@@ -37,6 +41,9 @@ export const useManagerStore = defineStore('manager', {
       this.pendingToolCalls = [];
       this.replyStream = '';
       this.busy = false;
+      this.progress = 0;
+      this.statusText = '';
+      this.currentTool = '';
     },
 
     // 发送对话：调 POST /manager/chat（非流式）
@@ -48,9 +55,13 @@ export const useManagerStore = defineStore('manager', {
       const originId = novelId;
       this.busy = true;
       this.replyStream = '';
+      this.progress = 10;
+      this.statusText = '正在思考...';
       // optimistic user
       this.messages.push({ role: 'user', content: text });
       try {
+        this.progress = 30;
+        this.statusText = '正在分析并执行工具调用...';
         const r = await api.managerChat(novelId, { content: text, novel_id: novelId });
         const same = this.loadedNovelId === originId;
         if (r.reply && same) {
@@ -59,11 +70,15 @@ export const useManagerStore = defineStore('manager', {
         if (Array.isArray(r.pendingToolCalls) && r.pendingToolCalls.length && same) {
           this.pendingToolCalls.push(...r.pendingToolCalls);
         }
+        this.progress = 100;
+        this.statusText = '';
         return r;
       } catch (e) {
         if (this.loadedNovelId === originId) {
           this.messages.push({ role: 'assistant', content: '出错了：' + e.message });
         }
+        this.progress = 0;
+        this.statusText = '';
         throw e;
       } finally {
         if (this.loadedNovelId === originId) this.busy = false;
@@ -72,18 +87,23 @@ export const useManagerStore = defineStore('manager', {
 
     async authorize(callId) {
       try {
-        const r = await api.managerAuthorize(callId);
         const meta = this.pendingToolCalls.find((c) => c.id === callId);
+        this.currentTool = meta?.name || '';
+        this.progress = 50;
+        this.statusText = `正在执行: ${this.currentTool}`;
+        const r = await api.managerAuthorize(callId);
         const args = meta?.args || {};
         this.messages.push({ role: 'tool', content: JSON.stringify(r.result || {}), toolName: meta?.name });
         this.pendingToolCalls = this.pendingToolCalls.filter((c) => c.id !== callId);
+        this.progress = 100;
+        this.currentTool = '';
+        this.statusText = '';
         // Phase 10：联动总线——授权执行落库后通知工作区 store 刷新
         if (meta?.name === 'update_outline' && args.novel_id) {
           workspaceEventBus.emit('novel:outlineUpdated', { novelId: Number(args.novel_id) });
         } else if (meta?.name === 'update_character' && args.novel_id) {
           workspaceEventBus.emit('novel:characterUpdated', { novelId: Number(args.novel_id), name: args.name });
         } else if (meta?.name === 'request_revise') {
-          // User 没在这 SDK 里实现 request_revise（直接复用后端 revise 路由触发 job）—— 保留事件
           workspaceEventBus.emit('novel:reviseRequested', { novelId: Number(args.novel_id), feedback: args.feedback });
         } else if (meta?.name === 'request_generate_chapter') {
           workspaceEventBus.emit('novel:generateChapterRequested', { novelId: Number(args.novel_id) });
@@ -93,6 +113,9 @@ export const useManagerStore = defineStore('manager', {
         return r;
       } catch (e) {
         this.messages.push({ role: 'assistant', content: '授权失败：' + e.message });
+        this.progress = 0;
+        this.currentTool = '';
+        this.statusText = '';
         throw e;
       }
     },

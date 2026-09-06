@@ -270,7 +270,18 @@ function onKeydown(e) {
       </template>
       <div v-if="manager.busy && !manager.replyStream" class="msg ai">
         <div class="ai-avatar"><el-icon :size="13"><MagicStick /></el-icon></div>
-        <div class="bubble ai-bubble"><el-icon class="is-loading"><Loading /></el-icon></div>
+        <div class="bubble ai-bubble">
+          <div class="manager-progress">
+            <el-progress 
+              :percentage="manager.progress" 
+              :stroke-width="6" 
+              :show-text="false"
+              class="progress-bar"
+            />
+            <span class="progress-text">{{ manager.statusText || '正在处理...' }}</span>
+            <span v-if="manager.currentTool" class="progress-tool">正在执行: {{ manager.currentTool }}</span>
+          </div>
+        </div>
       </div>
 
       <!-- 待授权工具调用行动卡片 -->
@@ -415,7 +426,15 @@ function onKeydown(e) {
 }
 .tool-result.collapsed { max-height: 64px; overflow: hidden; }
 .collapsed-hint { display: block; color: #9ca3af; font-size: 11px; padding-top: 4px; }
-.pending-card {
+.manager-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 180px;
+}
+.progress-bar { width: 100%; }
+.progress-text { font-size: 12px; color: #6b7280; }
+.progress-tool { font-size: 11px; color: #9ca3af; font-style: italic; }
   display: flex;
   gap: 10px;
   align-items: flex-start;

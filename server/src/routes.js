@@ -1287,9 +1287,10 @@ router.post('/novels', async (req, res) => {
   const skillIdsStr = Array.isArray(skillIds)
     ? JSON.stringify(skillIds.map(Number).filter(Boolean))
     : '[]';
+  const memeElements = String((req.body || {}).memeElements || '').trim();
   const info = db.prepare(
-    'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, style_ids, knowledge_corpus_ids, skill_ids) VALUES (?,?,?,?,?,?,?,?,?)'
-  ).run(title, genreStr, concept, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr, skillIdsStr);
+    'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, style_ids, knowledge_corpus_ids, skill_ids, meme_elements) VALUES (?,?,?,?,?,?,?,?,?,?)'
+  ).run(title, genreStr, concept, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr, skillIdsStr, memeElements);
   const novel = getNovel(info.lastInsertRowid);
   // 创建独立作品文件夹（以小说名命名）
   try {
@@ -1796,7 +1797,8 @@ const userPrompt = `${conceptRule}
  ${protagonistName || novel.protagonist_name ? `\n男主角名字：${protagonistName || novel.protagonist_name}（方案中男主必须用这个名字）` : ''}
  ${heroineName || novel.heroine_name ? `\n女主角名字：${heroineName || novel.heroine_name}（方案中女主必须用这个名字）` : ''}
  ${referenceNotes ? `\n同类小说参考（借鉴其题材套路与节奏，但不要抄袭情节）：\n${referenceNotes}` : ''}
-   
+  ${novel.meme_elements ? `\n【网络梗/元素要求】本书需要融入以下网络梗或趣味元素：${novel.meme_elements}。请在剧情、对话或角色设定中自然融入这些元素，让小说更具网感和趣味性。梗的使用要自然不生硬，可以化用、变体，不要生搬硬套。` : ''}
+
 【题材边界强调】所选类型为：${genre || novel.genre || '未指定'}。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等超凡标签，则本书为现实向，力量体系只能是武功谋略，严禁把"学习/修炼"写成玄幻修仙境界（灵气、金丹、元婴、御剑等等一概禁止）；意外死亡穿越也不是获得超凡能力的理由。
  
  请输出创作方案骨架 JSON。`;
@@ -2243,6 +2245,7 @@ ${snapshot}${anchor}
 ${feedback}
 
 【题材边界提醒】本书类型为「${novel.genre || '未注明'}」。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等标签，则本书为现实向：世界观与角色的"修炼/能力"只能是武术、谋略、医术等现实可及的能力，严禁引入修炼境界、灵气、金丹、御剑、系统面板等玄幻修行元素。请仅依据用户意见修订，不要顺手把现实向设定改成玄幻修行。
+ ${novel.meme_elements ? `\n【网络梗/元素要求】本书需要融入以下网络梗或趣味元素：${novel.meme_elements}。请在修订方案时保留并体现这些元素。` : ''}
 
 请输出修订后的完整创作方案 JSON，字段与结构必须与当前方案完全一致：{"title": "...", "genre": "...", "world_view": "...", "outline": "...", "characters": [{"name": "...", "role_type": "...", "personality": "...", "background": "...", "description": "...", "faction": "...", "goal": "...", "ability": "..."}], "factions": [{"name": "...", "type": "...", "description": "..."}], "relationships": [{"a": "角色名", "b": "角色名", "relation_type": "朋友", "description": "..."}], "chapters": [{"title": "...", "summary": "..."}]}`;
 
