@@ -417,6 +417,7 @@ ensureColumn('chapters', 'ai_score', 'ai_score INTEGER DEFAULT NULL');
 ensureColumn('chapters', 'beats', "beats TEXT DEFAULT ''");
 ensureColumn('styles', 'style_samples', "style_samples TEXT DEFAULT ''");
 ensureColumn('novels', 'length_class', "length_class TEXT DEFAULT 'long'");
+ensureColumn('world_settings', 'source', "source TEXT DEFAULT 'manual'");
 ensureColumn('novels', 'constitution', "constitution TEXT DEFAULT ''");
 ensureColumn('characters', 'shared_id', 'shared_id INTEGER DEFAULT NULL');
 ensureColumn('foreshadowings', 'expected_recall_chapter', "expected_recall_chapter INTEGER");

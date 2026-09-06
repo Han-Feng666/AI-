@@ -209,6 +209,8 @@ function toolDescription(name, args) {
     request_revise: `让 ${novelLabel(a.novel_id)} AI 按"${(a.feedback || '').slice(0, 30)}…"修订方案`,
     request_generate_chapter: `让 ${novelLabel(a.novel_id)} 生成下一章`,
     request_revise_chapter: `让 ${novelLabel(a.novel_id)} 修改第 ${a.chapter_index} 章：${(a.instructions || '').slice(0, 30)}…`,
+    list_chapters: `查看 ${novelLabel(a.novel_id)} 的章节目录`,
+    read_chapter: `阅读 ${novelLabel(a.novel_id)} 第 ${a.chapter_index} 章正文`,
     web_search: `联网搜索：${a.query || ''}`
   };
   return map[name] || name;
@@ -435,13 +437,7 @@ function onKeydown(e) {
 .progress-bar { width: 100%; }
 .progress-text { font-size: 12px; color: #6b7280; }
 .progress-tool { font-size: 11px; color: #9ca3af; font-style: italic; }
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  background: #fff7ed;
-  border: 1px solid #fdba74;
-  border-radius: 10px;
-  padding: 10px 12px;
+.pending-card {
   margin: 10px 0;
 }
 .pending-icon { width: 26px; height: 26px; border-radius: 50%; background: #fed7aa; color: #c2410c; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }

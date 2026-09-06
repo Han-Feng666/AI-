@@ -219,6 +219,7 @@ export const api = {
   createWorldSetting: (id, data) => http.post(`/novels/${id}/world-settings`, data),
   updateWorldSetting: (id, sid, data) => http.put(`/novels/${id}/world-settings/${sid}`, data),
   deleteWorldSetting: (id, sid) => http.delete(`/novels/${id}/world-settings/${sid}`),
+  importWorldSettingsFromPlan: (id) => http.post(`/novels/${id}/world-settings/import-from-plan`),
 
   // 章节历史备份
   getBackups: (id, idx) => http.get(`/novels/${id}/chapters/${idx}/backups`),

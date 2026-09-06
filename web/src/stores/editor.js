@@ -912,9 +912,16 @@ export const useEditorStore = defineStore('editor', {
       this.worldSettingsLoading = true;
       try {
         this.worldSettings = await api.getWorldSettings(this.novelId);
+      } catch (e) {
+        ElMessage.error('设定加载失败：' + (e.response?.data?.error || e.message));
       } finally {
         this.worldSettingsLoading = false;
       }
+    },
+    async importWorldSettingsFromPlan() {
+      const data = await api.importWorldSettingsFromPlan(this.novelId);
+      this.worldSettings = data.settings || [];
+      return data;
     },
     async addWorldSetting(data) {
       const s = await api.createWorldSetting(this.novelId, data);

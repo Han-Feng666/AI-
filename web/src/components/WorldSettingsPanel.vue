@@ -58,22 +58,40 @@ async function removeSetting(s) {
     ElMessage.error(e.message);
   }
 }
+
+const importing = ref(false);
+async function importFromPlan() {
+  importing.value = true;
+  try {
+    const data = await store.importWorldSettingsFromPlan();
+    const n = data.imported || 0;
+    if (n > 0) ElMessage.success(`已从方案导入 ${n} 条设定`);
+    else ElMessage.info('方案中没有可导入的内容（需要先生成创作方案）');
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || e.message);
+  } finally {
+    importing.value = false;
+  }
+}
 </script>
 
 <template>
   <div class="world-settings-panel">
     <div class="ws-head">
       <span class="ws-title">世界观设定</span>
-      <el-button size="small" type="primary" plain @click="openAdd">
-        <el-icon style="margin-right:4px"><Plus /></el-icon>新增设定
-      </el-button>
+      <div class="ws-head-ops">
+        <el-button size="small" :loading="importing" @click="importFromPlan">从方案导入</el-button>
+        <el-button size="small" type="primary" plain @click="openAdd">
+          <el-icon style="margin-right:4px"><Plus /></el-icon>新增设定
+        </el-button>
+      </div>
     </div>
     <div class="ws-tip">
-      记录人物、地点、势力、物品等恒定设定，生成章节时自动注入，保证长篇写作前后一致。
+      记录人物、地点、势力、物品等恒定设定，生成章节时自动注入，保证长篇写作前后一致。生成创作方案后会自动导入世界观、人物与势力；「从方案导入」可随时重新同步。
     </div>
 
     <div v-loading="store.worldSettingsLoading" class="ws-body">
-      <el-empty v-if="!store.worldSettings.length" description="还没有设定，点击「新增设定」添加第一条" :image-size="54" />
+      <el-empty v-if="!store.worldSettings.length" description="还没有设定。可点击「从方案导入」自动同步创作方案中的人物与势力，或点「新增设定」手动添加" :image-size="54" />
       <div v-for="(list, cat) in grouped" :key="cat" class="ws-group">
         <div class="ws-cat">{{ cat }}（{{ list.length }}）</div>
         <div v-for="s in list" :key="s.id" class="ws-item">
@@ -120,6 +138,7 @@ async function removeSetting(s) {
   overflow: hidden;
 }
 .ws-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.ws-head-ops { display: flex; align-items: center; gap: 8px; }
 .ws-title { font-size: 15px; font-weight: 700; color: #1e1b4b; }
 .ws-tip { font-size: 12px; color: #9ca3af; line-height: 1.6; margin-bottom: 10px; }
 .ws-body { flex: 1; overflow-y: auto; }

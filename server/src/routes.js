@@ -1600,6 +1600,34 @@ ${bad.map((c) => `- ${c.name}（${c.role_type || '配角'}）：${c.personality 
   return chars;
 }
 
+// 从方案数据生成世界观设定条目（source='auto'，可重复刷新，不动手动条目）
+// plan 传 null 时回退读取数据库中已有的角色/势力数据（用于旧书一键导入）
+function seedWorldSettingsFromPlan(novelId, plan, novel) {
+  db.prepare("DELETE FROM world_settings WHERE novel_id = ? AND source = 'auto'").run(novelId);
+  let count = 0;
+  const insert = db.prepare("INSERT INTO world_settings (novel_id, category, name, content, source) VALUES (?,?,?,?, 'auto')");
+  const worldView = String(plan?.world_view || novel?.world_view || '').trim();
+  if (worldView) {
+    insert.run(novelId, '其他', '世界观', worldView);
+    count++;
+  }
+  const chars = Array.isArray(plan?.characters) ? plan.characters : getCharacters(novelId);
+  for (const c of chars) {
+    if (!c || !c.name) continue;
+    const desc = [c.personality, c.background, c.description].map((x) => String(x || '').trim()).filter(Boolean).join('；');
+    insert.run(novelId, '人物', String(c.name), desc || String(c.role_type || '角色'));
+    count++;
+  }
+  const factions = Array.isArray(plan?.factions) ? plan.factions : getFactions(novelId);
+  for (const f of factions) {
+    if (!f || !f.name) continue;
+    const desc = [f.description, f.territory && `据点：${f.territory}`, f.leader && `首领：${f.leader}`].map((x) => String(x || '').trim()).filter(Boolean).join('；');
+    insert.run(novelId, '势力', String(f.name), desc || String(f.type || '势力'));
+    count++;
+  }
+  return count;
+}
+
 // 应用创作方案（生成或修订共用）：更新小说信息，重建角色/关系/章节规划
 async function applyPlan(novel, plan, opts = {}) {
   const words = opts.words || novel.chapter_word_count || 2000;
@@ -1665,6 +1693,8 @@ async function applyPlan(novel, plan, opts = {}) {
   }
 
   touchNovel(novel.id);
+  // 把方案中的世界观/人物/势力同步到「设定」页，保证设定面板非空
+  try { seedWorldSettingsFromPlan(novel.id, plan, { world_view: String(plan?.world_view || '').trim() }); } catch { /* 设定同步失败不影响方案应用 */ }
   const updated = getNovel(novel.id);
   updated.characters = getCharacters(novel.id);
   updated.factions = getFactions(novel.id);
@@ -4903,6 +4933,15 @@ router.delete('/novels/:id/world-settings/:sid', (req, res) => {
   db.prepare('DELETE FROM world_settings WHERE id = ? AND novel_id = ?').run(req.params.sid, novel.id);
   touchNovel(novel.id);
   res.json({ ok: true });
+});
+
+// 从创作方案（书籍现有的世界观/角色/势力数据）一键导入设定，只刷新自动条目
+router.post('/novels/:id/world-settings/import-from-plan', (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const count = seedWorldSettingsFromPlan(novel.id, null, novel);
+  touchNovel(novel.id);
+  res.json({ ok: true, imported: count, settings: getWorldSettings(novel.id) });
 });
 
 // ---------- 章节历史备份 ----------

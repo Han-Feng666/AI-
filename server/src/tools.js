@@ -1,5 +1,5 @@
 import { db } from './db.js';
-import { getNovel, getCharacters, getRelationships, getChapters } from './lib.js';
+import { getNovel, getCharacters, getRelationships, getChapters, getChapter } from './lib.js';
 import { getActiveJobByNovel } from './jobs.js';
 import { webSearch, formatSearchResults } from './web_search.js';
 
@@ -34,6 +34,77 @@ export const toolRegistry = {
         targetChapters: novel.target_chapters,
         lastActivity: novel.updated_at,
         activeJob: active ? { stage: active.stage, status: active.status, progress: active.progress } : null
+      };
+    }
+  },
+
+  list_chapters: {
+    needsAuth: false,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'list_chapters',
+        description: '列出指定小说的章节目录（章节序号、标题、字数、状态、概要）。作者问"第几章写了什么/有哪些章节"时先调用此工具拿到章节序号，再用 read_chapter 读取正文。',
+        parameters: {
+          type: 'object',
+          properties: { novel_id: { type: 'integer', description: '小说 ID' } },
+          required: ['novel_id']
+        }
+      }
+    },
+    executor: async ({ novel_id }) => {
+      const novel = getNovel(novel_id);
+      if (!novel) return { error: '小说不存在' };
+      const chapters = getChapters(novel_id);
+      return {
+        title: novel.title,
+        chapterCount: chapters.length,
+        chapters: chapters.map((c) => ({
+          chapterIndex: c.chapter_index,
+          title: c.title,
+          wordCount: c.word_count || 0,
+          status: c.status,
+          summary: String(c.summary || '').slice(0, 100)
+        }))
+      };
+    }
+  },
+
+  read_chapter: {
+    needsAuth: false,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'read_chapter',
+        description: '读取指定小说某一章的正文内容。用于作者要求"看看第 N 章写得怎么样/帮我检查第 N 章/评一下这一章"。章节序号可用 list_chapters 查询。返回正文（超长时自动截断，可用 start 参数分段读取）。',
+        parameters: {
+          type: 'object',
+          properties: {
+            novel_id: { type: 'integer', description: '小说 ID' },
+            chapter_index: { type: 'integer', description: '章节序号（从 1 开始）' },
+            start: { type: 'integer', description: '可选，从正文第几个字符开始读（默认 0），用于分段读取超长章节' }
+          },
+          required: ['novel_id', 'chapter_index']
+        }
+      }
+    },
+    executor: async ({ novel_id, chapter_index, start }) => {
+      const novel = getNovel(novel_id);
+      if (!novel) return { error: '小说不存在' };
+      const ch = getChapter(novel_id, Number(chapter_index));
+      if (!ch) return { error: `第 ${chapter_index} 章不存在` };
+      const content = String(ch.content || '');
+      if (!content.trim()) return { chapterIndex: ch.chapter_index, title: ch.title, empty: true, note: '该章暂无正文' };
+      const offset = Math.max(0, Number(start) || 0);
+      const MAX = 6000;
+      const slice = content.slice(offset, offset + MAX);
+      return {
+        chapterIndex: ch.chapter_index,
+        title: ch.title,
+        wordCount: ch.word_count || content.length,
+        truncated: offset + MAX < content.length,
+        range: offset === 0 && offset + MAX >= content.length ? '全文' : `字符 ${offset}-${offset + slice.length}`,
+        content: slice
       };
     }
   },
