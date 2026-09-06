@@ -28,7 +28,7 @@ import {
 } from './model_router.js';
 import {
   NOVEL_PLAN_SYSTEM, PLAN_SKELETON_SYSTEM, PLAN_CHAPTERS_SYSTEM, PLAN_REVISE_SYSTEM,
-  buildConceptFidelityRule, detectConceptViolations,
+  buildConceptFidelityRule, detectConceptViolations, analyzeConceptConstraints,
   CHAPTER_SYSTEM, CHAPTER_TITLE_SYSTEM,
   CHAPTER_SUMMARY_SYSTEM, POLISH_SYSTEM, STYLE_ANALYZE_SYSTEM,
   CHAT_SYSTEM, COMPRESS_SYSTEM, COMPRESS_UPDATE_SYSTEM,
@@ -3241,7 +3241,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         : `\n【本章为续写——请紧接上一章结尾续写本章，本章第一句必须是上一章最后一句话的自然延续。不要重新介绍场景/人物/设定，直接从上一章结尾的瞬间接续。本章剧情以大纲概要为准，但开场必须承接上一章结尾的悬念/动作/对话。】`)
       : '';
     const ch1Note = idx === 1 && mode === 'regenerate'
-      ? '' // 已在 regenNote 中处理
+      ? '\n【开篇铁律——第一章必须从具体场景/动作切入，直接用画面开篇，不要铺世界观、不要抒情、不要主角独白】\n- 禁止模板化开篇：不得写"主角死亡后眼前一黑/再睁眼/加班猝死/胸痛/过劳死"等AI默认穿越模板，必须使用用户灵感指定的穿越方式（如被雷劈/车祸等）的具体画面开篇\n- 开篇前两句必须建立空间感：在哪里、什么时间、光线/温度/声音/气味——用1-2个感官细节把读者放进场景，然后再让角色动起来\n- 穿越过程只占一两句话的过渡，不得大段描写穿越前的现代生活细节、死亡过程、查看手机电量等套路内容\n- 开篇前50字内必须出现主角名字和具体的动作/处境，不得用"他"指代到底'
       : '';
 
     const userPrompt = `${context}
@@ -3609,9 +3609,66 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
             behaviorIssues.push('行为逻辑：角色出现在活人不该出现的地方（太平间冷藏室/火化炉等），且没有梦境/穿越/濒死体验等合理解释');
           }
         }
-        for (const desc of behaviorIssues) {
-          problems.push({ desc });
+      // 4b) 概念忠实度硬校验：章节正文不得引入灵感未提及的核心设定/系统/能力，不得违背身穿/没家人约束
+      try {
+        const flags = analyzeConceptConstraints(String(novel.concept || ''));
+        const concept = String(novel.concept || '');
+        // 灵感没写签到/系统/面板 → 正文严禁出现
+        if (!/签到|系统|面板/.test(concept)) {
+          const sysMatch = full.match(/签到系统|数据面板|属性面板|系统提示|叮，|叮~|触发.{0,3}任务|发布.{0,3}任务/g);
+          if (sysMatch) behaviorIssues.push(`概念忠实度：灵感未提及系统/签到，正文却出现"${sysMatch[0]}"等设定，违反灵感优先铁律——删除系统相关描写`);
         }
+        // 灵感没写天道/大道/法则等修真术语但非修真题材 → 严禁出现（泛化）
+        if (!/修真|修仙|玄幻|仙侠|长生|大道|天道/.test(concept)) {
+          if (/天道枷锁|大道法则|天道意志/.test(full)) {
+            behaviorIssues.push('概念忠实度：灵感未涉及天道/大道设定，正文却出现天道/大道相关术语');
+          }
+        }
+        // 身穿 + 没家人 → 严禁原身/家族/废柴嫡子/退婚等
+        if (flags.bodyTransmigration && flags.noFamily) {
+          if (/原身|废物嫡子|废物少爷|家族嫡子|庶子|退婚|族中废物/.test(full)) {
+            behaviorIssues.push('概念忠实度：灵感是身穿且没家人，正文却出现原身/家族/废物嫡子/退婚等设定——身穿开局孤身一人，没有原身与家族');
+          }
+        }
+        // 身穿 → 严禁魂穿/夺舍/附身/穿越到他人身上
+        if (flags.bodyTransmigration) {
+          if (/魂穿|夺舍|附身|穿越到.{0,12}身上|占据.{0,10}(身体|身躯)/.test(full)) {
+            behaviorIssues.push('概念忠实度：灵感是身穿，正文却写成魂穿/夺舍/穿越到他人身上——身穿是本人肉体直接出现，没有原身');
+          }
+        }
+        // 灵感指定了穿越方式（被雷劈/车祸/坠崖等）→ 正文必须使用该方式，不得替换成加班猝死等默认模板
+        const methodMatch = concept.match(/被(雷劈|车撞|坠崖|高空落物|火烧|水淹)|遭遇(车祸|意外|雷击)|被.{0,4}(劈中|撞飞|砸中)/);
+        if (methodMatch) {
+          const requiredMethod = methodMatch[0];
+          // 检查正文是否使用了指定的穿越方式
+          const hasLightning = /雷|闪电|劈|雷鸣/.test(full);
+          const hasCarCrash = /车|撞|翻车|刹车/.test(full);
+          const hasFall = /坠|跌落|高空|摔下|悬崖/.test(full);
+          const methodMap = { '雷劈': hasLightning, '被雷劈': hasLightning, '闪电': hasLightning, '车': hasCarCrash, '车祸': hasCarCrash, '撞': hasCarCrash, '坠崖': hasFall, '坠': hasFall };
+          let methodFound = false;
+          for (const [key, val] of Object.entries(methodMap)) {
+            if (requiredMethod.includes(key) && val) { methodFound = true; break; }
+          }
+          if (!methodFound && /死(?:了|去|过一次)|猝死|胸(?:口)?痛|加班.{0,6}方案|眼前一黑/.test(full)) {
+            behaviorIssues.push(`概念忠实度：灵感指定穿越方式为「${requiredMethod}」，正文却写成加班猝死/眼前一黑等默认模板，必须改为${requiredMethod}的具体场景`);
+          }
+        }
+      } catch { /* 概念校验失败不阻塞 */ }
+
+      // 4c) 网文 AI 套路模板硬校验（模型写穿越/玄幻开篇的默认路径，必须拦截）
+      try {
+        const aiTropes = [];
+        if (/死过一次|死后重生|加班.{0,8}胸|方案.{0,8}胸|猝死|过劳/.test(full)) aiTropes.push('主角死亡重生开场');
+        if (/眼前一黑.{0,15}(再睁眼|醒来|睁开眼)|一睁眼.{0,15}(躺|发现自己|身处)/.test(full)) aiTropes.push('眼前一黑+睁眼穿越模板');
+        if (/手机.{0,8}(没信号|没电|关机|百分之)|电量.{0,6}百分之|看.{0,4}手机.{0,6}(信号|电量)/.test(full)) aiTropes.push('穿越后查看手机电量/信号套路');
+        if (/穿越.{0,8}第一时间.{0,6}查看.{0,6}手机|醒来.{0,10}手机/.test(full)) aiTropes.push('穿越后第一时间掏手机');
+        if (/签到.{0,6}(获得|奖励|领取)|在.{0,8}签到.{0,6}(获得|奖励)/.test(full) && !/签到/.test(String(novel.concept || ''))) aiTropes.push('签到系统');
+        if (aiTropes.length) behaviorIssues.push(`AI网文套路：检测到"${aiTropes.join('、')}"，属AI生成的典型模板情节，必须删除，用具体的场景与动作开篇`);
+      } catch { /* 套路检测失败不阻塞 */ }
+
+      for (const desc of behaviorIssues) {
+        problems.push({ desc });
+      }
       } catch { /* 行为规则检查失败不阻塞 */ }
 
       // 5) 表达层结构检测（免费正则，模型无关）：对白失衡/跨章口癖固化/自我复述。
