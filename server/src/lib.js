@@ -722,6 +722,7 @@ export function scanAiPatterns(text) {
   hits.push(...scanClauseMonotony(text));
   hits.push(...scanAdverbStack(text));
   hits.push(...scanEmptyAdjective(text));
+  hits.push(...scanPunchlineExpand(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -834,6 +835,29 @@ export function scanEmptyAdjective(text) {
   }
   if (total >= 4) {
     hits.push({ word: `空泛形容词堆砌(套用"${samples.join('"、"')}…"等AI高频搭配共${total}种；真人描写更具体更个人化，不依赖这些空套搭配。替换为具体细节描写)`, count: total, template: true });
+  }
+  return hits;
+}
+
+// "短句+展开"句式检测：AI 标志性写法——先写一个极短句（1-4字），下一句展开解释。
+// 真人偶尔用，但连续 3 次以上即为 AI 味。例："疼。""不是某个地方疼，是整架骨头散了架那种疼。"
+export function scanPunchlineExpand(text) {
+  const s = String(text || '');
+  if (s.length < 800) return [];
+  const hits = [];
+  // 匹配模式：短句(1-5字) + 句号 + 空行 + 展开句(10字以上)
+  const re = /([^\n。！？]{1,5})[。！？](?:\s*\n)+\s*([^\n]{15,})/g;
+  let m;
+  let pairs = [];
+  while ((m = re.exec(s)) !== null) {
+    const short = m[1].trim();
+    const expand = m[2].trim();
+    if (short.length >= 1 && short.length <= 5 && expand.length > short.length + 8) {
+      pairs.push({ short, expand });
+    }
+  }
+  if (pairs.length >= 2) {
+    hits.push({ word: `AI短句展开句式(${pairs.length}次"短句+展开"结构，如"${pairs[pairs.length-1].short}。${pairs[pairs.length-1].expand.slice(0, 12)}…"，属AI标志性写法，连续使用即为AI痕迹`, count: pairs.length, template: true });
   }
   return hits;
 }
