@@ -159,6 +159,19 @@ const AI_SCORE_PASS_DEFAULT = 10; // 达标阈值（进一步调严）：该分�
 const AI_MAX_ROUNDS = 4;  // 质量门最多迭代轮数（增加一轮）
 const MAX_AUTO_REGENERATE = 3; // 整章重生成最多额外重试次数（共生成 1+3=4 版）
 
+// 内存监控：在内存接近上限时触发 GC（如果可用）
+function checkMemoryPressure() {
+  if (global.gc) {
+    try {
+      const usage = process.memoryUsage();
+      // 如果堆内存超过 1.5GB，触发 GC
+      if (usage.heapUsed > 1500 * 1024 * 1024) {
+        global.gc();
+      }
+    } catch { /* ignore */ }
+  }
+}
+
 // 质量门评分阈值（可配置，设置页 ai_score_pass 覆盖默认值）
 function aiScorePass() {
   const v = Number(getSetting('ai_score_pass', String(AI_SCORE_PASS_DEFAULT)));
@@ -3176,7 +3189,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         }
       } catch { /* 解析失败不阻塞 */ }
     }
-    const prevTailLen = mode === 'regenerate' ? 1000 : 600;
+    const prevTailLen = mode === 'regenerate' ? 1500 : 800;
     const prevTailBlock = prevChapter
       ? `【上一章结尾（本章必须从上一章结尾的场面直接续写，严格延续时间/地点/人物/悬念，不得倒回上一章开头重新描写同一场景，不得重复已经发生过的事件）】
 上一章《${prevChapter.title}》${prevChapterSummary}${prevBeatsBlock}
@@ -3185,13 +3198,14 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 【衔接要求】
 - 本章第一句必须紧接上述"上一章结尾"的最后一个人物动作、一句对话或一个悬念往下写，让读者感到前后两章是连续的。
 - 开头不得另起炉灶介绍新场景/新人物/新设定，不得从"时间过去了很久""另一边""与此同时"等跳转话术另开一线。
-- 若上一章结尾主角正处在某个地点/某个动作中，本章开头就从这个地点/动作继续。`
+- 若上一章结尾主角正处在某个地点/某个动作中，本章开头就从这个地点/动作继续。
+- 不得引入上一章未出现的设定/能力/物品（如系统、功法、武器等），除非在上一章已有铺垫。`
       : '';
 
     const regenNote = mode === 'regenerate'
       ? (idx === 1
         ? '\n【本章为重新生成——本章是全书第一章，请基于剧情大纲重新创作故事开篇，只写开篇引子/初始场景/主角登场，不得引入中后期剧情、势力、角色或冲突，不得从上一章结尾续写（因为前面没有任何章节）】'
-        : '\n【本章为重新生成——请基于剧情大纲和上一章结尾重新创作本章，严格遵循本章的剧情概要/场景规划/情绪基调/剧情线，确保与前文剧情一致，不得偏离既定故事走向】')
+        : `\n【本章为续写——请紧接上一章结尾续写本章，本章第一句必须是上一章最后一句话的自然延续。不要重新介绍场景/人物/设定，直接从上一章结尾的瞬间接续。本章剧情以大纲概要为准，但开场必须承接上一章结尾的悬念/动作/对话。】`)
       : '';
     const ch1Note = idx === 1 && mode === 'regenerate'
       ? '' // 已在 regenNote 中处理
@@ -3232,11 +3246,13 @@ ${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水
 - 目标字数：约 ${targetWordsN} 字
 
  重要：正文开头不要写章节标题（如"第X章 XXX"），直接从故事内容开始。标题由系统独立管理。
+ ${prevChapter ? `\n【关键衔接要求】本章第一句必须从上文"上一章结尾"的最后一个动作/对话/悬念直接接续。上章结尾停在："…${String(prevChapter.content).slice(-100)}"。本章开场必须是这个画面的下一秒，不得另起炉灶。` : ''}
 
  请开始创作本章正文。`;
 
     send({ type: 'status', message: '上下文准备完成，正在生成正文…' });
     send({ type: 'progress', progress: 20, message: `正在生成第 ${idx} 章正文…` });
+    checkMemoryPressure(); // 生成前检查内存
 
     // 整章生成 + 自动质检循环：每版生成后自动检查（跑题/AI 味/剧情一致性），凡检出问题一律整章重新生成，最多重试 MAX_AUTO_REGENERATE 次
     let full = '';
@@ -3319,6 +3335,7 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
         finishReason = (rawFinish && (rawFinish === 'stop' || rawFinish === 'length')) ? rawFinish : 'length';
         genTrack.rounds = round + 1;
         genTrack.reasons[finishReason === 'length' ? 'length' : 'early_stop'] += 1;
+        checkMemoryPressure(); // 每轮续写后检查内存
         const wordsSoFar = countWords(full);
         const needsMore = wordsSoFar < Math.min(targetWordsN * 0.95, targetWordsN - 100);
         if (finishReason === 'length') {
