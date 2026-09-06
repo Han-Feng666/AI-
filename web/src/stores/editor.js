@@ -504,9 +504,10 @@ export const useEditorStore = defineStore('editor', {
       if (!activeIdx) {
         throw new Error('请先选择章节');
       }
-      // 如果当前选中章节未生成正文（word_count=0 且 status 不是 draft），直接生成当前章节
+      // 如果当前选中章节未生成正文（status 为 planned 或 word_count 为空），直接生成当前章节
       const currentChapter = this.chapters.find((c) => c.chapter_index === activeIdx);
-      if (!currentChapter || (currentChapter.word_count === 0 && currentChapter.status !== 'draft')) {
+      const isGenerated = currentChapter && currentChapter.status === 'draft' && currentChapter.word_count > 0;
+      if (!isGenerated) {
         return this.generateChapter({ mode: 'regenerate', chapterIndex: activeIdx, ...params });
       }
       return this.generateChapter({ mode: 'regenerate', chapterIndex: activeIdx + 1, ...params });
