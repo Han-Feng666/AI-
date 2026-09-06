@@ -155,8 +155,8 @@ function startSSE(req, res) {
 }
 
 // ---------- AI 味检测与质量门（铁律模式） ----------
-const AI_SCORE_PASS_DEFAULT = 10; // 达标阈值（进一步调严）：该分以下视为合格的人类文风
-const AI_MAX_ROUNDS = 4;  // 质量门最多迭代轮数（增加一轮）
+const AI_SCORE_PASS_DEFAULT = 5; // 达标阈值（更严）：该分以下视为合格的人类文风
+const AI_MAX_ROUNDS = 6;  // 质量门最多迭代轮数（增加）
 const MAX_AUTO_REGENERATE = 3; // 整章重生成最多额外重试次数（共生成 1+3=4 版）
 
 // 内存监控：在内存接近上限时触发 GC（如果可用）
@@ -3317,10 +3317,16 @@ ${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水
     let structureFixes = []; // 表达层结构问题（失衡/口癖/复述），注入润色定向修复，不触发整章重生成
     const perMax = Math.max(2000, Math.min(8000, Math.round(targetWordsN * 1.2)));
 
-    const buildRegenFeedback = (problems) => `【上一版未通过自动检查，本次整章重新生成必须修正的问题】
-${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
+    const buildRegenFeedback = (problems) => {
+      const lines = problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n');
+      // 提取具体问题句，注入到反馈中
+      const specificIssues = problems.filter((p) => p.quote).map((p) => `  问题句：「${p.quote}」→ ${p.fix || '需改写'}`).join('\n');
+      return `【上一版未通过自动检查，本次整章重新生成必须修正的问题】
+${lines}
+${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
 
-请按上述问题整体重写本章：修正这些错误，其余内容保持人类写作风格，剧情与人设不变。`;
+请按上述问题整体重写本章：修正这些错误，其余内容保持人类写作风格，剧情与人设不变。禁止再使用"像/仿佛/如同/好似"等明喻句式，禁止连续3个以上超短句，禁止同词近距离重复。`;
+    };
 
     for (let attempt = 0; attempt <= MAX_AUTO_REGENERATE; attempt++) {
       const isRegen = attempt > 0;
@@ -3771,7 +3777,11 @@ ${problems.map((p, i) => `${i + 1}. ${p.desc}`).join('\n')}
         const iter = await iteratePolish(config, novel, full, {
           onStatus: (m) => send({ type: 'status', message: m }),
           maxRounds: AI_MAX_ROUNDS,
-          opts: { knowledgeBlock, skillsBlock, genre: novel.genre, extraIssues: structureFixes, ...buildStyleInjection(novel, full.slice(0, 2000)) }
+          opts: {
+            knowledgeBlock, skillsBlock, genre: novel.genre,
+            extraIssues: structureFixes.length ? structureFixes : undefined,
+            ...buildStyleInjection(novel, full.slice(0, 2000))
+          }
         });
         if (iter.text && iter.text.trim()) {
           full = iter.text.trim();

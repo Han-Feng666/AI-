@@ -723,6 +723,8 @@ export function scanAiPatterns(text) {
   hits.push(...scanAdverbStack(text));
   hits.push(...scanEmptyAdjective(text));
   hits.push(...scanPunchlineExpand(text));
+  hits.push(...scanSimileOveruse(text));
+  hits.push(...scanShortSentenceChop(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -887,7 +889,32 @@ export function scanQuantifierStack(text) {
   return hits;
 }
 
-// 近距离重复用词检测：同一双字词在 300 字窗口内出现 ≥4 次属机械复现（真人会换词或删减）。
+// 句号过度切割检测：连续多个超短句以句号分隔（如"疼。不是某个地方疼，是整架骨头散了架那种疼。"），
+// AI 标志性写法——用一个极短句开头，下一句展开。偶尔用可以，连续3次以上即属 AI 腔。
+export function scanShortSentenceChop(text) {
+  const s = String(text || '');
+  if (s.length < 500) return [];
+  const hits = [];
+  const lines = s.split(/\n/).map(l => l.trim()).filter(l => l.length > 0);
+  let consecutive = 0;
+  let maxConsecutive = 0;
+  let samples = [];
+  for (const line of lines) {
+    // 超短句：≤6字，以句号/感叹号/问号结尾
+    if (line.length <= 6 && /[。！？]$/.test(line)) {
+      consecutive++;
+      if (consecutive >= 3 && samples.length < 3) samples.push(line);
+    } else {
+      maxConsecutive = Math.max(maxConsecutive, consecutive);
+      consecutive = 0;
+    }
+  }
+  maxConsecutive = Math.max(maxConsecutive, consecutive);
+  if (maxConsecutive >= 3) {
+    hits.push({ word: `句号过度切割短句(连续${maxConsecutive}个超短句${samples.length ? `，如"${samples.join('、')}…"` : ''}，应改用逗号衔接，将短句合并为自然长句)`, count: maxConsecutive, template: true });
+  }
+  return hits;
+}
 // 全章出现超 15 次的词大概率是主角名等专名，自动排除；常见功能词走停用表。
 const NEARBY_STOPWORDS = new Set([
   '他们', '她们', '自己', '什么', '没有', '一个', '这个', '那个', '已经', '就是',

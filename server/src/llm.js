@@ -503,6 +503,8 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
       buffer = lines.pop();
       for (const line of lines) {
         const trimmed = line.trim();
+        // 跳过 keepalive 行（部分中转站会发送 :keepalive 注释行）
+        if (!trimmed || trimmed.startsWith(':')) continue;
         if (!trimmed.startsWith('data:')) continue;
         const payload = trimmed.slice(5).trim();
         if (payload === '[DONE]') { finishReason = 'stop'; continue; }
