@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia';
+import { ElMessage } from 'element-plus';
 import api from '../api';
 import { saveGenDraft, clearGenDraft, getGenDraftMeta, unescapeUnicode } from '../utils/format';
 import workspaceEventBus from '../utils/workspaceEventBus';
@@ -386,6 +387,7 @@ export const useEditorStore = defineStore('editor', {
             this.selectChapter(data.novel.chapters[0].chapter_index);
           }
           workspaceEventBus.emit('novel:planGenerated', { novelId: this.novelId });
+          ElMessage.success(`创作方案生成完毕，共 ${data.totalChapters} 章，可以开始生成章节正文了`);
         } else {
           // 已切书：把选中第一章信息也写入原书 slice（切回时可直接恢复）
           const s = this._slices.get(String(originId)) || {};
@@ -502,6 +504,11 @@ export const useEditorStore = defineStore('editor', {
       if (!activeIdx) {
         throw new Error('请先选择章节');
       }
+      // 如果当前选中章节未生成正文（word_count=0 且 status 不是 draft），直接生成当前章节
+      const currentChapter = this.chapters.find((c) => c.chapter_index === activeIdx);
+      if (!currentChapter || (currentChapter.word_count === 0 && currentChapter.status !== 'draft')) {
+        return this.generateChapter({ mode: 'regenerate', chapterIndex: activeIdx, ...params });
+      }
       return this.generateChapter({ mode: 'regenerate', chapterIndex: activeIdx + 1, ...params });
     },
 
@@ -552,6 +559,7 @@ export const useEditorStore = defineStore('editor', {
         this._commit(originId, resultPatch);
         if (String(this.novelId) === String(originId) && data.chapter) {
           this.activeChapter = data.chapter;
+          ElMessage.success(`第 ${data.chapter.chapter_index} 章生成完毕，${data.chapter.word_count} 字`);
         } else if (String(this.novelId) !== String(originId)) {
           const s = this._slices.get(String(originId)) || {};
           s.activeChapter = data.chapter || s.activeChapter;
