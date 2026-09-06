@@ -73,3 +73,20 @@ export function unassignTask(task) {
   }));
   saveModels(models);
 }
+
+// 获取模型配置（含apiKey脱敏版，供前端展示）
+export function getModelForDisplay(m) {
+  if (!m || !m.id) return m;
+  return {
+    ...m,
+    config: {
+      ...m.config,
+      apiKey: m.config?.apiKey ? 'sk-' + m.config.apiKey.slice(-4).padStart(8, '*') : ''
+    }
+  };
+}
+
+// 获取所有模型（含脱敏）
+export function getModelsForDisplay() {
+  return getModels().map(getModelForDisplay);
+}

@@ -843,21 +843,19 @@ export function scanEmptyAdjective(text) {
 // 真人偶尔用，但连续 3 次以上即为 AI 味。例："疼。""不是某个地方疼，是整架骨头散了架那种疼。"
 export function scanPunchlineExpand(text) {
   const s = String(text || '');
-  if (s.length < 800) return [];
+  if (s.length < 200) return [];
   const hits = [];
-  // 匹配模式：短句(1-5字) + 句号 + 空行 + 展开句(10字以上)
-  const re = /([^\n。！？]{1,5})[。！？](?:\s*\n)+\s*([^\n]{15,})/g;
-  let m;
+  const lines = s.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   let pairs = [];
-  while ((m = re.exec(s)) !== null) {
-    const short = m[1].trim();
-    const expand = m[2].trim();
-    if (short.length >= 1 && short.length <= 5 && expand.length > short.length + 8) {
-      pairs.push({ short, expand });
+  for (let i = 0; i < lines.length - 1; i++) {
+    const line = lines[i];
+    const next = lines[i + 1];
+    if (line.length >= 1 && line.length <= 5 && /[。！？]$/.test(line) && next.length > line.length + 8) {
+      pairs.push({ short: line, expand: next });
     }
   }
-  if (pairs.length >= 2) {
-    hits.push({ word: `AI短句展开句式(${pairs.length}次"短句+展开"结构，如"${pairs[pairs.length-1].short}。${pairs[pairs.length-1].expand.slice(0, 12)}…"，属AI标志性写法，连续使用即为AI痕迹`, count: pairs.length, template: true });
+  if (pairs.length >= 1) {
+    hits.push({ word: `AI短句展开句式(${pairs.length}次"短句+展开"结构，如"${pairs[pairs.length-1].short}${pairs[pairs.length-1].expand.slice(0, 12)}…"，属AI标志性写法，连续使用即为AI痕迹`, count: pairs.length, template: true });
   }
   return hits;
 }

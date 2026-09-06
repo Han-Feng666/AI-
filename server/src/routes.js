@@ -5465,6 +5465,25 @@ router.post('/settings/llm-models/route-test', (req, res) => {
   res.json({ routed: true, provider: cfg.provider, model: cfg.model, baseUrl: cfg.baseUrl, hasKey: !!cfg.apiKey });
 });
 
+// 模型健康检测：测试指定模型是否能正常响应
+router.post('/settings/llm-models/:mid/health-check', async (req, res) => {
+  const models = getModels();
+  const model = models.find((m) => m.id === req.params.mid);
+  if (!model) return res.status(404).json({ error: '模型不存在' });
+  const startTime = Date.now();
+  try {
+    const r = await chat({
+      config: { ...model.config, maxTokens: 10 },
+      messages: [{ role: 'user', content: '你好' }],
+      maxTokens: 10,
+      timeout: 15000
+    });
+    res.json({ ok: true, model: model.config.model, latency: Date.now() - startTime, response: (r.content || '').slice(0, 50) });
+  } catch (e) {
+    res.json({ ok: false, error: e.message, latency: Date.now() - startTime });
+  }
+});
+
 // ---------- 获取可用模型列表（OpenAI 兼容 /v1/models） ----------
 router.post('/settings/models', async (req, res) => {
   const { llm_config } = req.body || {};

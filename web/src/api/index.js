@@ -263,6 +263,7 @@ export const api = {
   updateLLMModel: (mid, patch) => http.put(`/settings/llm-models/${mid}`, patch),
   deleteLLMModel: (mid) => http.delete(`/settings/llm-models/${mid}`),
   testLLMRoute: (task) => http.post('/settings/llm-models/route-test', { task }, { timeout: 180000 }),
+  healthCheckModel: (mid) => http.post(`/settings/llm-models/${mid}/health-check`, {}, { timeout: 20000 }),
 
   // 技能库
   listSkills: () => http.get('/skills'),

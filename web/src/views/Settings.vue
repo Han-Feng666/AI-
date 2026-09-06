@@ -23,6 +23,8 @@ const savingPreset = ref(false);
 // 多 AI 大模型（同时启用多个，按任务路由）
 const taskOptions = ref([]);
 const showModelDialog = ref(false);
+const testingModelId = ref(null);
+const modelHealth = ref({});
 const editingModel = ref(null);
 const modelDraft = ref({ name: '', enabled: true, tasks: [], config: {} });
 const savingModel = ref(false);
@@ -196,6 +198,24 @@ async function removeModel(m) {
     ElMessage.success('已删除模型');
   } catch (e) {
     ElMessage.error(e.message);
+  }
+}
+
+async function testModel(m) {
+  testingModelId.value = m.id;
+  try {
+    const r = await api.healthCheckModel(m.id);
+    modelHealth.value[m.id] = r;
+    if (r.ok) {
+      ElMessage.success(`${m.name} 检测通过，延迟 ${r.latency}ms`);
+    } else {
+      ElMessage.warning(`${m.name} 检测失败：${r.error}`);
+    }
+  } catch (e) {
+    modelHealth.value[m.id] = { ok: false, error: e.message };
+    ElMessage.error(e.message);
+  } finally {
+    testingModelId.value = null;
   }
 }
 
@@ -995,25 +1015,34 @@ async function fetchModels(auto = false) {
         <el-button type="primary" plain @click="openAddModel">添加一个模型</el-button>
       </div>
 
-      <div v-else class="mm-list">
-        <div v-for="m in store.llm_models" :key="m.id" class="mm-item" :class="{ off: !m.enabled }">
-          <div class="mm-item-head">
-            <el-switch :model-value="!!m.enabled" @change="(v) => toggleModel(m, v)" />
-            <span class="mm-name">{{ m.name }}</span>
-            <span class="mm-model-tag">{{ m.config?.model || '未命名模型' }}</span>
-            <div class="mm-actions">
-              <el-button size="small" @click="openEditModel(m)">编辑</el-button>
-              <el-button size="small" type="danger" plain @click="removeModel(m)">删除</el-button>
+          <div v-else class="mm-list">
+            <div v-for="m in store.llm_models" :key="m.id" class="mm-item" :class="{ off: !m.enabled }">
+              <div class="mm-item-head">
+                <el-switch :model-value="!!m.enabled" @change="(v) => toggleModel(m, v)" />
+                <span class="mm-name">{{ m.name }}</span>
+                <span class="mm-model-tag">{{ m.config?.model || '未命名模型' }}</span>
+                <el-tag v-if="m.config?.temperature !== undefined" size="small" type="info" style="margin-left:4px">
+                  T={{ m.config.temperature }}
+                </el-tag>
+                <div class="mm-actions">
+                  <el-button size="small" @click="openEditModel(m)">编辑</el-button>
+                  <el-button size="small" @click="testModel(m)" :loading="testingModelId === m.id">检测</el-button>
+                  <el-button size="small" type="danger" plain @click="removeModel(m)">删除</el-button>
+                </div>
+              </div>
+              <div class="mm-tasks">
+                <el-tag v-for="t in (m.tasks || [])" :key="t" size="small" :type="m.enabled ? 'success' : 'info'" style="margin-right:6px">
+                  {{ taskLabel(t) }}
+                </el-tag>
+                <span v-if="!m.tasks || !m.tasks.length" class="mm-no-task">未指派任务（当前不参与路由）</span>
+              </div>
+              <div v-if="modelHealth[m.id]" class="mm-health">
+                <el-tag :type="modelHealth[m.id].ok ? 'success' : 'danger'" size="small">
+                  {{ modelHealth[m.id].ok ? `✓ ${modelHealth[m.id].latency}ms` : `✗ ${modelHealth[m.id].error?.slice(0, 30)}` }}
+                </el-tag>
+              </div>
             </div>
           </div>
-          <div class="mm-tasks">
-            <el-tag v-for="t in (m.tasks || [])" :key="t" size="small" :type="m.enabled ? 'success' : 'info'" style="margin-right:6px">
-              {{ taskLabel(t) }}
-            </el-tag>
-            <span v-if="!m.tasks || !m.tasks.length" class="mm-no-task">未指派任务（当前不参与路由）</span>
-          </div>
-        </div>
-      </div>
 
       <div class="mm-route-check">
         <div class="mm-route-check-bar">
@@ -1087,6 +1116,15 @@ async function fetchModels(auto = false) {
             </el-checkbox-group>
           </div>
         </el-form-item>
+        <div class="two-col">
+          <el-form-item label="Temperature（创意度）">
+            <el-slider v-model="modelDraft.config.temperature" :min="0" :max="1.5" :step="0.1" show-input />
+            <div class="field-tip">0=严谨精确，1=富有创意，1.5=天马行空。写作建议 0.7-0.9，分析检测建议 0.1-0.3</div>
+          </el-form-item>
+          <el-form-item label="单次最大输出 Token">
+            <el-input-number v-model="modelDraft.config.maxTokens" :min="500" :max="32000" :step="500" style="width:100%" />
+          </el-form-item>
+        </div>
         <div class="field-tip">同一任务可指派给多个模型，路由时优先选用配置完整（有 Key 或本地模型）的那一个。填写 Base URL 与 Key 后会自动拉取可用模型列表，免去手动输入模型名。</div>
       </el-form>
       <template #footer>
@@ -1412,6 +1450,7 @@ async function fetchModels(auto = false) {
 .mm-actions { margin-left: auto; display: flex; gap: 6px; }
 .mm-tasks { margin-top: 10px; }
 .mm-no-task { font-size: 12px; color: #9ca3af; }
+.mm-health { margin-top: 6px; }
 .mm-route-check {
   margin-top: 14px;
   font-size: 13px;

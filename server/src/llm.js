@@ -152,7 +152,9 @@ function buildHeaders(config) {
     'Content-Type': 'application/json'
   };
   const apiKey = (config.apiKey || '').trim();
-  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  if (apiKey) {
+    headers['Authorization'] = config.noBearer ? apiKey : `Bearer ${apiKey}`;
+  }
   return headers;
 }
 
