@@ -344,7 +344,7 @@ export const useEditorStore = defineStore('editor', {
     },
 
     async generatePlan(params) {
-      if (this.busy) return null;
+      if (this.busy) throw new Error('系统正忙，请等待当前任务完成后再试');
       const originId = this.novelId;
       this.busy = true;
       this.busyLabel = '正在生成创作方案…';
@@ -397,9 +397,10 @@ export const useEditorStore = defineStore('editor', {
         return data;
       } catch (e) {
         if (e.message === '已停止') return null;
+        this._commit(originId, { busy: false, busyLabel: '生成失败', genStream: '', _genAbort: null });
         throw e;
       } finally {
-        this._commit(originId, { busy: false, busyLabel: '', genStream: '', _genAbort: null });
+        this._commit(originId, { busy: false, busyLabel: this.busyLabel || '', genStream: this.genStream || '', _genAbort: null });
       }
     },
 
@@ -437,9 +438,10 @@ export const useEditorStore = defineStore('editor', {
         return data;
       } catch (e) {
         if (e.message === '已停止') return null;
+        this._commit(originId, { busy: false, busyLabel: '方案修订失败', genStream: '', genProgress: 0, _genAbort: null });
         throw e;
       } finally {
-        this._commit(originId, { busy: false, busyLabel: '', genStream: '', genProgress: 0, _genAbort: null });
+        this._commit(originId, { busy: false, busyLabel: this.busyLabel || '', genStream: this.genStream || '', genProgress: this.genProgress || 0, _genAbort: null });
       }
     },
 
@@ -581,7 +583,7 @@ export const useEditorStore = defineStore('editor', {
         throw e;
       } finally {
         if (!done) {
-          this._commit(originId, { busy: false, busyLabel: '', genStream: '', genProgress: 0, _genAbort: null });
+          this._commit(originId, { busy: false, busyLabel: this.busyLabel || '', genStream: this.genStream, genProgress: this.genProgress, _genAbort: null });
         }
       }
     },
@@ -646,7 +648,7 @@ export const useEditorStore = defineStore('editor', {
         if (e.message === '已停止') return null;
         throw e;
       } finally {
-        this._commit(originId, { busy: false, busyLabel: '', genStream: '', _genAbort: null });
+        this._commit(originId, { busy: false, busyLabel: this.busyLabel || '', genStream: this.genStream || '', _genAbort: null });
       }
     },
 
@@ -690,7 +692,7 @@ export const useEditorStore = defineStore('editor', {
         if (e.message === '已停止') return null;
         throw e;
       } finally {
-        this._commit(originId, { busy: false, busyLabel: '', genStream: '', genProgress: 0, _genAbort: null });
+        this._commit(originId, { busy: false, busyLabel: this.busyLabel || '', genStream: this.genStream || '', genProgress: this.genProgress || 0, _genAbort: null });
       }
     },
 
@@ -728,7 +730,7 @@ export const useEditorStore = defineStore('editor', {
         if (e.message === '已停止') return null;
         throw e;
       } finally {
-        this._commit(originId, { busy: false, busyLabel: '', genStream: '', genProgress: 0, _genAbort: null });
+        this._commit(originId, { busy: false, busyLabel: this.busyLabel || '', genStream: this.genStream || '', genProgress: this.genProgress || 0, _genAbort: null });
       }
     },
 
@@ -767,7 +769,7 @@ export const useEditorStore = defineStore('editor', {
         if (e.message === '已停止') return null;
         throw e;
       } finally {
-        this._commit(originId, { busy: false, busyLabel: '', genStream: '', genProgress: 0, _genAbort: null });
+        this._commit(originId, { busy: false, busyLabel: this.busyLabel || '', genStream: this.genStream || '', genProgress: this.genProgress || 0, _genAbort: null });
       }
     },
 

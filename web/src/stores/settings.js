@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia';
+import { ElMessage } from 'element-plus';
 import api from '../api';
 
 export const useSettingsStore = defineStore('settings', {
@@ -46,7 +47,7 @@ export const useSettingsStore = defineStore('settings', {
         if (s.ai_score_pass !== undefined) this.ai_score_pass = Number(s.ai_score_pass) || 15;
         if (s.managerSendBy) this.managerSendBy = s.managerSendBy === 'ctrlEnter' ? 'ctrlEnter' : 'enter';
       } catch (e) {
-        console.warn('加载设置失败', e);
+        e.message && ElMessage.error('加载设置失败: ' + e.message);
       }
       this.loaded = true;
     },

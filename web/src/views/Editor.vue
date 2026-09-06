@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { getGenDraft, getGenDraftMeta, clearGenDraft } from '../utils/format';
+import { getGenDraftMeta, clearGenDraft } from '../utils/format';
 import { useEditorStore } from '../stores/editor';
 import { useSettingsStore } from '../stores/settings';
 import NavBar from '../components/NavBar.vue';

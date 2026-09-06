@@ -25,7 +25,7 @@ class EventBus {
   emit(type, payload) {
     this._map.get(type)?.forEach((h) => {
       try { h(payload); }
-      catch (e) { console.warn('[workspaceEventBus] handler error:', e); }
+      catch (e) { /* ignore handler errors */ }
     });
   }
   clear() { this._map.clear(); }

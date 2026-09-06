@@ -182,7 +182,9 @@ function send(text) {
   const content = (text ?? input.value).trim();
   if (!content) return;
   input.value = '';
-  manager.send(content, novelId.value).catch(() => {});
+  manager.send(content, novelId.value).catch((e) => {
+    ElMessage.error(e?.message || 'AI总管响应失败');
+  });
 }
 
 async function clear() {

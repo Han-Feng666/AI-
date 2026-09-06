@@ -13,8 +13,11 @@ export function buildNovelContext(novel, characters = [], recentChapters = [], h
   const parts = [];
   parts.push(`【作品名称】${escapePromptInput(novel.title || '未命名')}`);
   parts.push(`【类型】${escapePromptInput(novel.genre || '未设定')}`);
-  if (novel.world_view) parts.push(`【世界观设定】\n${escapePromptInput(novel.world_view)}`);
-  if (novel.outline) parts.push(`【剧情大纲】\n${escapePromptInput(novel.outline)}`);
+  // 世界观和大纲过长时截断，防止挤占记忆上下文
+  const MAX_WORLD = 1500;
+  const MAX_OUTLINE = 2000;
+  if (novel.world_view) parts.push(`【世界观设定】\n${escapePromptInput(novel.world_view.length > MAX_WORLD ? novel.world_view.slice(0, MAX_WORLD) + '…（世界观较长，已按上下文上限截断）' : novel.world_view)}`);
+  if (novel.outline) parts.push(`【剧情大纲】\n${escapePromptInput(novel.outline.length > MAX_OUTLINE ? novel.outline.slice(0, MAX_OUTLINE) + '…（大纲较长，已按上下文上限截断）' : novel.outline)}`);
 
   if (memoryBlock && String(memoryBlock).trim()) {
     parts.push(`【作品记忆（全书长效记忆，包含历史章节摘要与人物状态，创作时必须遵循，不得与既定事实冲突）】\n${escapePromptInput(String(memoryBlock).trim())}`);
@@ -1073,6 +1076,33 @@ export const AI_DETECT_SYSTEM = `你是反 AI 味审查员，检测标准严苛�
 - 若没有明显问题，score 应小于等于 30，issues 返回空数组
 - 检测要严谨，宁可多报疑似项，也不要漏报`;
 
+// System prompt 预算控制：按优先级从低到高截断，确保总长度不超 token 预算
+// 优先级: 基础系统 > 宪法 > 角色语音 > 风格DNA > 题材指南 > 文风基准 > 动态范文 > 风格范本 > 知识库 > 技能库 > 风格分析
+function enforceSysBudget(text, maxChars = 28000) {
+  if (text.length <= maxChars) return text;
+  // 截断策略：从文本末尾向前，找可剥离的块（以【开头、换行分隔的块）
+  const blocks = [];
+  const re = /(\n\n【[^】]+】[\s\S]*?)(?=\n\n【[^】]+】|$)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) blocks.push({ start: m.index, end: m.index + m[1].length, text: m[1] });
+  // 截断优先级（越靠后越优先截断）: 风格分析 > 技能库 > 知识库 > 风格范本 > 动态范文 > 文风基准 > 题材指南 > 风格DNA > 角色语音 > 宪法 > 基础
+  const truncateOrder = ['写作风格参考', '技能库', '知识学习库', '真人文风参照', '动态范文参照', '文风基准', '题材指南', '类型边界', '风格DNA', '角色语音', '小说宪法'];
+  let remaining = text;
+  for (const keyword of truncateOrder) {
+    if (remaining.length <= maxChars) break;
+    const idx = remaining.lastIndexOf('【' + keyword);
+    if (idx > 0) {
+      const nextBlock = remaining.indexOf('\n\n【', idx + 1);
+      remaining = nextBlock > 0 ? remaining.slice(0, nextBlock) : remaining.slice(0, idx);
+    }
+  }
+  if (remaining.length > maxChars) {
+    // 紧急截断：直接切到预算内
+    remaining = remaining.slice(0, maxChars);
+  }
+  return remaining;
+}
+
 export function buildChapterSystem(styles, baseline, samples, presets, opts = {}) {
   let sys = CHAPTER_SYSTEM;
   if (presets && presets.length) {
@@ -1142,7 +1172,7 @@ ${parts.join('\n\n')}
       if (boundary) sys += `\n\n${boundary}`;
     }
   }
-  return sys;
+  return enforceSysBudget(sys);
 }
 
 export function buildPolishSystem(styles, baseline, samples, presets, opts = {}) {
@@ -1197,7 +1227,7 @@ ${styles.map((s) => `《${s.name}》：\n${s.analysis || ''}`).join('\n\n')}
       sys += `\n\n${guide}`;
     }
   }
-  return sys;
+  return enforceSysBudget(sys);
 }
 
 export function buildReviseSystem(styles, baseline, samples, presets, opts = {}) {
@@ -1252,7 +1282,7 @@ ${styles.map((s) => `《${s.name}》：\n${s.analysis || ''}`).join('\n\n')}
       sys += `\n\n${guide}`;
     }
   }
-  return sys;
+  return enforceSysBudget(sys);
 }
 
 // 带上一轮检测问题的反馈闭环润色：逐条针对性修正，而非笼统"去AI味"

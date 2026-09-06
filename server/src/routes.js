@@ -934,7 +934,9 @@ function refreshMemoryFile(novelId) {
 }
 
 // 按上下文预算截断记忆文本：优先保留设定/角色，章节记忆从最老开始丢弃（最近优先）
-function trimMemoryToBudget(text, budgetTokens) {  if (!text || estimateTokens(text) <= budgetTokens) return text;
+// 改进：早期章节摘要压缩为单行关键情节，而非完全丢弃，防止长篇小说失忆
+function trimMemoryToBudget(text, budgetTokens) {
+  if (!text || estimateTokens(text) <= budgetTokens) return text;
   const marker = '【章节记忆】';
   const idx = text.indexOf(marker);
   if (idx === -1) {
@@ -942,12 +944,27 @@ function trimMemoryToBudget(text, budgetTokens) {  if (!text || estimateTokens(t
   }
   const head = text.slice(0, idx + marker.length);
   const lines = text.slice(idx + marker.length).split('\n').filter(Boolean);
+  // 策略：最近 15 章完整保留，更早的压缩为关键情节单行
+  const RECENT_FULL = 15;
   const kept = [];
   let used = estimateTokens(head);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const t = estimateTokens(lines[i]);
+  // 先加最近 RECENT_FULL 章（从末尾）
+  const recentLines = lines.slice(-RECENT_FULL);
+  const olderLines = lines.slice(0, -RECENT_FULL);
+  for (let i = recentLines.length - 1; i >= 0; i--) {
+    const t = estimateTokens(recentLines[i]);
     if (used + t > budgetTokens) break;
-    kept.unshift(lines[i]);
+    kept.unshift(recentLines[i]);
+    used += t;
+  }
+  // 更早的章节：压缩为"第N章：关键情节"单行
+  for (let i = olderLines.length - 1; i >= 0; i--) {
+    const line = olderLines[i];
+    // 提取关键情节：取摘要的前 30 字
+    const compressed = line.replace(/^第(\d+)章\s*/, '第$1章：').slice(0, 40);
+    const t = estimateTokens(compressed + '\n');
+    if (used + t > budgetTokens) break;
+    kept.unshift(compressed);
     used += t;
   }
   return head + '\n' + kept.join('\n');
