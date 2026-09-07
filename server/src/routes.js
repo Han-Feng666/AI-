@@ -3380,7 +3380,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         regenSysOpts = { ...regenSysOpts, autoPolish: true };
       }
       // 缓存 system prompt，避免每轮续写重复构建（减少内存分配）
-      const chapterSystemPrompt = buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), regenSysOpts);
+      const chapterSystemPrompt = buildChapterSystem(getStyles(parseStyleIds(novel)), novel.style_baseline, novel.style_samples, parseStylePresets(novel), { ...regenSysOpts, config });
       // 自动续写：单次输出被 max_tokens 截断（finish_reason=length）或模型提前停止时继续往下写，直到达到目标字数
       // 续写轮数上限从12降到6，减少内存峰值
       for (let round = 0; round < 6; round++) {

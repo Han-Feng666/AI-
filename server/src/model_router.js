@@ -2,6 +2,7 @@
 // settings 表新增键 llm_models = JSON 数组，每条为 { id, name, enabled, tasks[], config }
 import { getSetting, setSetting } from './db.js';
 import { normalizeLLMConfig } from './lib.js';
+import { getRecommendedContextLength } from './llm.js';
 
 // 任务类型定义（前端展示用）
 export const TASK_TYPES = {
@@ -26,13 +27,20 @@ export function getModels() {
 export function saveModels(models) {
   const safe = (Array.isArray(models) ? models : [])
     .filter((m) => m && m.id)
-    .map((m) => ({
-      id: m.id,
-      name: m.name || '未命名模型',
-      enabled: !!m.enabled,
-      tasks: Array.isArray(m.tasks) ? m.tasks : [],
-      config: normalizeLLMConfig(m.config || {})
-    }));
+    .map((m) => {
+      const config = normalizeLLMConfig(m.config || {});
+      // 自动设置上下文长度：用户未设置时，根据模型名推荐
+      if (!config.contextLength || config.contextLength <= 0) {
+        config.contextLength = getRecommendedContextLength(config.model);
+      }
+      return {
+        id: m.id,
+        name: m.name || '未命名模型',
+        enabled: !!m.enabled,
+        tasks: Array.isArray(m.tasks) ? m.tasks : [],
+        config
+      };
+    });
   setSetting('llm_models', JSON.stringify(safe));
   return safe;
 }

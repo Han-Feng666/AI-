@@ -118,11 +118,44 @@ const DEFAULT_CONFIG = {
   forceNonStreaming: false
 };
 
+// 模型上下文长度推荐值（按模型名关键字匹配），用户未设置时自动使用
+const MODEL_CONTEXT_LENGTHS = [
+  { pattern: /kimi-k3|kimi-k2\.6|moonshot-v1-(32k|128k)|moonshot-kimi-k2\.6/, length: 131072 },
+  { pattern: /kimi-k2|kimi-k1\.5|moonshot-v1-32k/, length: 32768 },
+  { pattern: /deepseek-v4-(pro|flash)|deepseek-v3/, length: 65536 },
+  { pattern: /deepseek-v2|deepseek-chat|deepseek-reasoner/, length: 32768 },
+  { pattern: /glm-5\.[23]-flash|glm-5\.[23]/, length: 131072 },
+  { pattern: /glm-4-(plus|air|flash)/, length: 32768 },
+  { pattern: /qwen3|qwen-plus|qwen-max|qwen2\.5/, length: 32768 },
+  { pattern: /gpt-4o-mini|gpt-4o/, length: 131072 },
+  { pattern: /gpt-4\.1|gpt-4\.5/, length: 131072 },
+  { pattern: /gpt-3\.5|gpt-4/, length: 16384 },
+  { pattern: /claude-3\.5|claude-3\.7|claude-4/, length: 200000 },
+  { pattern: /llama-3|llama-4|qwen2\.5:14b|qwen2\.5:72b/, length: 32768 },
+  { pattern: /o1|o3|o4|gpt-5/, length: 131072 }
+];
+
+// 根据模型名自动推荐上下文长度
+export function getRecommendedContextLength(model) {
+  const m = String(model || '').toLowerCase();
+  for (const { pattern, length } of MODEL_CONTEXT_LENGTHS) {
+    if (pattern.test(m)) return length;
+  }
+  return 32768;
+}
+
 // 计算单次请求的上下文预算（token）：窗口 - 输出预留 - 余量
 export function contextBudget(config) {
-  const ctx = Number(config?.contextLength) || 32768;
+  const ctx = Number(config?.contextLength) || getRecommendedContextLength(config?.model) || 32768;
   const out = Number(config?.maxTokens) || 8192;
   return Math.max(4096, Math.floor(ctx - out - 4096));
+}
+
+// 根据模型上下文长度动态调整系统提示预算
+export function sysBudgetForConfig(config) {
+  const ctx = Number(config?.contextLength) || getRecommendedContextLength(config?.model) || 32768;
+  // 小模型 28000 字，大模型按比例提升，最高 100000 字
+  return Math.min(100000, Math.max(28000, Math.floor(ctx * 1.5)));
 }
 
 // 基于预算裁剪历史消息：保留首条（system）与末条（最新 user），从最旧开始丢中间历史

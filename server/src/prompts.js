@@ -1,5 +1,6 @@
 // 提示词组装：将小说设定、角色、历史记忆组装成系统提示词
 import { estimateTokens } from './lib.js';
+import { sysBudgetForConfig } from './llm.js';
 
 // 转义用户输入，防止 prompt injection：将可能破坏提示词结构的字符替换为全角
 function escapePromptInput(text) {
@@ -1156,7 +1157,7 @@ export function buildChapterSystem(styles, baseline, samples, presets, opts = {}
       sys += `\n\n【参考范文（模仿其句式节奏，禁止照搬人物/情节）】\n${exampleMatch[1].trim()}`;
     }
   }
-  return enforceSysBudget(sys);
+  return enforceSysBudget(sys, sysBudgetForConfig(opts.config || {}));
 }
 
 export function buildPolishSystem(styles, baseline, samples, presets, opts = {}) {
