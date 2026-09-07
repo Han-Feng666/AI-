@@ -1180,9 +1180,16 @@ ${parts.join('\n\n')}
   if (opts.characterVoices && String(opts.characterVoices).trim()) {
     sys += `\n\n【角色语音档案（每个角色的说话方式，写对话时必须严格匹配，不得让角色说出不符合其语音档案的话）】\n${String(opts.characterVoices).trim()}`;
   }
-  // 注入知识学习库分析
+  // 注入学习库（风格库+知识库合并为统一注入，避免互相竞争上下文）
+  const learningBlocks = [];
   if (opts.knowledgeBlock && String(opts.knowledgeBlock).trim()) {
-    sys += `\n\n${String(opts.knowledgeBlock).trim()}`;
+    learningBlocks.push(String(opts.knowledgeBlock).trim());
+  }
+  if (opts.styleBlock && String(opts.styleBlock).trim()) {
+    learningBlocks.push(String(opts.styleBlock).trim());
+  }
+  if (learningBlocks.length) {
+    sys += `\n\n${learningBlocks.join('\n\n')}`;
   }
   // 注入技能库
   if (opts.skillsBlock && String(opts.skillsBlock).trim()) {
@@ -1711,7 +1718,7 @@ ${styles.map((s) => `《${s.name}》：\n${s.analysis || ''}`).join('\n\n')}
 // ===== 知识学习库 =====
 
 // 学习分析 prompt：从导入的小说文本中提取可复用的写作经验
-export const KNOWLEDGE_LEARN_SYSTEM = `你是一位资深小说编辑和写作分析师。请深入分析给定的小说文本，提取出可复用的写作经验，供 AI 创作时参考学习。
+export const KNOWLEDGE_LEARN_SYSTEM = `你是一位资深小说编辑和写作分析师。请深入分析给定的小说文本，提取出具体可操作的写作经验，供 AI 创作时直接模仿。
 
 请从以下 7 个维度分析，输出一个 JSON 对象：
 
@@ -1722,7 +1729,8 @@ export const KNOWLEDGE_LEARN_SYSTEM = `你是一位资深小说编辑和写作�
   "worldview": "世界观构建分析：这类小说的世界观通常包含哪些核心要素？核心规则/社会结构/核心矛盾是什么？世界观如何逐步展开而不信息倾泻？用 2-3 句话描述。",
   "character_craft": "人物塑造分析：角色出场/性格刻画/成长弧线/关系构建的手法是什么？配角如何衬托主角？反派如何设计？用 3-4 句话概括。",
   "scene_patterns": "可复用场景模式：列出 3-5 个这类小说中反复出现的经典场景类型（如'师徒对峙'、'秘境夺宝'、'城楼诀别'），每个场景说明其核心冲突、情绪走向、常用写法套路和常见变体。要具体到可以直接套用结构。",
-  "replicable_techniques": "可复用技法：列出 3-5 个最值得学习的具体写作技法（如'用环境描写暗示角色心理'、'对话中埋伏笔'、'打斗场面中穿插回忆'等），每条一句话，要具体到可以照做。"
+  "replicable_techniques": "可复用技法：列出 3-5 个最值得学习的具体写作技法（如'用环境描写暗示角色心理'、'对话中埋伏笔'、'打斗场面中穿插回忆'等），每条一句话，要具体到可以照做。",
+  "concrete_examples": "从原文中摘录 3 个最能代表上述写作特点的句段（每段不超过 80 字），原样保留。这些句段将作为范文直接展示给创作 AI。"
 }
 
 要求：
@@ -1759,7 +1767,8 @@ export const FINAL_SYNTHESIS_SYSTEM = `你是资深小说编辑和写作分析�
   "worldview": "世界观构建分析",
   "character_craft": "人物塑造分析",
   "scene_patterns": "可复用场景模式",
-  "replicable_techniques": "可复用技法"
+  "replicable_techniques": "可复用技法",
+  "concrete_examples": "从原文中摘录 3 个最能代表上述写作特点的句段（每段不超过 80 字），原样保留"
 }
 
 只输出 JSON，不要其他文字。`;

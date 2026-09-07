@@ -110,6 +110,7 @@ export function getKnowledgeByGenres(genres, limit = 3) {
 
 /**
  * 组装知识注入块（供方案生成/章节生成 prompt 使用）
+ * 输出具体可操作的写作规则，而非抽象分析
  */
 export function formatKnowledgeBlock(corporaIds) {
   if (!corporaIds || !corporaIds.length) return '';
@@ -122,23 +123,27 @@ export function formatKnowledgeBlock(corporaIds) {
   if (!rows.length) return '';
   const blocks = rows.map((r, i) => {
     let analysis = r.analysis || '';
+    let examples = '';
     try {
       const parsed = JSON.parse(analysis);
+      if (parsed && typeof parsed.object === 'object') analysis = parsed = parsed.object;
       if (parsed && typeof parsed === 'object') {
         const parts = [];
-        if (parsed.writing_style) parts.push(`【文笔风格】${parsed.writing_style}`);
-        if (parsed.plot_patterns) parts.push(`【剧情套路】${parsed.plot_patterns}`);
-        if (parsed.logic_rules) parts.push(`【逻辑规律】${parsed.logic_rules}`);
-        if (parsed.worldview) parts.push(`【世界观构建】${parsed.worldview}`);
-        if (parsed.character_craft) parts.push(`【人物塑造】${parsed.character_craft}`);
-        if (parsed.scene_patterns) parts.push(`【经典场景模式】${parsed.scene_patterns}`);
-        if (parsed.replicable_techniques) parts.push(`【可复用技法】${parsed.replicable_techniques}`);
+        if (parsed.writing_style) parts.push(`文笔：${parsed.writing_style}`);
+        if (parsed.plot_patterns) parts.push(`剧情：${parsed.plot_patterns}`);
+        if (parsed.logic_rules) parts.push(`逻辑：${parsed.logic_rules}`);
+        if (parsed.worldview) parts.push(`世界观：${parsed.worldview}`);
+        if (parsed.character_craft) parts.push(`人物：${parsed.character_craft}`);
+        if (parsed.scene_patterns) parts.push(`场景：${parsed.scene_patterns}`);
+        if (parsed.replicable_techniques) parts.push(`技法：${parsed.replicable_techniques}`);
+        if (parsed.concrete_examples) parts.push(`范文：${parsed.concrete_examples}`);
         analysis = parts.join('\n');
+        if (parsed.concrete_examples) examples = parsed.concrete_examples;
       }
     } catch { /* analysis 本身就是纯文本 */ }
-    return `### 学习素材 ${i + 1}：《${r.title}》（${r.genre}，${r.total_words} 字）\n${analysis}`;
+    return `【参考作品 ${i+1}】《${r.title}》（${r.genre}）\n${analysis}${examples ? '\n' + examples : ''}`;
   });
-  return `\n\n【已学习参考作品分析】\n以下是从优秀同类作品中学习到的写作经验，请在创作时充分借鉴其文笔、剧情逻辑、人物塑造和世界观构建方式，但不要照搬具体内容：\n\n${blocks.join('\n\n')}`;
+  return `\n\n【学习库：参考作品写作经验（模仿其写法，禁止照搬人物/情节）】\n${blocks.join('\n\n')}`;
 }
 
 /**
