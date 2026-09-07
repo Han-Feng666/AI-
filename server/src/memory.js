@@ -1,5 +1,7 @@
 import { db } from './db.js';
 import { chat } from './llm.js';
+import { estimateTokens } from './lib.js';
+import { readStoryLogFile, writeStoryLogFile } from './storage.js';
 import { NOVEL_CONSTITUTION_BUILD_SYSTEM, PLOT_CONSISTENCY_CHECK_SYSTEM } from './prompts.js';
 
 // ====================================================================
@@ -466,4 +468,98 @@ function extractJsonSafe(text) {
     try { return JSON.parse(t.slice(s, e + 1)); } catch { /* */ }
   }
   return null;
+}
+
+// ---------- 全书剧情日志：每章一行确定性剧情档案（防失忆/防剧情漂移） ----------
+// 文件「剧情日志.txt」位于小说文件夹下，与大纲、细纲、世界观并列作为生成时的注入源。
+// 规则：生成第 N 章时只注入第 1..N-1 章的剧情行；保存/重新生成第 N 章后覆盖第 N 章那一行，
+// 后续生成始终以最新正典剧情为准，避免重新生成后新旧剧情混杂。
+
+const STORY_LOG_HEADER = '【全书剧情日志（每章一行；重新生成某章后该行会自动覆盖）】';
+
+function isPlaceholderSummary(s) {
+  const t = String(s || '');
+  return !t.trim() || t.includes('自动生成占位') || t.includes('根据大纲推进剧情');
+}
+
+function storyLogLine(idx, title, summary) {
+  const oneLine = String(summary || '').replace(/\s+/g, ' ').trim();
+  const cleanTitle = String(title || '').trim().replace(/^第\s*[0-9零一二三四五六七八九十百千万两〇]+\s*章\s*/, '');
+  return `第${idx}章 ${cleanTitle || '未命名'}：${oneLine}`;
+}
+
+// 首次访问时从数据库初始化日志文件（已有正文的章节全部补录）
+export function initStoryLogIfNeeded(novel) {
+  const existing = readStoryLogFile(novel);
+  if (existing && existing.trim()) return existing;
+  const rows = db.prepare(
+    "SELECT chapter_index, title, summary, content FROM chapters WHERE novel_id = ? AND content IS NOT NULL AND content != '' ORDER BY chapter_index"
+  ).all(novel.id);
+  const lines = [STORY_LOG_HEADER];
+  for (const r of rows) {
+    let sum = r.summary;
+    if (isPlaceholderSummary(sum)) {
+      // 摘要缺失或为占位文案时用正文开头兜底，保证日志行有实际剧情信息
+      sum = String(r.content || '').replace(/\s+/g, '').slice(0, 120);
+    }
+    if (!sum) continue;
+    lines.push(storyLogLine(r.chapter_index, r.title, sum));
+  }
+  const text = lines.join('\n') + '\n';
+  writeStoryLogFile(novel, text);
+  return text;
+}
+
+// 章节保存/重新生成后覆盖该章日志行（保持章节顺序插入）
+export function upsertStoryLogEntry(novel, idx, title, summary) {
+  if (!novel || !idx || idx < 1) return false;
+  if (!summary || isPlaceholderSummary(summary)) return false;
+  const text = initStoryLogIfNeeded(novel);
+  const lines = text.split('\n').filter((l) => l.trim() !== '');
+  const line = storyLogLine(idx, title, summary);
+  const kept = lines.filter((l) => !new RegExp(`^第${idx}章\\s`).test(l));
+  // 按章节序号插入到正确位置（顺序生成时等价于追加末尾）
+  let insertAt = kept.length;
+  for (let i = 1; i < kept.length; i++) {
+    const m = kept[i].match(/^第(\d+)章/);
+    if (m && Number(m[1]) > idx) { insertAt = i; break; }
+  }
+  kept.splice(insertAt, 0, line);
+  writeStoryLogFile(novel, kept.join('\n') + '\n');
+  return true;
+}
+
+// 删除章节时同步移除该章日志行
+export function removeStoryLogEntry(novel, idx) {
+  if (!novel || !idx || idx < 1) return false;
+  const text = readStoryLogFile(novel);
+  if (!text) return false;
+  const kept = text.split('\n').filter((l) => l.trim() !== '' && !new RegExp(`^第${idx}章\\s`).test(l));
+  writeStoryLogFile(novel, kept.join('\n') + '\n');
+  return true;
+}
+
+// 组装注入块：仅保留第 beforeIdx 章之前的剧情行；超出预算时从最早章节开始丢（最近剧情对衔接最关键）
+export function buildStoryLogBlock(novel, beforeIdx, budgetTokens) {
+  if (!novel) return '';
+  const text = initStoryLogIfNeeded(novel);
+  const lines = text.split('\n').filter((l) => l.trim() !== '');
+  if (lines.length <= 1) return '';
+  const body = lines.slice(1).filter((l) => {
+    const m = l.match(/^第(\d+)章/);
+    return m && Number(m[1]) < (beforeIdx || 1);
+  });
+  if (!body.length) return '';
+  let kept = body;
+  if (budgetTokens && budgetTokens > 0) {
+    let total = 0;
+    kept = [];
+    for (let i = body.length - 1; i >= 0; i--) {
+      const t = estimateTokens(body[i]) + 1;
+      if (total + t > budgetTokens && kept.length) break;
+      total += t;
+      kept.unshift(body[i]);
+    }
+  }
+  return `【全书剧情日志（第1章至第${(beforeIdx || 1) - 1}章已发生剧情，每章一条。创作本章必须严格承接其走向，不得与已发生剧情矛盾或重复叙述）】\n${kept.join('\n')}`;
 }

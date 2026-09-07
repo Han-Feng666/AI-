@@ -19,7 +19,7 @@ import {
 import {
   getNovelsRoot, ensureRoot, setNovelsRoot, ensureNovelFolder, novelFolderPath,
   writeChapterTxt, deleteChapterTxt, renameNovelFolder, deleteNovelFolder,
-  readMemoryFile, writeMemoryFile
+  readMemoryFile, writeMemoryFile, writeStoryLogFile
 } from './storage.js';
 import { chat, contextBudget } from './llm.js';
 import { acquire as rateLimitAcquire, onRateLimited, getLimiterState, resetLimiter } from './rate_limit.js';
@@ -63,7 +63,8 @@ import {
   getOverdueForeshadowings, setExpectedRecall,
   detectStyleDrift, saveTimelineEvent, formatTimelineSummary,
   saveCharacterVoice, getCharacterVoices, formatCharacterVoices,
-  getConstitution, buildConstitution, checkPlotConsistency
+  getConstitution, buildConstitution, checkPlotConsistency,
+  upsertStoryLogEntry, removeStoryLogEntry, buildStoryLogBlock
 } from './memory.js';
 import { storeChunks, retrieveRelevant, formatRagBlock } from './rag.js';
 import {
@@ -1669,6 +1670,8 @@ async function applyPlan(novel, plan, opts = {}) {
   db.prepare('DELETE FROM characters WHERE novel_id = ?').run(novel.id);
   db.prepare('DELETE FROM chapters WHERE novel_id = ?').run(novel.id);
   db.prepare('DELETE FROM factions WHERE novel_id = ?').run(novel.id);
+  // 章节全部重置，剧情日志同步清空（保留空文件占位，下次生成时自动重建）
+  try { writeStoryLogFile(novel, ''); } catch { /* 日志清理失败不阻塞 */ }
 
   // 保存势力
   let factionMap = {};
@@ -2901,6 +2904,7 @@ router.delete('/novels/:id/chapters/:idx', async (req, res) => {
   try {
     await deleteChapterTxt(getNovel(req.params.id), Number(req.params.idx));
   } catch { /* 文件清理失败不阻塞 */ }
+  try { removeStoryLogEntry(getNovel(req.params.id), Number(req.params.idx)); } catch { /* 日志清理失败不阻塞 */ }
   res.json({ ok: true });
 });
 
@@ -3027,6 +3031,13 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         }
       } catch { memoryBlock = ''; }
     }
+
+    // 全书剧情日志：每章一行确定性剧情档案（用户可手动编辑纠偏），生成第 idx 章时只注入 1..idx-1；
+    // 重新生成某章保存后该行被覆盖，后续章节始终承接最新正典剧情。1M 窗口全量注入，小窗口保留最近章节。
+    let storyLogBlock = '';
+    try {
+      storyLogBlock = buildStoryLogBlock(novel, idx, Math.floor(contextBudget(config) * 0.2));
+    } catch { storyLogBlock = ''; }
     const context = useCompressed
       ? buildNovelContext(novel, characters, [], [], 0, '', novelFactions) + `\n\n【故事状态简报（已压缩，替代前情摘要与最近章节全文）】\n${novel.compressed_context}`
       : memoryBlock
@@ -3301,6 +3312,7 @@ ${prevTailBlock}
 - 角色说过的每一句话必须在本章正文中有明确出处，不得让角色"想起"本章未发生过的对话。
  ${foresBlock}
  ${worldBlock}
+ ${storyLogBlock}
  ${kmBlock}
  ${stageBlock}
  ${profileBlock}
@@ -4221,6 +4233,8 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
     try {
       const chSum = db.prepare('SELECT summary FROM chapters WHERE id = ?').get(chapterId)?.summary || '';
       if (chSum) saveChapterSummary(novel.id, idx, chSum);
+      // 剧情日志覆盖该章行（重新生成即覆盖正典剧情）；摘要缺失时用正文开头兜底
+      upsertStoryLogEntry(novel, idx, title, chSum || String(full).replace(/\s+/g, '').slice(0, 120));
       await compressSummariesIfNeeded(novel.id, idx, config);
     } catch { /* 分层摘要失败不阻塞 */ }
 

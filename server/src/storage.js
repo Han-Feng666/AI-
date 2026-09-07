@@ -127,3 +127,21 @@ export function writeMemoryFile(novel, text) {
   fs.writeFileSync(path.join(folder, '记忆.txt'), String(text || ''), 'utf8');
   return true;
 }
+
+// ---------- 全书剧情日志文件：小说文件夹下的「剧情日志.txt」，每章一行 ----------
+export function storyLogFilePath(novel) {
+  return path.join(novelFolderPath(novel), '剧情日志.txt');
+}
+
+export function readStoryLogFile(novel) {
+  const p = storyLogFilePath(novel);
+  if (!fs.existsSync(p)) return '';
+  return fs.readFileSync(p, 'utf8');
+}
+
+export function writeStoryLogFile(novel, text) {
+  const folder = novelFolderPath(novel);
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, '剧情日志.txt'), String(text || ''), 'utf8');
+  return true;
+}
