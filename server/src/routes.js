@@ -611,6 +611,9 @@ async function runStyleAnalysisPipeline({ config, ctrl, name, notes = '', text, 
   const { send } = sse;
   const trimmedName = String(name).trim();
 
+  // 重置限速器：避免上次残留的低速率（429 后退到 3 RPM）拖慢新任务
+  resetLimiter();
+
   send({ type: 'progress', progress: 2, message: '正在分块处理全文…' });
   const chunks = chunkWholeText(text);
   send({ type: 'progress', progress: 5, message: `正在用 AI 逐块分析写作风格（全文 ${text.length} 字，${chunks.length} 块，每块约 ${Math.ceil(text.length / chunks.length)} 字，已开启限速保护避免触发 API 限流）…` });
@@ -690,6 +693,8 @@ async function runKnowledgePipeline({ config, useOffline, ctrl, title, genre, au
   const sse = makePipelineSse({ onProgress, onStatus, onDelta });
   const { send } = sse;
   const corpusId = createCorpus({ title: title || '未命名作品', genre, author });
+  // 重置限速器：避免上次残留的低速率（429 后退到 3 RPM）拖慢新任务
+  resetLimiter();
   send({ type: 'status', message: '正在解析文本并分块…' });
 
   try {
@@ -818,6 +823,7 @@ function buildStyleInjection(novel, query) {
  * @returns {Promise<{tagged:number, failed:number}>}
  */
 async function tagSlicesRateLimited({ config, ctrl, slices, sse }) {
+  resetLimiter();
   const BATCH = 5;
   let tagged = 0;
   let failed = 0;

@@ -12,8 +12,8 @@
  */
 
 const WINDOW_MS = 60000;        // 滑动窗口：1 分钟
-const DEFAULT_RPM = 20;         // 默认每分钟请求数（保守值，避免打满大多数中转站）
-const MIN_RPM = 3;              // 429 退避后的最低速率
+const DEFAULT_RPM = 60;         // 默认每分钟请求数（hcnsec.cn 等中转站实际承载更高，60 RPM 留足余量）
+const MIN_RPM = 10;             // 429 退避后的最低速率（避免降到个位数导致几小时卡死）
 const RECOVERY_MS = 120000;     // 连续健康运行多长时间后恢复一档速率
 const MAX_COOLDOWN_MS = 120000; // 单次冷却上限（防止 Retry-After 过长导致长时间卡死）
 
