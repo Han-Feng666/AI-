@@ -143,6 +143,8 @@ export async function compressSummariesIfNeeded(novelId, currentIdx, config) {
   if (currentIdx % 100 === 0) await compressSummaryLevel(novelId, 3, config);
   // 每 400 章触发 level-4（超长连载）
   if (currentIdx % 400 === 0) await compressSummaryLevel(novelId, 4, config);
+  // 每 2000 章触发 level-5（千万字级连载）
+  if (currentIdx % 2000 === 0) await compressSummaryLevel(novelId, 5, config);
 }
 
 // ---------- P1-1: 结构化事实库 ----------
