@@ -3563,8 +3563,15 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
           problems.push({ desc: `AI 味明显（${regexTotal} 分，阈值 ${aiScorePass()}${bl.length ? '；高频复用词语：' + bl.join('、') : ''}${templateHits ? `；模板句式命中 ${templateHits} 类` : ''}）` });
         } else {
           // 正则检测通过，再做 LLM 深度检测
+          // 采样策略：长文分三段均匀覆盖（前+中+后），避免中间大段跳过
           try {
-            const detectText = full.length > 3500 ? full.slice(0, 3000) + '\n...\n' + full.slice(-500) : full;
+            let detectText;
+            if (full.length > 3500) {
+              const third = Math.floor(full.length / 3);
+              detectText = full.slice(0, 1200) + '\n...\n' + full.slice(third, third + 1200) + '\n...\n' + full.slice(-800);
+            } else {
+              detectText = full;
+            }
             det = await runDetection(config, detectText);
             total = Math.min(100, det.score + regexScore);
             if (total > aiScorePass()) {
@@ -3773,8 +3780,26 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
 
       if (attempt < MAX_AUTO_REGENERATE) continue; // 整章重新生成
 
-      // 已达重试上限：保存当前版本并提示，允许用户后续再手动修改
-      send({ type: 'status', message: `已自动重试 ${MAX_AUTO_REGENERATE} 次仍有 ${problems.length} 处问题，先保存当前版本，可在章节操作中继续修改。` });
+      // 已达重试上限：用定向润色修复问题，而不是直接保存未修复版本
+      send({ type: 'status', message: `自动重试 ${MAX_AUTO_REGENERATE} 次仍有 ${problems.length} 处问题，正在定向润色修复…` });
+      try {
+        const fixed = await iteratePolish(config, novel, full, {
+          onStatus: (m) => send({ type: 'status', message: m }),
+          maxRounds: 3,
+          opts: {
+            knowledgeBlock, skillsBlock, genre: novel.genre,
+            extraIssues: problems.map(p => p.desc).slice(0, 5),
+            ...buildStyleInjection(novel, full.slice(0, 2000))
+          }
+        });
+        if (fixed.text && fixed.text.trim()) {
+          full = fixed.text.trim();
+          finalDetect = fixed.lastDetect;
+          finalBlacklist = fixed.blacklist;
+          finalRounds = fixed.rounds;
+        }
+      } catch { /* 润色失败保留原版本 */ }
+      send({ type: 'status', message: `定向润色完成，保存当前版本（仍建议在章节操作中继续修改）` });
     }
 
     // 标题兜底：正文生成完毕后，若标题仍为空/占位（方案阶段偷懒生成"第N章"），用本章正文拟标题
@@ -3823,7 +3848,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
     }
 
     // 文笔质量门：文笔总体分 < 6（平淡/对话生硬/句式呆板）时自动触发润色提升，而非仅发提示。
-    // 采用"检测→润色→复检"迭代（最多 2 轮），让低分文笔真正被改写到达标，而不是只改一遍就放行。
+    // 采用"检测→润色→复检"迭代（最多 4 轮），让低分文笔真正被改写到达标，而不是只改一遍就放行。
     // JSON 解析失败或分数缺失时按"需润色"处理（降级兜底），避免文笔门被静默跳过。
     // 放在落库之前运行，润色只改写 full，随后统一落库，避免重复插入。
     if (strictMode()) {
@@ -3834,7 +3859,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
       const wqSkillsBlock = formatSkillsBlock([...wqSkillIds, ...wqAutoSkills]);
       const wqWeak = [];
       try {
-        for (let wqRound = 0; wqRound < 2; wqRound++) {
+        for (let wqRound = 0; wqRound < 4; wqRound++) {
           let wqScore = null;
           let wqIssues = '';
           try {
