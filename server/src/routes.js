@@ -3548,6 +3548,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
       // 2) AI 味检测（含黑名单硬过滤）
       let det = { score: 0, issues: [] };
       let bl = [];
+      let total = 0;
       try {
         // 先做正则检测，正则评分直接达标就不调 LLM 检测，节省一次 LLM 调用
         const hits = scanAiPatterns(full);
@@ -3557,15 +3558,21 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         const regexTotal = Math.min(100, blacklistPenalty(hits, full.length) + regexScore);
         // 正则评分已达阈值，直接判定，跳过 LLM 检测
         if (regexTotal > aiScorePass() || bl.length > 0) {
+          total = regexTotal;
           det = { score: regexTotal, issues: [] };
           problems.push({ desc: `AI 味明显（${regexTotal} 分，阈值 ${aiScorePass()}${bl.length ? '；高频复用词语：' + bl.join('、') : ''}${templateHits ? `；模板句式命中 ${templateHits} 类` : ''}）` });
         } else {
           // 正则检测通过，再做 LLM 深度检测
-          const detectText = full.length > 3500 ? full.slice(0, 3000) + '\n...\n' + full.slice(-500) : full;
-          det = await runDetection(config, detectText);
-          const total = Math.min(100, det.score + regexScore);
-          if (total > aiScorePass()) {
-            problems.push({ desc: `AI 味明显（${total} 分，阈值 ${aiScorePass()}；模板句式命中 ${templateHits} 类）` });
+          try {
+            const detectText = full.length > 3500 ? full.slice(0, 3000) + '\n...\n' + full.slice(-500) : full;
+            det = await runDetection(config, detectText);
+            total = Math.min(100, det.score + regexScore);
+            if (total > aiScorePass()) {
+              problems.push({ desc: `AI 味明显（${total} 分，阈值 ${aiScorePass()}；模板句式命中 ${templateHits} 类）` });
+            }
+          } catch (e) {
+            // LLM 检测失败时明示用户（静默放行会让用户拿到未经检测的初稿还以为过了质检）
+            send({ type: 'status', message: `AI 深度检测暂不可用（${String(e?.message || e).slice(0, 60)}），本章仅通过正则基础检测` });
           }
         }
         finalDetect = det;
@@ -3672,14 +3679,14 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         }
         // 身穿 + 没家人 → 严禁原身/家族/废柴嫡子/退婚等
         if (flags.bodyTransmigration && flags.noFamily) {
-          if (/原身|废物嫡子|废物少爷|家族嫡子|庶子|退婚|族中废物/.test(full)) {
-            behaviorIssues.push('概念忠实度：灵感是身穿且没家人，正文却出现原身/家族/废物嫡子/退婚等设定——身穿开局孤身一人，没有原身与家族');
+          if (/原身|前身|原主|废物嫡子|废物少爷|家族嫡子|庶子|退婚|族中废物/.test(full)) {
+            behaviorIssues.push('概念忠实度：灵感是身穿且没家人，正文却出现原身/前身/家族/废物嫡子/退婚等设定——身穿开局孤身一人，用的是自己的身体，没有原身记忆');
           }
         }
-        // 身穿 → 严禁魂穿/夺舍/附身/穿越到他人身上
+        // 身穿 → 严禁魂穿/夺舍/附身/穿越到他人身上（含"前身/原主"式夺舍暗示）
         if (flags.bodyTransmigration) {
-          if (/魂穿|夺舍|附身|穿越到.{0,12}身上|占据.{0,10}(身体|身躯)/.test(full)) {
-            behaviorIssues.push('概念忠实度：灵感是身穿，正文却写成魂穿/夺舍/穿越到他人身上——身穿是本人肉体直接出现，没有原身');
+          if (/魂穿|夺舍|附身|穿越到.{0,12}身上|占据.{0,10}(身体|身躯)|前身.{0,6}(身体|记忆)|原主/.test(full)) {
+            behaviorIssues.push('概念忠实度：灵感是身穿，正文却写成魂穿/夺舍/穿越到他人身上（含"前身/原主"记忆残留）——身穿是本人肉体直接出现，没有原身');
           }
         }
         // 灵感指定了穿越方式（被雷劈/车祸/坠崖等）→ 正文必须使用该方式；灵感没写具体死亡方式时不指定固定方式
@@ -3713,6 +3720,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         if (/新手礼包|获得：|淬体丹|淬体境|境界：|突破.{0,6}(重|阶|期)|功法：|武技：|积分[：:]\d/.test(full) && !/修炼|境界|突破/.test(String(novel.concept || ''))) aiTropes.push('游戏化境界/积分/系统奖励');
         if (/(?:穿越|重生).{0,20}(?:第一时间|第一反应|第一个念头).{0,10}(?:查看手机|摸手机|掏手机|看手机)/.test(full)) aiTropes.push('穿越后第一反应掏手机');
         if (/白光.{0,10}(?:炸开|一闪)|眼前(?:一黑|白光)/.test(full)) aiTropes.push('AI穿越标配白光/眼前一黑');
+        if (/龙傲天|林傲天|叶傲天|楚傲天|傲天.{0,4}(少爷|哥)|踩在.{0,6}脸上.{0,12}(废物|蝼蚁)/.test(full) && !/傲天/.test(String(novel.concept || ''))) aiTropes.push('龙傲天式反派+踩脸羞辱模板');
         if (aiTropes.length) behaviorIssues.push(`AI网文套路：检测到"${aiTropes.join('、')}"，属AI生成的典型模板情节，必须删除，用具体的场景与动作开篇`);
       } catch { /* 套路检测失败不阻塞 */ }
 
