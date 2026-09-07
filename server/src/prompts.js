@@ -1110,8 +1110,8 @@ function enforceSysBudget(text, maxChars = 28000) {
   const re = /(\n\n【[^】]+】[\s\S]*?)(?=\n\n【[^】]+】|$)/g;
   let m;
   while ((m = re.exec(text)) !== null) blocks.push({ start: m.index, end: m.index + m[1].length, text: m[1] });
-  // 截断优先级（越靠后越优先截断）: 风格分析 > 技能库 > 知识库 > 风格范本 > 动态范文 > 文风基准 > 题材指南 > 风格DNA > 角色语音 > 宪法 > 基础
-  const truncateOrder = ['写作风格参考', '技能库', '知识学习库', '真人文风参照', '动态范文参照', '文风基准', '题材指南', '类型边界', '风格DNA', '角色语音', '小说宪法'];
+  // 截断优先级（越靠后越优先截断）: 参考范文 > 角色语音 > 宪法 > 基础
+  const truncateOrder = ['参考范文', '角色语音', '小说宪法'];
   let remaining = text;
   for (const keyword of truncateOrder) {
     if (remaining.length <= maxChars) break;
@@ -1139,39 +1139,6 @@ export function buildChapterSystem(styles, baseline, samples, presets, opts = {}
   if (baseline && String(baseline).trim()) {
     sys += `\n\n【本作文风基准（全书统一标准，无论使用哪个模型都必须严格匹配以下文风特征，不得带入模型自身的默认风格）】\n${baseline}`;
   }
-  // 风格 DNA：量化指标注入（有动态召回或固定样本时均为强约束补充）
-  if (opts.styleDNA && String(opts.styleDNA).trim()) {
-    sys += `\n\n${String(opts.styleDNA).trim()}`;
-  }
-  // 动态范文参照：按本章场景召回的范文片段（优先），否则回退固定样本
-  const dynamicSnippets = opts.styleSnippets && String(opts.styleSnippets).trim() ? String(opts.styleSnippets).trim() : '';
-  const styleExamples = [];
-  if (dynamicSnippets) {
-    styleExamples.push(dynamicSnippets);
-  } else {
-    if (samples && String(samples).trim()) {
-      styleExamples.push(String(samples).trim());
-    }
-    if (styles && styles.length) {
-      for (const s of styles) {
-        if (s.style_samples && String(s.style_samples).trim()) {
-          styleExamples.push(String(s.style_samples).trim());
-        }
-      }
-    }
-  }
-  if (styleExamples.length) {
-    sys += `\n\n【真人文风参照（选自真人作家作品，模仿其句子长短、语气、节奏与叙述口吻，而不是模仿人物与情节）】\n${styleExamples.join('\n\n---\n\n')}`;
-  }
-  if (styles && styles.length) {
-    const parts = styles.map((s, i) => `风格${i + 1}《${s.name}》：
-${s.analysis || ''}`);
-    sys += `\n\n【写作风格参考】
-本作启用了以下 ${styles.length} 位作者的写作风格：
-${parts.join('\n\n')}
-
-要求：把这些风格的写作特点自然融合成统一、不生硬的文风，用于本章创作。若风格间有冲突，以更贴合故事类型的风格为主，其余作为底色。无论融合多少风格，都必须遵守上文的【人类写作风格铁律】。`;
-  }
   // 注入小说宪法（不可变规则）
   if (opts.constitution && String(opts.constitution).trim()) {
     sys += `\n\n【小说宪法（全书不可变规则，创作时必须逐条遵守，违反任何一条都属严重错误）】\n${String(opts.constitution).trim()}`;
@@ -1180,28 +1147,13 @@ ${parts.join('\n\n')}
   if (opts.characterVoices && String(opts.characterVoices).trim()) {
     sys += `\n\n【角色语音档案（每个角色的说话方式，写对话时必须严格匹配，不得让角色说出不符合其语音档案的话）】\n${String(opts.characterVoices).trim()}`;
   }
-  // 注入学习库（风格库+知识库合并为统一注入，避免互相竞争上下文）
-  const learningBlocks = [];
+  // 注入学习库：仅保留范文句段（concrete_examples），砍掉抽象分析
   if (opts.knowledgeBlock && String(opts.knowledgeBlock).trim()) {
-    learningBlocks.push(String(opts.knowledgeBlock).trim());
-  }
-  if (opts.styleBlock && String(opts.styleBlock).trim()) {
-    learningBlocks.push(String(opts.styleBlock).trim());
-  }
-  if (learningBlocks.length) {
-    sys += `\n\n${learningBlocks.join('\n\n')}`;
-  }
-  // 注入技能库
-  if (opts.skillsBlock && String(opts.skillsBlock).trim()) {
-    sys += `\n\n${String(opts.skillsBlock).trim()}`;
-  }
-  // 注入题材指南（合并注入全部匹配的相关指南）
-  if (opts.genre) {
-    const guides = getGenreGuides(opts.genre);
-    if (guides.length) {
-      sys += `\n\n${guides.join('\n\n')}`;
-      const boundary = buildGenreBoundaryRule(opts.genre);
-      if (boundary) sys += `\n\n${boundary}`;
+    const ke = String(opts.knowledgeBlock).trim();
+    // 只保留"范文"部分，过滤掉抽象分析
+    const exampleMatch = ke.match(/范文：([\s\S]+)/);
+    if (exampleMatch) {
+      sys += `\n\n【参考范文（模仿其句式节奏，禁止照搬人物/情节）】\n${exampleMatch[1].trim()}`;
     }
   }
   return enforceSysBudget(sys);
