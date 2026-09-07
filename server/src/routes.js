@@ -3142,7 +3142,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
           task: 'writing',
           messages: [
             { role: 'system', content: CHAPTER_BEAT_SYSTEM },
-            { role: 'user', content: `小说：《${novel.title}》题材：${novel.genre}\n第${idx}章 ${title}\n本章剧情概要：${existing?.summary || '承接前文继续推进'}\n本章情绪基调：${existing?.emotion || '（由你判断）'}\n本章推进：${existing?.arc_hint || '推进主线'}\n\n出场角色参考：${characters.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、') || '（由你判断）'}\n\n请将本章拆解为场景级 beat。` }
+            { role: 'user', content: `小说：《${novel.title}》题材：${novel.genre}\n第${idx}章 ${title}\n本章剧情概要：${existing?.summary || '承接前文继续推进'}\n本章情绪基调：${existing?.emotion || '（由你判断）'}\n本章推进：${existing?.arc_hint || '推进主线'}\n\n出场角色参考：${characters.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、') || '（由你判断）'}\n${idx <= 3 && characters.length ? `【出场限制】本章属全书开局阶段：场景中只允许主角及概要中明确点名的角色出现，其他角色（主角团/反派/导师等后续人物）严禁以任何形式出现——包括对话、回忆、照片、梦境、他人转述；严禁出现"秘境归来""与同伴会合"等中后期情节。` : ''}\n\n请将本章拆解为场景级 beat。` }
           ],
           maxTokens: 2000
         });
@@ -3264,6 +3264,25 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       ? '\n【开篇铁律——第一章必须从具体场景/动作切入，直接用画面开篇，不要铺世界观、不要抒情、不要主角独白】\n- 禁止模板化开篇：不得写"主角死亡后眼前一黑/再睁眼/加班猝死/胸痛/过劳死"等AI默认穿越模板，用灵感中描述的具体死亡方式开篇\n- 开篇前两句必须建立空间感：在哪里、什么时间、光线/温度/声音/气味——用1-2个感官细节把读者放进场景，然后再让角色动起来\n- 穿越过程只占一两句话的过渡，不得大段描写穿越前的现代生活细节、死亡过程、查看手机电量等套路内容\n- 开篇前50字内必须出现主角名字和具体的动作/处境，不得用"他"指代到底'
       : '';
 
+    // 开局出场白名单：前3章严禁中后期角色登场，防止初稿就让反派/主角团提前出场
+    // （只在概要中明确点名的角色才放行；beats 不参与判定——beats 可能已被角色污染）
+    // 注意：主角须精确匹配 role_type==='主角'，"主角团"成员属中后期同伴，仅概要点名时放行
+    let castBlock = '';
+    if (idx <= 3 && characters.length) {
+      const summaryText = String(existing?.summary || '');
+      const protagonists = characters.filter((c) => String(c.role_type || '') === '主角');
+      const allowedNames = protagonists.map((c) => c.name)
+        .concat(characters.map((c) => c.name).filter((n) => summaryText.includes(n)));
+      const later = characters.filter((c) => !allowedNames.includes(c.name));
+      if (later.length) {
+        castBlock = `\n【开局出场限制（第 ${idx} 章属全书开局阶段，必须严格遵守）】
+- 本章允许出场或被提及的角色，仅限：${[...new Set(allowedNames)].join('、')}，以及本章剧情概要中明确点名的角色。
+- 以下角色属后续章节才会登场的人物，本章严禁让他们以任何形式出现——包括正面出场、对话、回忆、梦境、照片、书信、他人转述：${later.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、')}。
+- 本章严禁出现"从秘境/试炼/大比归来""与同伴会合""宗门/势力日常"等中后期才能发生的情节；开局阶段主角应处于符合本章概要的初始处境（如初入新世界、孤立无援）。
+- 若上方【主要角色】清单或场景规划中出现了上述角色的名字（含场景细节里的痕迹），一律忽略并以本限制为准。`;
+      }
+    }
+
     const userPrompt = `${context}
 ${prevTailBlock}
 【角色隔离铁律（必须严格遵守）】
@@ -3281,6 +3300,7 @@ ${prevTailBlock}
  ${profileBlock}
  ${enhancedMemBlock}
  ${ragBlock}
+ ${castBlock}
  ${beatsBlock}
  ${referenceBlock}
  
