@@ -250,11 +250,14 @@ export async function chat(opts) {
     (maxTokens && cfg.maxTokens) ? Math.min(maxTokens, cfg.maxTokens) : (maxTokens || cfg.maxTokens),
     0
   );
+  const isStream = typeof onDelta === 'function';
+  // 过载类错误识别：网关 503/529/overload 等瞬时故障，可退避重试
+  const isOverloadError = (e) => /overloaded|overload|503|529|Service temporarily|capacity|server busy|upstream|timeout/i.test(e?.message || '');
   const body = {
     model: String(cfg.model || ''),
-    messages: trimMessagesToBudget(messages, contextBudget(cfg)),
-    temperature: Math.min(1.99, Math.max(0, safeNum(temperature ?? cfg.temperature, 0.9))),
-    stream: typeof onDelta === 'function' && !cfg.forceNonStreaming
+    messages,
+    stream: isStream,
+    temperature: safeNum(cfg.temperature, 0.9)
   };
   if (effectiveMax) body.max_tokens = effectiveMax;
   // Phase 5：tool-use 透传（非流式）
@@ -286,14 +289,13 @@ export async function chat(opts) {
     // reasoning=off 时，对支持思考的模型显式关闭，防止默认思考吞掉 max_tokens
     if (isDeepSeekV4) {
       body.thinking = { type: 'disabled' };
-      body.enable_thinking = false; // 兼容旧网关/中转
+      // 注意：enable_thinking 是 Qwen 系参数，发给 DeepSeek 端点会被严格网关 400 拒绝（Unsupported parameter），不再发送
     } else if (isDeepSeekLegacy) {
       body.enable_thinking = false;
     }
   }
 
   let resp;
-  const isStream = typeof onDelta === 'function';
   // 流式调用：响应头超时（connectTimeout，默认 180s）防止 fetch 无限挂起；拿到响应后交给 consumeStream 的 idle 超时（默认 300s）
   // 非流式调用：整体超时（默认 180s）
   const connectTimeoutMs = isStream ? (Number(opts.connectTimeout) || 180000) : (Number(opts.timeout) || 180000);
@@ -326,18 +328,54 @@ export async function chat(opts) {
       if (signal) signal.removeEventListener('abort', doAbort);
     };
   }
+  let cachedDetail = null; // 循环内已读取的错误响应体（body 已消费，外层复用）
   try {
     // 429 自动重试：单次请求瞬时命中限流/配额不足时，进入服务商冷却并退避后重试，
     // 而不是直接把 429 抛给上层导致整条生成链路中断。最多重试 3 次，仍失败才抛错。
     const MAX_429_RETRY = 3;
+    // 400 Unsupported parameter 自愈：部分严格网关（如 hcnsec、one-api 变体）对不认识的参数
+    // 直接 400 拒绝（如 enable_thinking / thinking / top_k）。收到此类错误时自动剔除被点名的
+    // 参数并立即重发，最多剔除 3 次，让任意 OpenAI 兼容端点都能跑通。
+    let unsupportedStripped = 0;
+    let connectRetryCount = 0; // 连接超时自愈重试计数
     for (let attempt = 0; ; attempt++) {
-      resp = await fetch(endpoint, {
-        method: 'POST',
-        headers: buildHeaders(cfg),
-        body: JSON.stringify(body),
-        signal: combined
-      });
-      if (resp.status !== 429 || attempt >= MAX_429_RETRY) break;
+      try {
+        resp = await fetch(endpoint, {
+          method: 'POST',
+          headers: buildHeaders(cfg),
+          body: JSON.stringify(body),
+          signal: combined
+        });
+      } catch (e) {
+        // 连接超时自愈：网关过载时 fetch 在 connectTimeout 内拿不到响应头即 AbortError，退避后重试
+        if (e.name === 'AbortError' && !signal?.aborted && connectRetryCount < 2) {
+          connectRetryCount++;
+          const backoff = connectRetryCount === 1 ? 5000 : 12000;
+          await new Promise((resolve) => setTimeout(resolve, backoff));
+          continue;
+        }
+        cleanup();
+        if (e.name === 'AbortError') {
+          if (signal?.aborted) throw e;
+          throw new Error(`请求超时（${Math.round(connectTimeoutMs / 1000)} 秒）：模型 API 无响应，请检查 Base URL 是否正确、模型名称是否存在、网络是否可达。`);
+        }
+        throw new Error(`网络请求失败：${e.message}（请检查 Base URL 或网络连接）`);
+      }
+      if (resp.status !== 429 || attempt >= MAX_429_RETRY) {
+        if (resp.status === 400 && unsupportedStripped < 3) {
+          cachedDetail = await resp.text().catch(() => '');
+          const m = String(cachedDetail).match(/Unsupported parameter\(s\):\s*`?([A-Za-z_][\w.]*)/);
+          if (m) {
+            const bad = m[1].includes('.') ? m[1].split('.').pop() : m[1];
+            if (bad && bad in body) {
+              delete body[bad];
+              unsupportedStripped++;
+              continue; // 剔除被拒参数后立即重发
+            }
+          }
+        }
+        break;
+      }
       // 命限流：记录冷却并退避（Retry-After 优先，否则按限速器计算），等待服务商窗口恢复
       onRateLimited(Number(resp.headers?.get?.('retry-after')));
       const retryAfterSec = Number(resp.headers?.get?.('retry-after'));
@@ -349,25 +387,24 @@ export async function chat(opts) {
         if (signal) signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
       });
       await doAbortSleep;
-      if (signal?.aborted) { try { resp.body?.cancel?.(); } catch { /* ignore */ } break; }
+      if (signal?.aborted) { try { resp.body?.cancel?.()?.catch?.(() => {}); } catch { /* ignore */ } break; }
     }
   } catch (e) {
+    // 外层兜底：循环内未处理的异常（如 429 退避/400 剔除逻辑内抛出），直接清理后上抛
     cleanup();
-    if (e.name === 'AbortError') {
-      if (signal?.aborted) throw e;
-      throw new Error(`请求超时（${Math.round(connectTimeoutMs / 1000)} 秒）：模型 API 无响应，请检查 Base URL 是否正确、模型名称是否存在、网络是否可达。`);
-    }
-    throw new Error(`网络请求失败：${e.message}（请检查 Base URL 或网络连接）`);
+    throw e;
   }
 
   if (!resp.ok) {
     cleanup();
-    let detail = '';
-    try {
-      const j = await resp.json();
-      detail = j?.error?.message || j?.message || JSON.stringify(j);
-    } catch {
-      detail = await resp.text().catch(() => '');
+    let detail = cachedDetail;
+    if (detail === null) {
+      try {
+        const j = await resp.json();
+        detail = j?.error?.message || j?.message || JSON.stringify(j);
+      } catch {
+        detail = await resp.text().catch(() => '');
+      }
     }
     if (resp.status === 401 || resp.status === 403) {
       throw new Error(`认证失败（HTTP ${resp.status}）：API Key 无效或无权限。${detail}`);
@@ -394,42 +431,64 @@ export async function chat(opts) {
     throw new Error(`调用失败（HTTP ${resp.status}）：${detail || resp.statusText}`);
   }
 
-  if (isStream) {
-    // 响应头已收到，说明连接成功：释放仅用于「等待响应头」的 connect 超时定时器，
-    // 避免它一直挂着，把整个流式会话也限制在 connectTimeout 内（慢速流式模型会因此被误杀）。
-    if (timer) { clearTimeout(timer); timer = null; }
-    const runStreamOnce = async () => {
-      const streamIdleTimeout = Number(opts.streamIdleTimeout) || 300000;
-      return consumeStream(resp, onDelta, combined, streamIdleTimeout);
-    };
-    try {
-      const r0 = await runStreamOnce();
-      const content0 = unescapeUnicode(r0.content);
-      // 启动即中断（没收到有效正文）且非用户主动取消 → 短时重试 1 次
-      const userCancelled = !!signal?.aborted;
-      const retriable = r0.finishReason === 'length' && !userCancelled && (!content0 || content0.trim().length < 10);
-      if (!retriable) {
-        return { ...r0, content: content0, finishReason: r0.finishReason || 'stop' };
-      }
-      // 重试：重新发起流式请求（丢弃本次空响应，先释放原连接）
-      try { resp.body && resp.body.cancel && resp.body.cancel(); } catch { /* ignore */ }
-      const retryResp = await fetch(endpoint, {
-        method: 'POST',
-        headers: buildHeaders(cfg),
-        body: JSON.stringify(body),
-        signal: signal ?? undefined
-      });
-      if (!retryResp.ok) {
-        // 重试仍失败：保留 original 标 length，交给上层续写兜底
-        return { ...r0, content: content0, finishReason: 'length' };
-      }
-      const r1 = await consumeStream(retryResp, onDelta, signal, streamIdleTimeout);
-      const content1 = unescapeUnicode(r1.content);
-      return { ...r1, content: content1, finishReason: r1.finishReason || 'length' };
-    } finally {
-      cleanup();
-    }
-  }
+   if (isStream) {
+     // 响应头已收到，说明连接成功：释放仅用于「等待响应头」的 connect 超时定时器，
+     // 避免它一直挂着，把整个流式会话也限制在 connectTimeout 内（慢速流式模型会因此被误杀）。
+     if (timer) { clearTimeout(timer); timer = null; }
+     // 包装 onDelta 以追踪是否已吐出内容——过载重试仅在零内容时安全（已吐内容时重试会重复拼接）
+     const rawOnDelta = onDelta;
+     let emittedAny = false;
+     const countingDelta = rawOnDelta ? ((d) => { emittedAny = true; rawOnDelta(d); }) : undefined;
+     const runStreamOnce = async (responseToUse) => {
+       const streamIdleTimeout = Number(opts.streamIdleTimeout) || 300000;
+       return consumeStream(responseToUse, countingDelta, combined, streamIdleTimeout);
+     };
+     try {
+       let r0;
+       try {
+         r0 = await runStreamOnce(resp);
+       } catch (e0) {
+         // 启动即过载（零内容时）安全重试：网关 503/529/overload 等瞬时故障，退避后重发
+          if (!emittedAny && isOverloadError(e0) && !signal?.aborted) {
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            // 原 resp 连接已由 consumeStream finally 内的 reader.cancel 释放，直接重发
+            const retryResp = await fetch(endpoint, {
+             method: 'POST',
+             headers: buildHeaders(cfg),
+             body: JSON.stringify(body),
+             signal: signal ?? undefined
+           });
+           if (!retryResp.ok) throw e0;
+           r0 = await runStreamOnce(retryResp);
+         } else {
+           throw e0;
+         }
+       }
+       const content0 = unescapeUnicode(r0.content);
+       // 启动即中断（没收到有效正文）且非用户主动取消 → 短时重试 1 次
+       const userCancelled = !!signal?.aborted;
+       const retriable = r0.finishReason === 'length' && !userCancelled && (!content0 || content0.trim().length < 10);
+       if (!retriable) {
+         return { ...r0, content: content0, finishReason: r0.finishReason || 'stop' };
+       }
+        // 重试：重新发起流式请求（丢弃本次空响应，原连接已由 consumeStream finally 释放）
+        const retryResp = await fetch(endpoint, {
+         method: 'POST',
+         headers: buildHeaders(cfg),
+         body: JSON.stringify(body),
+         signal: signal ?? undefined
+       });
+       if (!retryResp.ok) {
+         // 重试仍失败：保留 original 标 length，交给上层续写兜底
+         return { ...r0, content: content0, finishReason: 'length' };
+       }
+       const r1 = await runStreamOnce(retryResp);
+       const content1 = unescapeUnicode(r1.content);
+       return { ...r1, content: content1, finishReason: r1.finishReason || 'length' };
+     } finally {
+       cleanup();
+     }
+   }
 
   try {
     const data = await resp.json();
@@ -499,9 +558,12 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
   let finishReason = '';
   let idleTimer = null;
   let signalAbortCleanup = null;
+  // 空闲超时专用 AbortController：超时后 abort，使 reader.read() 抛出 AbortError 并被外层 catch 捕获
+  const idleAbort = new AbortController();
 
   const cancelReader = () => {
-    try { reader.cancel(); } catch { /* ignore */ }
+    // cancel() 返回 promise；流已 errored（如 abort 后）时会 reject，必须挂 catch 防未处理拒绝
+    try { reader.cancel().catch(() => {}); } catch { /* ignore */ }
   };
 
   if (signal && !signal.aborted) {
@@ -513,12 +575,8 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
     if (idleTimer) clearTimeout(idleTimer);
     if (idleTimeoutMs > 0) {
       idleTimer = setTimeout(() => {
+        idleAbort.abort(new Error(`流式响应超时（${Math.round(idleTimeoutMs / 1000)} 秒无新数据）：模型可能卡住或网络中断。`));
         cancelReader();
-        if (!signal?.aborted) {
-          const err = new Error(`流式响应超时（${Math.round(idleTimeoutMs / 1000)} 秒无新数据）：模型可能卡住或网络中断。`);
-          err.name = 'AbortError';
-          throw err;
-        }
       }, idleTimeoutMs);
     }
   };
@@ -527,18 +585,34 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
   try {
     while (true) {
       if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
-      const { done, value } = await reader.read();
-      resetIdleTimer();
+      // 空闲超时时 idleAbort 触发，reader.read() 随之拒绝；Promise.race 确保超时错误优先传递
+      const rawRead = reader.read();
+      // 立即挂 catch：无论后续走哪条路径（正常返回/超时抛出/用户取消），reader 取消产生的拒绝都不会成为未处理 rejection
+      rawRead.catch(() => {});
+      const readPromise = Promise.race([
+        rawRead,
+        new Promise((_, reject) => {
+          if (idleAbort.signal.aborted) reject(idleAbort.signal.reason);
+          else idleAbort.signal.addEventListener('abort', () => reject(idleAbort.signal.reason), { once: true });
+        })
+      ]);
+      const { done, value } = await readPromise;
+      // 竞态兜底：若 reader.read() 因 cancel 先返回 {done: true}，但空闲超时已触发，仍抛出超时错误
+      if (done && idleAbort.signal.aborted) {
+        throw idleAbort.signal.reason || new Error('流式响应超时');
+      }
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
       const lines = buffer.split('\n');
       buffer = lines.pop();
+      let gotData = false;
       for (const line of lines) {
         const trimmed = line.trim();
         // 跳过 keepalive 行（部分中转站会发送 :keepalive 注释行）
         if (!trimmed || trimmed.startsWith(':')) continue;
         if (!trimmed.startsWith('data:')) continue;
+        gotData = true;
         const payload = trimmed.slice(5).trim();
         if (payload === '[DONE]') { finishReason = 'stop'; continue; }
         try {
@@ -571,16 +645,22 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
           // 忽略无法解析的中间帧
         }
       }
+      // 仅在收到真实数据帧时重置空闲计时器——网关发 keepalive 注释流时不重置，确保空闲超时能正确触发
+      if (gotData) resetIdleTimer();
     }
   } catch (e) {
     if (e.name === 'AbortError') throw e;
     // 网关在流中返回的明确错误（如 503 过载/限流/余额不足）原样抛出，不能静默吞掉
     if (e.message?.startsWith('模型流式响应出错')) throw e;
+    // 空闲超时错误：原样抛出，让上层重试机制处理
+    if (e.message?.startsWith('流式响应超时')) throw e;
     // 其他异常：流中断时尽量保留已生成内容，但标记为 length 防止调用方误认为模型已自然收尾
     finishReason = 'length';
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
     if (signalAbortCleanup) signalAbortCleanup();
+    // 统一释放底层连接：正常结束/异常抛出路径都取消 reader（流已关闭时 cancel 为无害空操作）
+    try { reader.cancel().catch(() => {}); } catch { /* ignore */ }
   }
 
   if (buffer.trim()) {

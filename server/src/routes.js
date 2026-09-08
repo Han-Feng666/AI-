@@ -3411,25 +3411,58 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
           send({ type: 'progress', progress: contPct, message: `正在续写第 ${idx} 章（第 ${round + 1} 轮）…` });
         }
         let deltaCount = 0;
-        const r = await runLLMStream(config, msgs, {
-          ctrl,
-          task: 'writing',
-          maxTokens: perMax,
-          onDelta: (d) => {
-            full += d;
-            send({ type: 'delta', content: d });
-            deltaCount += d.length;
-            if (deltaCount >= 500) {
-              deltaCount = 0;
-              const wc = countWords(full);
-              const pct = Math.min(55, 25 + Math.round((wc / targetWordsN) * 30));
-              send({ type: 'progress', progress: pct, message: `正在生成第 ${idx} 章（${wc}/${targetWordsN} 字）…` });
+        // 过载重试：续写轮次天然支持续传（从 full 继续写），重试安全；
+        // 首轮(round=0)若已吐出内容，重试前清空 full 并发 reset 事件，避免 UI 显示残片
+        let lastStreamErr = null;
+        let streamOk = false;
+        for (let netTry = 0; netTry < 3; netTry++) {
+          if (netTry > 0) {
+            const waitMs = netTry === 1 ? 5000 : 12000;
+            send({ type: 'status', message: `生成被网关打断（${lastStreamErr || '服务过载'}），${waitMs / 1000} 秒后重试第 ${round + 1} 轮（第 ${netTry + 1} 次连接）…` });
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            if (round === 0 && full.trim()) {
+              full = '';
+              send({ type: 'reset' });
             }
           }
-        });
-        // finishReason 为空/undefined/null 时视为 length（继续续写），不默认回退到 'stop'
-        const rawFinish = r?.finishReason;
-        finishReason = (rawFinish && (rawFinish === 'stop' || rawFinish === 'length')) ? rawFinish : 'length';
+          try {
+            const r = await runLLMStream(config, msgs, {
+              ctrl,
+              task: 'writing',
+              maxTokens: perMax,
+              onDelta: (d) => {
+                full += d;
+                send({ type: 'delta', content: d });
+                deltaCount += d.length;
+                if (deltaCount >= 500) {
+                  deltaCount = 0;
+                  const wc = countWords(full);
+                  const pct = Math.min(55, 25 + Math.round((wc / targetWordsN) * 30));
+                  send({ type: 'progress', progress: pct, message: `正在生成第 ${idx} 章（${wc}/${targetWordsN} 字）…` });
+                }
+              }
+            });
+            lastStreamErr = null;
+            streamOk = true;
+            // finishReason 为空/undefined/null 时视为 length（继续续写），不默认回退到 'stop'
+            const rawFinish = r?.finishReason;
+            finishReason = (rawFinish && (rawFinish === 'stop' || rawFinish === 'length')) ? rawFinish : 'length';
+            break;
+          } catch (e) {
+            lastStreamErr = e?.message || String(e);
+            // 过载类错误 + 连接/空闲超时均可重试；其他错误直接终止
+            const isOverload = /overloaded|overload|503|529|Service temporarily|capacity|server busy|upstream/i.test(lastStreamErr);
+            const isTimeout = /请求超时|流式响应超时|connect|ETIMEDOUT|socket hang up/i.test(lastStreamErr);
+            if ((!isOverload && !isTimeout) || netTry >= 2) {
+              streamOk = false;
+              break;
+            }
+          }
+        }
+        if (!streamOk) {
+          updateJob(job.id, { status: 'failed', error: lastStreamErr });
+          return end({ type: 'error', message: lastStreamErr || '生成失败，请重试。' });
+        }
         genTrack.rounds = round + 1;
         genTrack.reasons[finishReason === 'length' ? 'length' : 'early_stop'] += 1;
         checkMemoryPressure(); // 每轮续写后检查内存
@@ -3525,6 +3558,27 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         }
       } catch { /* 衔接硬校验失败不阻塞 */ }
 
+      // 0a3) 跨章开头模式化检测：连续多章以同类句式/结构开头（都是时间状语、都是环境描写、都是"晨光/夜色"），
+      //     是 AI 流水线写作的典型特征。取最近 3 章首句，若本章首句与它们结构高度雷同则判问题。
+      try {
+        const currFirst = full.split(/\n/)[0].trim().replace(/^第[一二三四五六七八九十百千\d]+章\s*/, '').slice(0, 40);
+        if (currFirst.length >= 6) {
+          const recentCh = db.prepare("SELECT content FROM chapters WHERE novel_id = ? AND chapter_index < ? AND content != '' ORDER BY chapter_index DESC LIMIT 3").all(novel.id, idx);
+          const sameStructure = recentCh.filter((c) => {
+            const first = String(c.content).split(/\n/)[0].trim().replace(/^第[一二三四五六七八九十百千\d]+章\s*/, '').slice(0, 40);
+            if (first.length < 6) return false;
+            // 结构雷同：首句字数接近且共享同一开头模式（时间状语/环境意象/动作切入）
+            const sameOpener = currFirst.slice(0, 4) === first.slice(0, 4);
+            const bothTimeOpener = /^(?:清晨|黎明|晨曦|早晨|上午|中午|午后|傍晚|黄昏|夜晚|深夜|凌晨|夜色|月光|星光|太阳|月亮|风|雨|雪|雾)/.test(currFirst) && /^(?:清晨|黎明|晨曦|早晨|上午|中午|午后|傍晚|黄昏|夜晚|深夜|凌晨|夜色|月光|星光|太阳|月亮|风|雨|雪|雾)/.test(first);
+            const bothActionOpener = /^[^\s，。！？]{0,3}(?:睁|睁|站|坐|走|转|抬|低|回|望|看|听|感|闻|推|拉|打|喝|吃|点|拿|握)/.test(currFirst) && /^[^\s，。！？]{0,3}(?:睁|站|坐|走|转|抬|低|回|望|看|听|感|闻|推|拉|打|喝|吃|点|拿|握)/.test(first);
+            return sameOpener || bothTimeOpener || bothActionOpener;
+          });
+          if (sameStructure.length >= 2) {
+            problems.push({ desc: `本章开头"${currFirst.slice(0, 15)}…"与最近 ${sameStructure.length + 1} 章开头结构高度雷同（连续同类切入），须换一种方式开头——从对话、从悬念、从动作切入均可，禁止连续多章用同一结构开场` });
+          }
+        }
+      } catch { /* 跨章检测失败不阻塞 */ }
+
       // 0) 参考作品照抄检测：正文与知识库/风格库样本原文大量重复，说明模型把参考作品当正文写了
       try {
         const copySources = [knowledgeSamples, plotReferenceBlock, referenceBlock, String(novel.style_samples || '')].filter((x) => x && String(x).trim().length > 30);
@@ -3538,6 +3592,33 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
           }
         }
       } catch { /* 照抄检测失败不阻塞 */ }
+
+      // 0b) 对话比例检测：AI 小说常见两极——纯叙述无对话（像旁白）或纯对话无描写（像剧本）。
+      //     对话行占比 <10% 或 >85% 均判问题，要求调整叙述/对话比例。
+      try {
+        const lines = full.split('\n').filter((l) => l.trim());
+        const dialogueLines = lines.filter((l) => /^[""""''「『（]/.test(l.trim()) || /["""""''」』）]$/.test(l.trim())).length;
+        const dialogueRatio = lines.length ? dialogueLines / lines.length : 0;
+        if (lines.length > 20 && dialogueRatio < 0.08) {
+          problems.push({ desc: `本章对话过少（对话行占比约 ${Math.round(dialogueRatio * 100)}%），近乎纯叙述/旁白，缺乏角色互动。须加入角色对话推动剧情，让读者听到角色的声音` });
+        } else if (lines.length > 20 && dialogueRatio > 0.85) {
+          problems.push({ desc: `本章对话过多（对话行占比约 ${Math.round(dialogueRatio * 100)}%），近乎剧本格式，缺乏叙述描写和环境刻画。须加入叙述、心理、环境描写来充实画面` });
+        }
+      } catch { /* 对话比例检测失败不阻塞 */ }
+
+      // 0c) 章节结尾钩子落实检测：若本章概要指定了 hook，检查结尾是否真正落到了具体画面/物件/对话。
+      //     结尾若以抽象总结/升华语句收束（无具体物象），说明钩子未落实。
+      try {
+        if (existing?.hook && String(existing.hook).trim().length > 4) {
+          const tail = full.slice(-200).trim();
+          // 钩子落实：结尾包含具体物件/动作/对话引号，而非纯抽象叙述
+          const hasConcrete = /["""''「『（]/.test(tail) || /[。？！…]["""""''」』）]/.test(tail) || /(?:看见|发现|出现|收到|握着|拿着|盯着|听见|推开|打开|躺|站|坐|刻|写|画|挂|放|埋|插|刻着|写着|画着|绣着)/.test(tail);
+          const onlyAbstract = /(?:从此|之后|开始|注定|意味|象征|代表|这是|那是|他知道|她明白|他感到|她觉得|从此以后|从这一刻|命运的|人生的)/.test(tail) && !hasConcrete;
+          if (onlyAbstract) {
+            problems.push({ desc: `本章结尾以抽象叙述收束（"…${tail.slice(-40)}"），未落实 hook「${existing.hook}」到具体画面/物件/对话。结尾须用一个具体物件、动作或一句对话收尾，让读者想翻下一章` });
+          }
+        }
+      } catch { /* 钩子检测失败不阻塞 */ }
 
       // 0b) 英文指令/系统话术泄漏检测：模型把内部指令当正文输出
       try {
@@ -3581,12 +3662,19 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
           problems.push({ desc: `AI 味明显（${regexTotal} 分，阈值 ${aiScorePass()}${bl.length ? '；高频复用词语：' + bl.join('、') : ''}${templateHits ? `；模板句式命中 ${templateHits} 类` : ''}）` });
         } else {
           // 正则检测通过，再做 LLM 深度检测
-          // 采样策略：长文分三段均匀覆盖（前+中+后），避免中间大段跳过
+          // 采样策略：长文分四段均匀覆盖（前+前中+后中+后），减少中段盲区
           try {
             let detectText;
             if (full.length > 3500) {
-              const third = Math.floor(full.length / 3);
-              detectText = full.slice(0, 1200) + '\n...\n' + full.slice(third, third + 1200) + '\n...\n' + full.slice(-800);
+              const seg = Math.min(1100, Math.floor(full.length / 4));
+              const q1 = Math.floor(full.length / 4);
+              const q2 = Math.floor(full.length / 2);
+              const q3 = Math.floor(full.length * 3 / 4);
+              detectText = full.slice(0, seg) + '\n...\n'
+                + full.slice(q1, q1 + seg) + '\n...\n'
+                + full.slice(q2, q2 + seg) + '\n...\n'
+                + full.slice(q3, q3 + seg) + '\n...\n'
+                + full.slice(-600);
             } else {
               detectText = full;
             }
