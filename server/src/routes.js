@@ -29,6 +29,7 @@ import {
 import {
   NOVEL_PLAN_SYSTEM, PLAN_SKELETON_SYSTEM, PLAN_CHAPTERS_SYSTEM, PLAN_REVISE_SYSTEM,
   buildConceptFidelityRule, detectConceptViolations, analyzeConceptConstraints,
+  CONCEPT_FAMILY_CHECK_SYSTEM, KIN_RE, detectKinMentions,
   CHAPTER_SYSTEM, CHAPTER_TITLE_SYSTEM,
   CHAPTER_SUMMARY_SYSTEM, POLISH_SYSTEM, STYLE_ANALYZE_SYSTEM,
   CHAT_SYSTEM, COMPRESS_SYSTEM, COMPRESS_UPDATE_SYSTEM,
@@ -192,6 +193,28 @@ function saveDetection(novelId, idx, score, issues, blacklist, source) {
   ).run(novelId, idx, scoreInt, JSON.stringify(issues || []), JSON.stringify(blacklist || []), source);
   db.prepare('UPDATE chapters SET ai_score = ? WHERE novel_id = ? AND chapter_index = ?')
     .run(scoreInt, novelId, idx);
+}
+
+// 正文层"无家人"违规 LLM 复核：灵感设定无家人且正文命中亲属称谓时调用。
+// 模型判定亲属是否真是主角的家人（排除配角自呼其亲/已故背景/比喻等误伤），避免正则直报导致无辜重生成。
+async function runFamilyViolationCheck(config, concept, full, kinMatches) {
+  const excerpts = kinMatches.map((m) => {
+    const idx = full.indexOf(m);
+    const start = Math.max(0, idx - 60);
+    return full.slice(start, idx + m.length + 60).replace(/\s+/g, ' ');
+  }).slice(0, 8);
+  const userContent = `【用户灵感（节选）】\n${String(concept).slice(0, 500)}\n\n【正文命中亲属称谓的上下文片段】\n${excerpts.map((s, i) => `${i + 1}. …${s}…`).join('\n')}\n\n请判定这些亲属是否以"主角的在世家人"身份出现。`;
+  const r = await chat({
+    config,
+    task: 'analysis',
+    messages: [
+      { role: 'system', content: CONCEPT_FAMILY_CHECK_SYSTEM },
+      { role: 'user', content: userContent }
+    ],
+    maxTokens: 400
+  });
+  const j = extractJson(r.content) || {};
+  return { violating: !!j.violating, evidence: String(j.evidence || ''), reason: String(j.reason || '') };
 }
 
 async function runDetection(config, text) {
@@ -2212,7 +2235,7 @@ ${prevBlock || '（无，这是开头章节）'}
       }
       const runBatch = async (b) => {
         // 每批最多重试 2 次，失败不阻塞，正文创作时按大纲兜底
-        const beatsRes = await jsonFrom(
+        let beatsRes = await jsonFrom(
           [
             { role: 'system', content: PLAN_BEATS_SYSTEM },
             { role: 'user', content: b.userContent }
@@ -2221,6 +2244,23 @@ ${prevBlock || '（无，这是开头章节）'}
           skeletonMaxOut,
           { maxAttempts: 2, cap: skeletonMaxOut }
         );
+        // 无家人约束校验：细纲给主角安排在世亲人则带修正提示重试一次（细纲错则正文必错，源头拦截成本最低）
+        if (beatsRes && typeof beatsRes === 'object' && analyzeConceptConstraints(conceptText).noFamily) {
+          const blobText = JSON.stringify(beatsRes);
+          const badKin = detectKinMentions(blobText, 2);
+          if (badKin.length) {
+            const retryRes = await jsonFrom(
+              [
+                { role: 'system', content: PLAN_BEATS_SYSTEM },
+                { role: 'user', content: `${b.userContent}\n\n【强制修正】上一版细纲违反了灵感约束：灵感明确写主角没有家人，细纲却安排了在世亲人（如：${badKin.join('；')}）。灵感说没有家人就是孤身一人，严禁编造主角的爹/娘/爷爷等血亲登场；需要长辈角色时只能是后遇的雇主/师者/路人，或以已故/失踪背景交代。请重写本批细纲。` }
+              ],
+              `细纲违反无家人约束，正在重试（第 ${b.batchStart + 1}-${b.batchEnd} 章）…`,
+              skeletonMaxOut,
+              { maxAttempts: 2, cap: skeletonMaxOut }
+            );
+            if (retryRes && typeof retryRes === 'object') beatsRes = retryRes;
+          }
+        }
         if (beatsRes && typeof beatsRes === 'object') {
           for (let i = b.batchStart; i < b.batchEnd; i++) {
             const idx = i + 1;
@@ -3794,6 +3834,20 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         if (flags.bodyTransmigration && flags.noFamily) {
           if (/原身|前身|原主|废物嫡子|废物少爷|家族嫡子|庶子|退婚|族中废物/.test(full)) {
             behaviorIssues.push('概念忠实度：灵感是身穿且没家人，正文却出现原身/前身/家族/废物嫡子/退婚等设定——身穿开局孤身一人，用的是自己的身体，没有原身记忆');
+          }
+        }
+        // 无家人 → 严禁主角在世亲人登场。正则命中亲属称谓只作触发器，LLM 复核判定真伪
+        // （"他爹"也可能是配角自述其父，直报会误伤无辜重生成；模型能结合上下文判断亲属归属）
+        if (flags.noFamily) {
+          const kinSrc = '爹|娘|老爹|老娘|爸|妈|父亲|母亲|爷爷|奶奶|外公|外婆|姥爷|姥姥|兄长|大哥|二哥|三哥|哥哥|姐姐|弟弟|妹妹|大伯|叔叔|舅舅';
+          const kinMatches = full.match(new RegExp(`(?:他的?|她的?|主角的?)(?:${kinSrc})|["「『](?:爹|娘|爸|妈|父亲|母亲)[，！。？~\\s]`, 'g'));
+          if (kinMatches && kinMatches.length) {
+            try {
+              const famCheck = await runFamilyViolationCheck(config, concept, full, kinMatches.slice(0, 8));
+              if (famCheck.violating) {
+                behaviorIssues.push(`概念忠实度：灵感明确写主角没有家人，正文却让主角的在世亲人登场${famCheck.evidence ? `（如"${famCheck.evidence.slice(0, 60)}"）` : ''}——必须删除相关亲属角色与情节，主角开局孤身一人，人际关系只能来自后遇的路人/雇主/同门/旅伴`);
+              }
+            } catch { /* 复核失败不阻塞，宁可放行 */ }
           }
         }
         // 身穿 → 严禁魂穿/夺舍/附身/穿越到他人身上（含"前身/原主"式夺舍暗示）

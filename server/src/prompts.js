@@ -124,6 +124,11 @@ const SOUL_TRANS_RE = /魂穿|夺舍|附身/;
 const NO_FAMILY_RE = /没(有)?家人|无家人|没有亲人|没亲人|无亲无故|没有父母|无父无母|没(有)?家族|孤身一人|独自一人|没有血缘|无依无靠/;
 const SOUL_TROPE_RE = /魂穿|夺舍|附身|穿越到.{0,12}身上|占据.{0,10}(身体|身躯|肉身)|寄宿.{0,8}体内|原身(是|乃|的记忆|的身份|的家人|家族)/;
 const FAMILY_TROPE_RE = /家族(嫡子|庶子|弃子|废物|少主|少爷|子弟)|废物(嫡子|少主|少爷)|世家(嫡子|废物|子弟)|退婚|族中废物|(父亲|爷爷|祖父)(是|乃|为)族长/;
+// 直系/旁系亲属称谓（含口语）：灵感写无家人时，这些称谓以主角亲属身份出现即违规
+export const KIN_TITLES_SRC = '爹|娘|老爹|老娘|爸|妈|父亲|母亲|爷爷|奶奶|外公|外婆|姥爷|姥姥|兄长|哥哥|姐姐|大哥|二哥|三哥|大姐|二姐|弟弟|妹妹|大伯|二伯|叔叔|伯伯|婶婶|伯母|舅舅|舅妈|姑妈|姑姑|姨妈|舅舅';
+// 方案/细纲层豁免上下文：亲属词出现但明确"不在世/未见过"属合法设定（父亲早逝等），不算违规
+export const KIN_EXEMPT_SRC = '早逝|去世|已故|死了|离世|病故|战死|阵亡|陨落|失踪|下落不明|被杀|被害|双亡|病逝|没见过|从未见过|记事起|无缘一见|未曾谋面|只听过|从未见过面|遗留|遗物|遗照|牌位|坟|墓';
+export const KIN_RE = new RegExp(`(?:${KIN_TITLES_SRC})`);
 
 export function analyzeConceptConstraints(concept = '') {
   const t = String(concept || '');
@@ -156,6 +161,21 @@ export function buildConceptFidelityRule(concept = '') {
   return header + CONCEPT_FIDELITY_CORE + (extra.length ? `\n${extra.join('\n')}` : '');
 }
 
+// 正文层"无家人"违规 LLM 复核：正则命中亲属称谓后，由模型判定该亲属是否真是主角的家人（排除配角自呼其亲/比喻等误伤）
+export const CONCEPT_FAMILY_CHECK_SYSTEM = `你是小说概念忠实度审核员。用户的小说灵感明确设定【主角没有家人/无亲无故】。现在正文中检测到若干处亲属称谓（爹/娘/父亲/爷爷等），需要你判定这些亲属是否以"主角的家人"身份出场。
+
+判定规则：
+1. 违规：主角的直系/旁系亲属在世且登场或有互动——如"他爹递给他一碗酒""娘，孩儿不孝"（说话者是主角）、叙述介绍"父亲是青石城药铺掌柜"。收养的义父/养母也算家人，违规。
+2. 合法（不违规）：
+   - 配角提及自己的亲属（"小月说她爹在万宝阁做事"——是小月的爹，与主角无关）
+   - 亲属已故/失踪/从未谋面，仅作背景交代（"父亲早逝""他从未见过自己的爹"）
+   - 比喻/尊称/虚构角色（"老天爷""土地公""师尊如父"）
+   - 主角对无亲缘关系的长辈用叔伯类尊称（"陈叔""福伯"）
+3. 无法确定时倾向于违规（报 true），因为误放行的代价高于误报。
+
+只输出 JSON，不要其他文字：
+{"violating": true/false, "evidence": "违规处最关键的一句原文引用（不违规则为空字符串）", "reason": "一句话判定理由"}`;
+
 function planTextBlob(plan) {
   if (!plan || typeof plan !== 'object') return { all: '', protag: '' };
   const chars = Array.isArray(plan.characters) ? plan.characters : [];
@@ -170,6 +190,25 @@ function planTextBlob(plan) {
   return { all, protag };
 }
 
+// 无家人约束的亲属出场检测：返回未获豁免（在世、可互动）的亲属命中片段。
+// 豁免上下文（早逝/去世/失踪/从未谋面等）代表亲属不在世或不构成关系，属合法设定；
+// 豁免词可能在亲属词之前（"从未见过自己的爷爷"）或之后（"父亲早逝"），故检查双向窗口。
+export function detectKinMentions(text, limit = 5) {
+  const src = String(text || '');
+  const re = new RegExp(`(?:父亲|母亲|老爹|老娘|爹|娘|爷爷|奶奶|外公|外婆|姥爷|姥姥|兄长|大哥|二哥|三哥|哥哥|姐姐|弟弟|妹妹|大伯|叔叔|舅舅|伯伯|婶婶|姑妈|姨妈)[^，。；！？\\n]{0,20}`, 'g');
+  const exempt = new RegExp(`(?:${KIN_EXEMPT_SRC})`);
+  const bad = [];
+  for (const m of src.matchAll(re)) {
+    const before = src.slice(Math.max(0, m.index - 20), m.index);
+    // 豁免词必须与亲属词同句才生效："父亲早逝。他爹登场"是两个独立事实，跨句豁免会漏检
+    const beforeSameSentence = before.split(/[。！？；]/).pop();
+    if (exempt.test(m[0]) || exempt.test(beforeSameSentence)) continue;
+    bad.push(m[0]);
+    if (bad.length >= limit) break;
+  }
+  return bad;
+}
+
 export function detectConceptViolations(concept, plan) {
   const flags = analyzeConceptConstraints(concept);
   const { all, protag } = planTextBlob(plan);
@@ -182,6 +221,14 @@ export function detectConceptViolations(concept, plan) {
   }
   if (flags.noFamily && flags.bodyTransmigration && /穿越到.{0,8}(家|族).{0,6}(身上|体内|嫡子|废物)/.test(all)) {
     issues.push('灵感是身穿且没家人，方案仍写成穿越进某家族原身');
+  }
+  // 无家人约束：方案任何位置给主角安排在世亲属（父亲是某掌柜/他娘叮嘱他……）都属违规；
+  // 亲属词紧邻"早逝/去世/失踪"等豁免词时属合法设定（父母双亡是常见无家人写法），不算违规
+  if (flags.noFamily) {
+    const badKin = detectKinMentions(`${protag}\n${all}`, 2);
+    if (badKin.length) {
+      issues.push(`灵感说没有家人，方案却给主角安排了在世亲人（如：${badKin.join('；')}）——主角开局必须孤身一人，亲属只能以已故/失踪/从未谋面的形式存在于背景`);
+    }
   }
   return issues;
 }
