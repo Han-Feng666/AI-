@@ -29,7 +29,7 @@ import {
 import {
   NOVEL_PLAN_SYSTEM, PLAN_SKELETON_SYSTEM, PLAN_CHAPTERS_SYSTEM, PLAN_REVISE_SYSTEM,
   buildConceptFidelityRule, detectConceptViolations, analyzeConceptConstraints,
-  CONCEPT_FAMILY_CHECK_SYSTEM, KIN_RE, detectKinMentions,
+  CONCEPT_FAMILY_CHECK_SYSTEM, ADVANCE_CHECK_SYSTEM, KIN_RE, detectKinMentions,
   CHAPTER_SYSTEM, CHAPTER_TITLE_SYSTEM,
   CHAPTER_SUMMARY_SYSTEM, POLISH_SYSTEM, STYLE_ANALYZE_SYSTEM,
   CHAT_SYSTEM, COMPRESS_SYSTEM, COMPRESS_UPDATE_SYSTEM,
@@ -215,6 +215,22 @@ async function runFamilyViolationCheck(config, concept, full, kinMatches) {
   });
   const j = extractJson(r.content) || {};
   return { violating: !!j.violating, evidence: String(j.evidence || ''), reason: String(j.reason || '') };
+}
+
+// 开局章节快进检测：前3章正文若已把后续章节的剧情写完（把三章的量塞进一章），判定为节奏事故
+// 由模型对照"本章概要"与"正文结尾"判断，宁放行不误伤
+async function runAdvanceCheck(config, idx, targetChapters, summary, full) {
+  const r = await chat({
+    config,
+    task: 'analysis',
+    messages: [
+      { role: 'system', content: ADVANCE_CHECK_SYSTEM },
+      { role: 'user', content: `【本章序号】第${idx}章（全书规划 ${targetChapters || '?'} 章）\n【本章剧情概要】\n${String(summary || '（未提供）')}\n\n【正文结尾（最后600字）】\n${String(full).slice(-600)}\n\n请判定正文是否已超出本章概要范围，把后续章节的剧情提前写完。` }
+    ],
+    maxTokens: 300
+  });
+  const j = extractJson(r.content) || {};
+  return { advanced: !!j.advanced, reason: String(j.reason || '') };
 }
 
 async function runDetection(config, text) {
@@ -3457,7 +3473,9 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         let streamOk = false;
         for (let netTry = 0; netTry < 3; netTry++) {
           if (netTry > 0) {
-            const waitMs = netTry === 1 ? 5000 : 12000;
+            // 429/限流类错误退避更长（网关限流窗口通常 10-60 秒，短退避只会连续撞墙）
+            const isRateLimit = /429|rate.?limit|too many requests|频繁|额度|quota/i.test(lastStreamErr || '');
+            const waitMs = isRateLimit ? (netTry === 1 ? 20000 : 45000) : (netTry === 1 ? 5000 : 12000);
             send({ type: 'status', message: `生成被网关打断（${lastStreamErr || '服务过载'}），${waitMs / 1000} 秒后重试第 ${round + 1} 轮（第 ${netTry + 1} 次连接）…` });
             await new Promise((resolve) => setTimeout(resolve, waitMs));
             if (round === 0 && full.trim()) {
@@ -3490,8 +3508,9 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
             break;
           } catch (e) {
             lastStreamErr = e?.message || String(e);
-            // 过载类错误 + 连接/空闲超时均可重试；其他错误直接终止
-            const isOverload = /overloaded|overload|503|529|Service temporarily|capacity|server busy|upstream/i.test(lastStreamErr);
+            // 过载/限流类错误 + 连接/空闲超时均可重试；其他错误直接终止
+            // 429（请求过于频繁/额度不足）属于瞬时限流，退避后重试而非中断整章生成
+            const isOverload = /overloaded|overload|503|529|429|rate.?limit|too many requests|频繁|额度|quota|Service temporarily|capacity|server busy|upstream/i.test(lastStreamErr);
             const isTimeout = /请求超时|流式响应超时|connect|ETIMEDOUT|socket hang up/i.test(lastStreamErr);
             if ((!isOverload && !isTimeout) || netTry >= 2) {
               streamOk = false;
@@ -3849,6 +3868,15 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
               }
             } catch { /* 复核失败不阻塞，宁可放行 */ }
           }
+        }
+        // 开局章节快进检测：前3章把后续剧情写完（三章的量塞进一章）是严重节奏事故
+        if (idx <= 3) {
+          try {
+            const advCheck = await runAdvanceCheck(config, idx, novel.target_chapters, existing?.summary, full);
+            if (advCheck.advanced) {
+              behaviorIssues.push(`剧情快进：第${idx}章已超出本章概要范围，把后续章节的剧情提前写完（${advCheck.reason.slice(0, 80)}）——本章只写概要规划的内容，收尾停在本章概要终点，超出部分删除，用具体场景/细节/心理活动把概要内的内容写细写透`);
+            }
+          } catch { /* 检测失败不阻塞 */ }
         }
         // 身穿 → 严禁魂穿/夺舍/附身/穿越到他人身上（含"前身/原主"式夺舍暗示）
         if (flags.bodyTransmigration) {
