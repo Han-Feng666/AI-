@@ -7,7 +7,8 @@ import api from '../api';
 
 const store = useEditorStore();
 const contentBox = ref(null);
-const genBox = ref(null);
+const genFloatBox = ref(null);
+const showGenStream = ref(false);
 const showSummary = ref(false);
 
 // 正文按段落拆分渲染（首行缩进）
@@ -356,7 +357,7 @@ watch(
   () => store.genStream,
   async () => {
     await nextTick();
-    if (genBox.value) genBox.value.scrollTop = genBox.value.scrollHeight;
+    if (genFloatBox.value) genFloatBox.value.scrollTop = genFloatBox.value.scrollHeight;
   }
 );
 
@@ -372,40 +373,33 @@ watch(
 
 <template>
   <div class="chapter-area">
-    <!-- 生成中实时内容 -->
-    <div v-if="store.busy" class="gen-wrap">
-      <div class="gen-head">
-        <div class="gen-status">
-          <el-icon class="is-loading"><Loading /></el-icon>
-          <span>{{ store.busyLabel }}</span>
-        </div>
-        <el-button size="small" @click="store.stop()">
-          <el-icon style="margin-right:4px"><VideoPause /></el-icon>停止生成
-        </el-button>
-      </div>
-      <div v-if="store.genProgress > 0 && store.genProgress < 100" class="gen-progress">
-        <el-progress
-          :percentage="store.genProgress"
-          :stroke-width="8"
-          :show-text="true"
-          color="#7c3aed"
-          striped
-          striped-flow
-          :duration="20"
-        />
-      </div>
-      <div ref="genBox" class="gen-content">
-        {{ store.genStream }}
-      </div>
-    </div>
+     <!-- 生成中：顶部状态条 + 浮动生成流（不盖住阅读区，可切换章节查看） -->
+     <div v-if="store.busy" class="gen-head-bar">
+       <div class="gen-status">
+         <el-icon class="is-loading"><Loading /></el-icon>
+         <span>{{ store.busyLabel }}</span>
+       </div>
+       <el-progress v-if="store.genProgress > 0 && store.genProgress < 100" :percentage="store.genProgress" :stroke-width="6" :show-text="false" color="#7c3aed" striped striped-flow :duration="20" />
+       <el-button size="small" @click="store.stop()">
+         <el-icon style="margin-right:4px"><VideoPause /></el-icon>停止
+       </el-button>
+     </div>
 
-    <!-- 空状态 -->
-    <div v-else-if="!store.activeChapter" class="empty-area">
-      <el-empty :description="store.hasPlanned ? '从左侧章节列表选择一章开始阅读，或点击「生成下一章」' : '先输入灵感想法，让 AI 生成创作方案'" />
-    </div>
+     <div v-if="store.busy && store.genStream" class="gen-float" :class="{ expanded: showGenStream }">
+       <div class="gen-float-head" @click="showGenStream = !showGenStream">
+         <el-icon><ArrowDown /></el-icon>
+         <span style="margin-left:4px">实时生成（{{ store.genProgress }}%）</span>
+       </div>
+       <div v-show="showGenStream" ref="genFloatBox" class="gen-float-body">{{ store.genStream }}</div>
+     </div>
 
-    <!-- 章节阅读/编辑 -->
-    <div v-else class="chapter-read">
+     <!-- 空状态 -->
+     <div v-else-if="!store.activeChapter" class="empty-area">
+       <el-empty :description="store.hasPlanned ? '从左侧章节列表选择一章开始阅读，或点击「生成下一章」' : '先输入灵感想法，让 AI 生成创作方案'" />
+     </div>
+
+     <!-- 章节阅读/编辑 -->
+     <div v-else class="chapter-read">
       <div class="chapter-head">
         <div class="chapter-title-wrap">
           <el-input
@@ -570,34 +564,57 @@ watch(
   box-shadow: 0 1px 3px rgba(20,24,80,.06);
   overflow: hidden;
 }
-.gen-wrap {
-  flex: 1;
+/* 生成中顶部状态条：固定在 chapter-area 顶部，不遮盖阅读区，生成过程中仍可切换章节查看正文 */
+.gen-head-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #eef0f6;
+  background: #fafbff;
+}
+.gen-status { display: flex; align-items: center; gap: 8px; color: #4f46e5; font-weight: 600; font-size: 14px; white-space: nowrap; }
+.gen-head-bar .el-progress { flex: 1 1 0; min-width: 120px; }
+
+.gen-head-bar :global(.el-button) { padding: 6px 12px; }
+
+/* 生成流浮动面板：右下角折叠，不影响阅读区切换章节 */
+.gen-float {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 50;
   display: flex;
   flex-direction: column;
+  width: 320px;
+  max-height: 260px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .15);
   overflow: hidden;
 }
-.gen-head {
+.gen-float-head {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 14px 20px;
-  border-bottom: 1px solid #eef0f6;
-  background: #fafbff;
+  gap: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  background: #f3f4f6;
+  font-size: 13px;
+  color: #374151;
 }
-.gen-status { display: flex; align-items: center; gap: 8px; color: #4f46e5; font-weight: 600; font-size: 14px; }
-.gen-progress {
-  padding: 10px 20px 0;
-  border-bottom: 1px solid #eef0f6;
-  background: #fafbff;
-}
-.gen-content {
+.gen-float-body {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 32px;
-  font-size: 15px;
-  line-height: 2;
+  padding: 16px 20px;
+  font-size: 13px;
+  line-height: 1.8;
   color: #374151;
   white-space: pre-wrap;
+  word-break: break-word;
 }
 .empty-area {
   flex: 1;

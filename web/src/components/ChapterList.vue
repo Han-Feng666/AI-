@@ -2,9 +2,11 @@
 import { ref, computed } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useEditorStore } from '../stores/editor';
+import BatchGenerateDialog from './BatchGenerateDialog.vue';
 
 const store = useEditorStore();
 const useReference = ref(false);
+const showBatch = ref(false);
 
 const written = computed(() => store.chapters.filter((c) => c.word_count > 0).length);
 const target = computed(() => Number(store.novel?.target_chapters) || store.chapters.length || 0);
@@ -32,6 +34,20 @@ function aiDotCls(score) {
       <el-icon style="margin-right:6px"><EditPen /></el-icon>
       {{ store.busy ? store.busyLabel : '生成下一章' }}
     </el-button>
+
+    <!-- 生成按钮：多章 -->
+    <el-button
+      type="primary"
+      class="gen-batch-btn"
+      :disabled="store.busy"
+      @click="showBatch = true"
+    >
+      <el-icon style="margin-right:6px"><Files /></el-icon>
+      生成多章
+    </el-button>
+
+    <BatchGenerateDialog v-model:visible="showBatch" />
+
     <div class="gen-options">
       <el-checkbox v-model="useReference" size="small">参考同类热门小说</el-checkbox>
     </div>
@@ -81,7 +97,7 @@ function aiDotCls(score) {
   border-radius: 12px;
   box-shadow: 0 1px 3px rgba(20,24,80,.06);
 }
-.gen-next-btn { width: 100%; margin-bottom: 6px; }
+.gen-next-btn, .gen-batch-btn { width: 100%; margin-bottom: 6px; }
 .gen-options { margin-bottom: 12px; padding-left: 2px; font-size: 12px; }
 .list-progress { margin-bottom: 12px; padding: 8px 10px; background: #f5f6fd; border-radius: 8px; }
 .lp-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
