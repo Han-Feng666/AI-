@@ -1353,6 +1353,10 @@ export function buildPolishWithIssues(styles, baseline, samples, issues, blackli
 export function extractJson(text) {
   if (!text) return null;
   let t = text.trim();
+  // 剥离推理标签内容（DeepSeek V4/R1 系模型常在 JSON 前输出 <think>推理</think>，
+  // 推理文本里的大括号/引号会干扰后续切片提取，必须先剥掉）
+  t = t.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  t = t.replace(/<think>[\s\S]*$/i, '').trim(); // 未闭合 think（输出截断在推理中）→ 无 JSON 可救
   // 去除 markdown 代码围栏
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fence) t = fence[1].trim();
@@ -1484,6 +1488,65 @@ export function extractJson(text) {
     return null;
   };
 
+  // 截断自愈：模型输出超长 JSON 被 maxTokens/网络截断时（无闭合括号），
+  // 丢弃尾部不完整片段并补齐闭合括号，尽量救回已输出的完整部分。
+  // 如骨架 20 章 JSON 断在第 13 章——救回 13 章比整批重试/占位好得多；
+  // 缺的章节由调用方的"章节数不足则继续分批"逻辑自然补齐。
+  const tryRepairTruncated = (s) => {
+    // 首扫：定位最后一个"结构安全点"（字符串外的逗号），并检查是否真的截断
+    let inStr = false;
+    let escaped = false;
+    const stack = [];
+    let lastSafe = -1;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (inStr) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{' || ch === '[') stack.push(ch);
+      else if (ch === '}' || ch === ']') stack.pop();
+      else if (ch === ',' && stack.length) lastSafe = i;
+    }
+    if (!stack.length && !inStr) return null; // 括号平衡且不在字符串中，未截断
+    // 截到最后一个安全逗号，丢弃不完整尾部
+    let base = lastSafe > 0 ? s.slice(0, lastSafe) : s;
+    // 重扫 base：补字符串引号、数剩余未闭合括号
+    const stack2 = [];
+    inStr = false;
+    escaped = false;
+    for (let i = 0; i < base.length; i++) {
+      const ch = base[i];
+      if (inStr) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{' || ch === '[') stack2.push(ch);
+      else if (ch === '}' || ch === ']') stack2.pop();
+    }
+    if (inStr) base += '"';
+    let repaired = base;
+    while (stack2.length) {
+      const open = stack2.pop();
+      repaired += open === '{' ? '}' : ']';
+    }
+    return repaired;
+  };
+
+  // 截断自愈：JSON 未闭合（被 maxTokens/网络截断）时，丢弃尾部不完整片段并补齐闭合，救回已输出部分
+  if (!t.endsWith('}') && !t.endsWith(']')) {
+    const repaired = tryRepairTruncated(t);
+    if (repaired) {
+      const v = tryVariants(repaired);
+      if (v) return v;
+    }
+  }
   // 整体尝试（对象或数组）
   if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
     const v = tryVariants(t);

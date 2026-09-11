@@ -2,7 +2,7 @@ import { db } from './db.js';
 import { chat } from './llm.js';
 import { estimateTokens } from './lib.js';
 import { readStoryLogFile, writeStoryLogFile } from './storage.js';
-import { NOVEL_CONSTITUTION_BUILD_SYSTEM, PLOT_CONSISTENCY_CHECK_SYSTEM } from './prompts.js';
+import { NOVEL_CONSTITUTION_BUILD_SYSTEM, PLOT_CONSISTENCY_CHECK_SYSTEM, extractJson } from './prompts.js';
 
 // ====================================================================
 // P0-P3 长篇记忆基础设施
@@ -457,17 +457,8 @@ export async function checkPlotConsistency(novelId, chapterIdx, chapterText, con
 }
 
 function extractJsonSafe(text) {
-  if (!text) return null;
-  let t = text.trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) t = fence[1].trim();
-  try { return JSON.parse(t); } catch { /* */ }
-  const s = t.indexOf('{');
-  const e = t.lastIndexOf('}');
-  if (s !== -1 && e > s) {
-    try { return JSON.parse(t.slice(s, e + 1)); } catch { /* */ }
-  }
-  return null;
+  // 委托 prompts.extractJson：其已覆盖 think 标签剥离/围栏/截断自愈/引号修复等全部健壮性逻辑
+  return extractJson(text);
 }
 
 // ---------- 全书剧情日志：每章一行确定性剧情档案（防失忆/防剧情漂移） ----------
