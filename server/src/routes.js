@@ -46,7 +46,8 @@ getGenreGuide, getGenreGuides
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
-  listActiveJobs, tryCreateJob, subscribeJobEvents, abortJob
+  listActiveJobs, tryCreateJob, subscribeJobEvents, abortJob,
+  registerJobCtrl, unregisterJobCtrl
 } from './jobs.js';
 import {
   saveVersion, listVersions, getVersion, getLatestPending,
@@ -116,7 +117,7 @@ router.use(relationshipRouter);
 router.use(managerMemoryRouter);
 
 // ---------- SSE helper ----------
-function startSSE(req, res) {
+function startSSE(req, res, opts = {}) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -132,7 +133,10 @@ function startSSE(req, res) {
   };
   res.on('close', () => {
     stopKeepalive(); // 必须清理心跳定时器，否则流挂起会无限泄漏定时器
-    if (!finished && !res.writableEnded) ctrl.abort();
+    // detachOnClose（长任务解耦模式）：SSE 连接断开（网络抖动/页面刷新/系统休眠）
+    // 不再中止任务——任务继续后台跑完，结果写入 job（jobId 轮询或刷新可见）。
+    // 用户显式停止走 POST /job/abort → jobs.abortJob → 触发注册的 ctrl.abort()。
+    if (!opts.detachOnClose && !finished && !res.writableEnded) ctrl.abort();
   });
   const send = (obj) => {
     if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(obj)}\n\n`);
@@ -1866,7 +1870,10 @@ router.post('/novels/:id/plan', async (req, res) => {
   }
   const job = jobTry.job;
 
-  const { ctrl, send, end } = startSSE(req, res);
+  // 长任务与 SSE 连接解耦：连接断开（网络抖动/页面刷新/休眠）任务继续后台跑完，
+  // 用户停止走 POST /job/abort → abortJob → 触发注册的 ctrl
+  const { ctrl, send, end } = startSSE(req, res, { detachOnClose: true });
+  registerJobCtrl(job.id, ctrl);
   send({ type: 'job', jobId: job.id, stage: 'plan' });
   send({ type: 'progress', progress: 5, message: '正在初始化…' });
   updateJob(job.id, { progress: 5 });
@@ -1970,8 +1977,14 @@ const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
               if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
                 send({ type: 'status', message: `第 ${attempt} 次重试也超时，继续重试…` });
                 lastText = '';
+              } else if (e2.name === 'AbortError') {
+                throw e2; // 用户主动中止
+              } else if (attempt >= maxAttempts) {
+                throw e2; // 最后一次尝试仍失败，才向上抛
               } else {
-                throw e2;
+                // 网络/网关瞬断计入重试（下一轮循环自带指数退避），不再直接终止整个任务
+                send({ type: 'status', message: `请求失败（${String(e2.message).slice(0, 60)}），将继续第 ${attempt + 1} 次重试…` });
+                lastText = '';
               }
             }
           } else {
@@ -1990,8 +2003,14 @@ const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
             if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
               send({ type: 'status', message: `第 ${attempt} 次重试也超时，继续重试…` });
               lastText = '';
+            } else if (e2.name === 'AbortError') {
+              throw e2; // 用户主动中止
+            } else if (attempt >= maxAttempts) {
+              throw e2; // 最后一次尝试仍失败，才向上抛
             } else {
-              throw e2;
+              // 网络/超时/5xx/过载类错误计入重试（下一轮循环自带指数退避），避免网关瞬断直接终止整个任务
+              send({ type: 'status', message: `请求失败（${String(e2.message).slice(0, 60)}），将继续第 ${attempt + 1} 次重试…` });
+              lastText = '';
             }
           }
         }
@@ -2972,7 +2991,8 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
   if (error) return res.status(400).json({ error: error.message });
 
   const { mode = 'next', chapterIndex, targetWords, overrideTitle, useReference } = req.body || {};
-  const { ctrl, send, end } = startSSE(req, res);
+  // 长任务与 SSE 连接解耦：连接断开任务继续后台跑完，停止走 POST /job/abort
+  const { ctrl, send, end } = startSSE(req, res, { detachOnClose: true });
 
   let idx;
   if (mode === 'regenerate') {
@@ -3006,6 +3026,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     return end({ type: 'error', message: '该小说已有进行中的章节生成任务', jobId: jobTry.jobId });
   }
   const job = jobTry.job;
+  registerJobCtrl(job.id, ctrl);
   send({ type: 'job', jobId: job.id, stage: 'generate_chapter', chapterIndex: idx });
   send({ type: 'progress', progress: 5, message: `正在准备第 ${idx} 章…` });
   updateJob(job.id, { progress: 5, stream_cursor: `正在准备第 ${idx} 章…` });

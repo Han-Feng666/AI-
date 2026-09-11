@@ -289,6 +289,10 @@ export async function chat(opts) {
     // reasoning=off 时，对支持思考的模型显式关闭，防止默认思考吞掉 max_tokens
     if (isDeepSeekV4) {
       body.thinking = { type: 'disabled' };
+      // 网关兼容：部分严格网关只认 reasoning_effort 控制思考（会 400 拒绝 thinking 参数）。
+      // 两个参数都发：官方 API 认 thinking；严格网关 400 后由自愈剔除 thinking，
+      // reasoning_effort=minimal 兜底生效，防止模型默认开思考吞掉 max_tokens 导致 JSON 输出截断。
+      body.reasoning_effort = 'minimal';
       // 注意：enable_thinking 是 Qwen 系参数，发给 DeepSeek 端点会被严格网关 400 拒绝（Unsupported parameter），不再发送
     } else if (isDeepSeekLegacy) {
       body.enable_thinking = false;
@@ -364,9 +368,19 @@ export async function chat(opts) {
       if (resp.status !== 429 || attempt >= MAX_429_RETRY) {
         if (resp.status === 400 && unsupportedStripped < 3) {
           cachedDetail = await resp.text().catch(() => '');
-          const m = String(cachedDetail).match(/Unsupported parameter\(s\):\s*`?([A-Za-z_][\w.]*)/);
-          if (m) {
-            const bad = m[1].includes('.') ? m[1].split('.').pop() : m[1];
+          // 提取被网关点名的参数名，兼容两种错误格式：
+          // 1) Unsupported parameter(s): `xxx`（one-api 严格模式）
+          // 2) "xxx" is not supported on ... / "param":"xxx"（DeepSeek 官方网关格式）
+          let bad = null;
+          const m1 = String(cachedDetail).match(/Unsupported parameter\(s\):\s*`?([A-Za-z_][\w.]*)/);
+          if (m1) bad = m1[1];
+          if (!bad) {
+            const m2 = String(cachedDetail).match(/"param"\s*:\s*"([A-Za-z_][\w.]*)"/)
+              || String(cachedDetail).match(/"([A-Za-z_][\w.]*)" is not supported/);
+            if (m2) bad = m2[1];
+          }
+          if (bad) {
+            bad = bad.includes('.') ? bad.split('.').pop() : bad;
             if (bad && bad in body) {
               delete body[bad];
               unsupportedStripped++;

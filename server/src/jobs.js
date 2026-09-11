@@ -8,6 +8,18 @@ function emit(ev) {
   }
 }
 
+// 内存任务中断控制器：jobId -> AbortController。
+// 长任务（方案/章节生成）与 SSE 连接解耦后，连接断开任务继续后台跑完；
+// 用户「停止生成」通过 abort 路由触发这里的 ctrl.abort()，生成循环内
+// 所有 ctrl.signal.aborted 检查点无需任何改动即可感知中止。
+const jobCtrls = new Map();
+export function registerJobCtrl(jobId, ctrl) {
+  jobCtrls.set(jobId, ctrl);
+}
+export function unregisterJobCtrl(jobId) {
+  jobCtrls.delete(jobId);
+}
+
 export function subscribeJobEvents(cb) {
   subscribers.add(cb);
   return () => subscribers.delete(cb);
@@ -68,8 +80,14 @@ export function clearZombieJobs() {
   return rows.length;
 }
 
-// 将指定 job 标记为 aborted（用户点击停止/清理僵尸任务）
+// 将指定 job 标记为 aborted（用户点击停止/清理僵尸任务）。
+// 若任务已注册中断控制器，先 abort 让生成循环立即退出（含进行中的 LLM 请求）。
 export function abortJob(id) {
+  const ctrl = jobCtrls.get(id);
+  if (ctrl) {
+    try { ctrl.abort(); } catch { /* ignore */ }
+    jobCtrls.delete(id);
+  }
   const job = getJob(id);
   if (!job) return null;
   if (job.status !== 'running') return job;
