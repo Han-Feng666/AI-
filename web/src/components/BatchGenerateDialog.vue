@@ -69,6 +69,7 @@
 import { ref, computed } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useEditorStore } from '../stores/editor';
+import api from '../api';
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -105,11 +106,21 @@ function doBatch() {
   stopped.value = false;
 
   (async () => {
+    // 服务端登记批量任务断点：刷新/断连后可续跑
+    try {
+      const st = await api.batchStart(store.novelId, n);
+      if (st.resumed && st.done > 0) {
+        done.value = Math.min(st.done, n);
+        ElMessage.info(`检测到未完成的批量任务，已从第 ${done.value + 1} 章续跑`);
+      }
+    } catch { /* 断点登记失败不影响生成本身 */ }
+
     for (let i = 0; i < n; i++) {
       if (stopped.value) break;
       try {
         await store.generateChapter({ mode: 'next' });
         done.value++;
+        try { await api.batchProgress(store.novelId, 'step'); } catch { /* 进度上报失败不阻塞 */ }
       } catch (e) {
         errors.value.push({
           chapter: done.value + 1,
@@ -118,12 +129,14 @@ function doBatch() {
         ElMessage.error(
           `第 ${done.value + 1} 章失败，已停止：${e.message || ''}`
         );
+        try { await api.batchProgress(store.novelId, 'stop', done.value); } catch { /* 上报失败不阻塞 */ }
         break;
       }
     }
     busy.value = false;
     if (!errors.value.length && !stopped.value) {
       ElMessage.success(`批量生成完成，共生成 ${done.value} 章`);
+      try { await api.batchProgress(store.novelId, 'stop', done.value); } catch { /* 上报失败不阻塞 */ }
       emit('update:visible', false);
     }
     if (stopped.value && !errors.value.length) {
@@ -137,6 +150,7 @@ function abortAll() {
   try {
     store.stop();
   } catch {}
+  // 进度已在服务端留档，刷新后可从断点续跑
 }
 </script>
 

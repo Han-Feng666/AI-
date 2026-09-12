@@ -1,12 +1,31 @@
 <script setup>
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { ElMessage } from 'element-plus';
 import { useEditorStore } from '../stores/editor';
 import BatchGenerateDialog from './BatchGenerateDialog.vue';
+import api from '../api';
 
 const store = useEditorStore();
 const useReference = ref(false);
 const showBatch = ref(false);
+const batchResume = ref(null);
+
+onMounted(async () => {
+  // 刷新后检测未完成的批量任务断点：显示"继续生成"入口
+  try {
+    const st = await api.batchState(store.novelId);
+    if (st.running && st.total > (st.done || 0)) {
+      batchResume.value = st;
+    }
+  } catch { /* 断点查询失败静默 */ }
+});
+
+async function resumeBatch() {
+  const st = batchResume.value;
+  if (!st) return;
+  showBatch.value = true;
+  batchResume.value = null;
+}
 
 const written = computed(() => store.chapters.filter((c) => c.word_count > 0).length);
 const target = computed(() => Number(store.novel?.target_chapters) || store.chapters.length || 0);
@@ -58,6 +77,10 @@ function aiDotCls(score) {
       </div>
       <div class="lp-track"><div class="lp-fill" :style="{ width: progressPct + '%' }"></div></div>
     </div>
+    <div v-if="batchResume" class="batch-resume-bar" @click="resumeBatch">
+      <el-icon style="margin-right:4px"><RefreshRight /></el-icon>
+      上次批量生成还有 {{ batchResume.total - batchResume.done }} 章未完成，点击继续
+    </div>
     <div
       v-for="c in store.chapters"
       :key="c.chapter_index"
@@ -100,6 +123,19 @@ function aiDotCls(score) {
 .gen-next-btn, .gen-batch-btn { width: 100%; margin-bottom: 6px; }
 .gen-options { margin-bottom: 12px; padding-left: 2px; font-size: 12px; }
 .list-progress { margin-bottom: 12px; padding: 8px 10px; background: #f5f6fd; border-radius: 8px; }
+.batch-resume-bar {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: #c2410c;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+.batch-resume-bar:hover { background: #ffedd5; }
 .lp-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
 .lp-text { font-size: 11.5px; color: #6b7280; }
 .lp-pct { font-size: 11.5px; font-weight: 700; color: #4f46e5; }

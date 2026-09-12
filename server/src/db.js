@@ -296,6 +296,16 @@ CREATE TABLE IF NOT EXISTS shared_characters (
   source_novel_id INTEGER REFERENCES novels(id) ON DELETE SET NULL,
   created_at TEXT DEFAULT (datetime('now','localtime'))
 );
+
+CREATE TABLE IF NOT EXISTS character_states (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  novel_id INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+  chapter_index INTEGER NOT NULL,
+  states TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  UNIQUE(novel_id, chapter_index)
+);
+CREATE INDEX IF NOT EXISTS idx_char_states ON character_states(novel_id, chapter_index);
 `);
 
 // ===== P0-P3 长篇记忆基础设施 =====

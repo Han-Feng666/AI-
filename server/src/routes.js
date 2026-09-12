@@ -29,7 +29,7 @@ import {
 import {
   NOVEL_PLAN_SYSTEM, PLAN_SKELETON_SYSTEM, PLAN_CHAPTERS_SYSTEM, PLAN_REVISE_SYSTEM,
   buildConceptFidelityRule, detectConceptViolations, analyzeConceptConstraints,
-  CONCEPT_FAMILY_CHECK_SYSTEM, ADVANCE_CHECK_SYSTEM, KIN_RE, detectKinMentions,
+  CONCEPT_FAMILY_CHECK_SYSTEM, ADVANCE_CHECK_SYSTEM, CHARACTER_STATE_SYSTEM, KIN_RE, detectKinMentions,
   CHAPTER_SYSTEM, CHAPTER_TITLE_SYSTEM,
   CHAPTER_SUMMARY_SYSTEM, POLISH_SYSTEM, STYLE_ANALYZE_SYSTEM,
   CHAT_SYSTEM, COMPRESS_SYSTEM, COMPRESS_UPDATE_SYSTEM,
@@ -223,6 +223,51 @@ async function runFamilyViolationCheck(config, concept, full, kinMatches) {
 
 // 开局章节快进检测：前3章正文若已把后续章节的剧情写完（把三章的量塞进一章），判定为节奏事故
 // 对照"本章概要 + 后续章节概要"与"正文全文抽样"判断，reason 须指出撞了后面哪章的什么剧情
+// 角色状态快照：读取某小说最近一次状态（chapter_index < idx 的最大章）
+function getLatestCharacterStates(novelId, beforeIdx) {
+  const row = db.prepare(
+    'SELECT chapter_index, states FROM character_states WHERE novel_id = ? AND chapter_index < ? ORDER BY chapter_index DESC LIMIT 1'
+  ).get(novelId, beforeIdx);
+  if (!row) return { chapterIndex: 0, list: [] };
+  try {
+    const parsed = JSON.parse(row.states);
+    return { chapterIndex: row.chapter_index, list: Array.isArray(parsed) ? parsed : [] };
+  } catch { return { chapterIndex: row.chapter_index, list: [] }; }
+}
+
+// 角色状态快照：从本章正文提取状态变化并合并上一章快照，写入 character_states（失败不阻塞）
+async function updateCharacterStates(config, novel, idx, full) {
+  const prev = getLatestCharacterStates(novel.id, idx);
+  const prevBlock = prev.list.length
+    ? `【上一章（第${prev.chapterIndex}章）末角色状态】\n${prev.list.map((s) => `- ${s.name}：${s.changes || ''}`).join('\n')}`
+    : '（无历史状态记录）';
+  const r = await chat({
+    config,
+    task: 'analysis',
+    messages: [
+      { role: 'system', content: CHARACTER_STATE_SYSTEM },
+      { role: 'user', content: `${prevBlock}\n\n【第${idx}章正文】\n${String(full).slice(0, 6000)}` }
+    ],
+    maxTokens: 600
+  });
+  const j = extractJson(r.content);
+  const changes = Array.isArray(j?.states) ? j.states.filter((s) => s && s.name && s.changes) : [];
+  if (!changes.length) {
+    // 本章无变化：沿用上一章快照（保持时间线连续）
+    if (prev.list.length) {
+      db.prepare('INSERT OR REPLACE INTO character_states (novel_id, chapter_index, states) VALUES (?,?,?)')
+        .run(novel.id, idx, JSON.stringify(prev.list));
+    }
+    return;
+  }
+  // 合并：上一章状态为底，本章变化覆盖同名角色
+  const merged = [...prev.list.filter((p) => !changes.some((c) => c.name === p.name))];
+  for (const c of changes) merged.push({ name: c.name, changes: String(c.changes) });
+  db.prepare('INSERT OR REPLACE INTO character_states (novel_id, chapter_index, states) VALUES (?,?,?)')
+    .run(novel.id, idx, JSON.stringify(merged.slice(0, 20)));
+  return merged;
+}
+
 async function runAdvanceCheck(config, idx, targetChapters, summary, full, nextSummaries = []) {
   const nextText = (nextSummaries || []).filter(Boolean).map((s, i) => `第${idx + i + 1}章概要：${String(s).slice(0, 120)}`).join('\n');
   const text = String(full || '');
@@ -2478,7 +2523,8 @@ router.post('/novels/:id/plan/revise', async (req, res) => {
   }
   const job = jobTry.job;
 
-  const { ctrl, send, end } = startSSE(req, res);
+  const { ctrl, send, end } = startSSE(req, res, { detachOnClose: true });
+  registerJobCtrl(job.id, ctrl);
   send({ type: 'job', jobId: job.id, stage: 'revise' });
   send({ type: 'progress', progress: 10, message: '正在按你的意见修订方案…' });
   send({ type: 'status', message: '正在按你的意见修订方案…' });
@@ -2656,7 +2702,8 @@ router.post('/novels/:id/adaptation/from-song', async (req, res) => {
   ).run(novel.id, `歌词改编：${songTitle || '未知歌曲'} - ${artist || '未知歌手'}`, 'drafting_plan', 0);
   const jobId = Number(info.lastInsertRowid);
 
-  const { ctrl, send, end } = startSSE(req, res);
+  const { ctrl, send, end } = startSSE(req, res, { detachOnClose: true });
+  registerJobCtrl(`adapt_${jobId}`, ctrl);
   send({ type: 'job', jobId, stage: 'adaptation_plan' });
   send({ type: 'progress', progress: 1, message: '正在分析歌词(1%)…' });
   send({ type: 'status', message: '正在分析歌词内容与情感…' });
@@ -2868,7 +2915,8 @@ router.post('/novels/:id/adaptation/next', async (req, res) => {
   ).all(job.id).slice(-5);
   const adoptedSummaries = acceptedChs.map((c) => `第${c.chapter_index}章：${String(c.candidate_content).slice(0, 400)}`).join('\n\n');
 
-  const { ctrl, send, end } = startSSE(req, res);
+  const { ctrl, send, end } = startSSE(req, res, { detachOnClose: true });
+  registerJobCtrl(`adapt_next_${job.id}_${target.chapter_index}`, ctrl);
   send({ type: 'job', jobId: job.id, stage: 'adaptation_chapter', chapterIndex: target.chapter_index });
   const rangeStart = Math.round((currentIndex / total) * 100);
   const rangeEnd = Math.round((target.chapter_index / total) * 100);
@@ -3106,6 +3154,56 @@ router.delete('/novels/:id/chapters/:idx', async (req, res) => {
 });
 
 // 生成/续写章节（流式）
+// ---- 批量生成断点管理：job 记录进度，前端刷新/断连后可续跑 ----
+// 开始/续跑一个批量任务：已有 running 的 batch job 则直接复用（断点续跑）
+router.post('/novels/:id/chapters/batch/start', (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const total = Math.max(1, Number(req.body?.total) || 0);
+  const existing = db.prepare(
+    "SELECT * FROM generation_jobs WHERE novel_id = ? AND stage = 'batch_generate' AND status = 'running' ORDER BY id DESC LIMIT 1"
+  ).get(novel.id);
+  if (existing) {
+    const meta = (() => { try { return JSON.parse(existing.params || '{}'); } catch { return {}; } })();
+    return res.json({ jobId: existing.id, total: meta.total || 0, done: meta.done || 0, resumed: true });
+  }
+  const r = db.prepare(
+    "INSERT INTO generation_jobs (novel_id, stage, status, progress, params) VALUES (?, 'batch_generate', 'running', 0, ?)"
+  ).run(novel.id, JSON.stringify({ total, done: 0 }));
+  res.json({ jobId: r.lastInsertRowid, total, done: 0, resumed: false });
+});
+
+// 批量进度上报：前端每完成一章调一次；done>=total 或 status=done 时自动关闭 job
+router.post('/novels/:id/chapters/batch/progress', (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const job = db.prepare(
+    "SELECT * FROM generation_jobs WHERE novel_id = ? AND stage = 'batch_generate' AND status = 'running' ORDER BY id DESC LIMIT 1"
+  ).get(novel.id);
+  if (!job) return res.status(404).json({ error: '没有进行中的批量任务' });
+  const meta = (() => { try { return JSON.parse(job.params || '{}'); } catch { return {}; } })();
+  const action = String(req.body?.action || 'step');
+  if (action === 'step') meta.done = Number(meta.done || 0) + 1;
+  else if (action === 'stop') meta.done = Number(req.body?.done ?? meta.done);
+  meta.total = Number(meta.total || 0);
+  const finished = action === 'stop' || (meta.total > 0 && meta.done >= meta.total);
+  db.prepare('UPDATE generation_jobs SET status = ?, params = ?, progress = ?, updated_at = datetime(\'now\',\'localtime\') WHERE id = ?')
+    .run(finished ? 'done' : 'running', JSON.stringify(meta), meta.total > 0 ? Math.min(100, Math.round((meta.done / meta.total) * 100)) : 0, job.id);
+  res.json({ ok: true, done: meta.done, total: meta.total, finished });
+});
+
+// 查询批量任务断点（刷新后前端恢复用）
+router.get('/novels/:id/chapters/batch/state', (req, res) => {
+  const novel = getNovel(req.params.id);
+  if (!novel) return res.status(404).json({ error: '小说不存在' });
+  const job = db.prepare(
+    "SELECT * FROM generation_jobs WHERE novel_id = ? AND stage = 'batch_generate' AND status = 'running' ORDER BY id DESC LIMIT 1"
+  ).get(novel.id);
+  if (!job) return res.json({ running: false });
+  const meta = (() => { try { return JSON.parse(job.params || '{}'); } catch { return {}; } })();
+  res.json({ running: true, jobId: job.id, total: Number(meta.total || 0), done: Number(meta.done || 0) });
+});
+
 router.post('/novels/:id/chapters/generate', async (req, res) => {
   const novel = getNovel(req.params.id);
   if (!novel) return res.status(404).json({ error: '小说不存在' });
@@ -3501,6 +3599,16 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 
     // 全书脉络注入（防快进源头）：把全书章节概要压缩成脉络时间线，标注本章所处阶段，
     // 明确"概要时间线在本章之后的内容都是后面章节的事，严禁提前写进本章"
+    // 角色状态快照注入（逻辑一致性防护）：断腿的人下章健步如飞、没见过面直呼其名、
+    // 谁知道什么秘密——以上一章末的状态快照为准
+    let charStateBlock = '';
+    {
+      const st = getLatestCharacterStates(novel.id, idx);
+      if (st.list.length) {
+        charStateBlock = `\n【角色当前状态（截至第${st.chapterIndex}章末，本章必须严格遵守，不得矛盾）】\n${st.list.map((s) => `- ${s.name}：${s.changes || ''}`).join('\n')}\n- 角色状态在本章只允许按剧情合理演变，不得无故消失（伤势/知情事项/关系不得无故清零）`;
+      }
+    }
+
     let arcTimelineBlock = '';
     {
       const allChs = db.prepare("SELECT chapter_index, summary FROM chapters WHERE novel_id = ? AND summary != '' ORDER BY chapter_index").all(novel.id);
@@ -3538,6 +3646,7 @@ ${prevTailBlock}
  ${enhancedMemBlock}
  ${ragBlock}
  ${castBlock}
+ ${charStateBlock}
  ${arcTimelineBlock}
  ${beatsBlock}
  ${referenceBlock}
@@ -4591,6 +4700,12 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
 
     // P0-2: 存储章节 chunks 供 RAG 检索
     try { storeChunks(novel.id, idx, full); } catch { /* chunk 存储失败不阻塞 */ }
+
+    // P0-1b: 角色状态快照更新（逻辑一致性防护的数据源）
+    try {
+      send({ type: 'status', message: '正在更新角色状态…' });
+      await updateCharacterStates(config, novel, idx, full);
+    } catch { /* 状态提取失败不阻塞 */ }
 
     // P1-1: 结构化事实抽取 + 冲突检测
     try {

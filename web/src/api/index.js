@@ -167,6 +167,9 @@ export const api = {
   updateChapter: (id, idx, data) => http.put(`/novels/${id}/chapters/${idx}`, data),
   deleteChapter: (id, idx) => http.delete(`/novels/${id}/chapters/${idx}`),
   generateChapter: (id, data, handlers) => streamRequest(`/novels/${id}/chapters/generate`, data, { ...handlers, idleTimeout: 300000 }),
+  batchStart: (id, total) => http.post(`/novels/${id}/chapters/batch/start`, { total }),
+  batchProgress: (id, action, done) => http.post(`/novels/${id}/chapters/batch/progress`, { action, done }),
+  batchState: (id) => http.get(`/novels/${id}/chapters/batch/state`),
   polishChapter: (id, idx, handlers) => streamRequest(`/novels/${id}/chapters/${idx}/polish`, {}, { ...handlers, idleTimeout: 300000 }),
   reviseChapter: (id, idx, instructions, handlers) => streamRequest(`/novels/${id}/chapters/${idx}/revise`, { instructions }, { ...handlers, idleTimeout: 300000 }),
 
