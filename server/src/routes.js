@@ -1269,6 +1269,28 @@ const SEAM_STATE_TAIL = [
 ];
 const SEAM_STATE_HEAD_CALM = /^(?:他|她|我|他们|她们)?(?:醒(?:了|来)?后?|一觉醒来|第二天(?:早晨|一早|早上|清晨)?|起床|起?床|睁开眼|睁开双眼|梳洗|洗漱|换好衣服|穿好衣服|坐在|端起|吃着|喝着|悠闲|若无其事|气定神闲|平静地|慢条斯理)/;
 
+// 开局中后期里程碑黑名单（规则级，模型无关）：前3章正文出现即判快进。
+// 高阶境界/大比夺冠/大婚/复仇完成/飞升/掌权/统一——都是数十章后才该发生的里程碑，
+// 开篇出现说明模型把后面章节的戏提前演了（LLM 检测漏报时的稳定兜底）
+const LATE_MILESTONE_RULES = [
+  { re: /(?:突破|凝聚|结成|晋入|晋升|踏入|结出).{0,10}(?:金丹|元婴|化神|炼虚|合体|大乘|渡劫|洞虚|问鼎|涅盘|帝境|圣境)/, label: '高阶境界突破' },
+  { re: /(?:结丹期|金丹期|元婴期|化神期|元婴老祖|化神老怪|元婴修士|金丹修士)/, label: '高阶境界' },
+  { re: /(?:大比|比武大会|大比武|论剑).{0,16}(?:夺冠|夺得第一|魁首|头名|摘得头筹)/, label: '宗门大比夺冠' },
+  { re: /(?:大仇得报|血仇已报|灭门之仇.{0,10}报|杀父仇人.{0,10}(?:已死|授首|伏诛|死在))/, label: '复仇完成' },
+  { re: /(?:大婚|拜堂成亲|婚礼顺利举行|与.{2,8}成婚)/, label: '大婚成亲' },
+  { re: /(?:飞升|渡劫成功|羽化登仙|白日飞升)/, label: '飞升结局' },
+  { re: /(?:成为|坐上|登上了?|接任).{0,8}(?:宗主|掌门|家主|族长|皇帝|女帝|帝君|国师)/, label: '执掌高位' },
+  { re: /(?:一统|统一|吞并|覆灭|横扫).{0,10}(?:宗门|家族|王朝|大陆|天下|九州)/, label: '统一大业' },
+];
+function scanLateMilestones(text) {
+  const hits = [];
+  for (const rule of LATE_MILESTONE_RULES) {
+    const m = String(text || '').match(rule.re);
+    if (m) hits.push({ hit: m[0], label: rule.label });
+  }
+  return hits;
+}
+
 function checkSeamlessConnection(prevTail, head) {
   const problems = [];
   if (!prevTail || !head) return problems;
@@ -2021,6 +2043,20 @@ const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
       }
       const obj = extractJson(lastText);
       if (obj) return obj;
+      // 坏输出样本留存（只留最近 20 条）：格式错误反复出现时便于离线诊断坏输出形态
+      try {
+        const fs = await import('node:fs');
+        const pathMod = await import('node:path');
+        const { fileURLToPath } = await import('node:url');
+        const dataDir = process.env.NOVEL_DATA_DIR || pathMod.join(pathMod.dirname(fileURLToPath(import.meta.url)), 'data');
+        const sampleFile = pathMod.join(dataDir, 'bad_json_samples.log');
+        const entry = `[${new Date().toISOString()}] len=${String(lastText || '').length} head=${String(lastText || '').slice(0, 300).replace(/\s+/g, ' ')}\n`;
+        fs.appendFileSync(sampleFile, entry);
+        try {
+          const lines = fs.readFileSync(sampleFile, 'utf8').trim().split('\n');
+          if (lines.length > 20) fs.writeFileSync(sampleFile, lines.slice(-20).join('\n') + '\n');
+        } catch { /* 截断失败不阻塞 */ }
+      } catch { /* 样本留存失败不阻塞 */ }
       if (attempt < maxAttempts) {
         const preview = lastText.slice(0, 120).replace(/\n/g, ' ');
         send({ type: 'status', message: `解析失败（返回内容开头：${preview}…），将重试…` });
@@ -2255,6 +2291,35 @@ ${prevBlock || '（无，这是开头章节）'}
 
     const plan = { ...skeleton, chapters: allChapters.slice(0, target) };
 
+    // 开篇合理性校验（源头治理）：第1-3章概要含中后期里程碑 = 正文按概要写也会快进
+    // （如"第31章的剧情出现在第1章"）。命中则带修正要求重写该章概要，一次机会
+    for (let i = 0; i < Math.min(3, plan.chapters.length); i++) {
+      const ch = plan.chapters[i];
+      const blob = `${ch.title} ${ch.summary} ${ch.hook || ''} ${ch.arc_hint || ''}`;
+      const hits = scanLateMilestones(blob);
+      if (!hits.length) continue;
+      send({ type: 'status', message: `第 ${i + 1} 章概要含中后期剧情（${hits[0].label}），正在重写开篇…` });
+      try {
+        const fixRes = await jsonFrom(
+          [
+            { role: 'system', content: PLAN_CHAPTERS_SYSTEM },
+            { role: 'user', content: `${conceptRule}\n\n作品骨架：\n${brief}\n\n【强制修正】下面是第 ${i + 1} 章的章节规划，但它包含了只应在数十章后出现的中后期里程碑剧情（${hits.map((h) => h.label).join('、')}：${hits.map((h) => h.hit).join('；')}）。开篇章节必须写主角的初始处境：初入新世界、实力低微、初步冲突与生存压力，把中后期里程碑从本章删除，只保留符合开篇节奏的内容。\n\n原章节规划：\n${JSON.stringify({ [i + 1]: { title: ch.title, summary: ch.summary, emotion: ch.emotion, arc_hint: ch.arc_hint, hook: ch.hook } }, null, 2)}\n\n请重写第 ${i + 1} 章的规划，JSON 键为章节号"${i + 1}"，字段保持 title/summary/emotion/arc_hint/hook。` }
+          ],
+          `正在重写第 ${i + 1} 章开篇规划…`,
+          skeletonMaxOut,
+          { maxAttempts: 3, cap: skeletonMaxOut }
+        );
+        const fixed = fixRes && typeof fixRes === 'object' ? (fixRes[String(i + 1)] || Object.values(fixRes).find((v) => v && typeof v === 'object' && v.summary)) : null;
+        if (fixed && fixed.summary) {
+          plan.chapters[i].title = String(fixed.title || ch.title);
+          plan.chapters[i].summary = String(fixed.summary);
+          if (fixed.emotion) plan.chapters[i].emotion = String(fixed.emotion);
+          if (fixed.arc_hint) plan.chapters[i].arc_hint = String(fixed.arc_hint);
+          if (fixed.hook) plan.chapters[i].hook = String(fixed.hook);
+        }
+      } catch { /* 重写失败保留原概要（正文层还有规则+LLM 双重快进检测兜底） */ }
+    }
+
     // 生成细纲（场景级 beat）：批量生成，每批 5 章。批与批之间无依赖，改为并发执行大幅提速
     send({ type: 'progress', progress: 93, message: '正在生成细纲…' });
     updateJob(job.id, { progress: 93, word_count: plan.chapters.length, stream_cursor: '正在生成细纲…' });
@@ -2270,7 +2335,14 @@ ${prevBlock || '（无，这是开头章节）'}
           const idx = batchStart + i + 1;
           beatsReq[idx] = { title: ch.title, summary: ch.summary, emotion: ch.emotion, arc_hint: ch.arc_hint, hook: ch.hook };
         });
-         batches.push({ batchStart, batchEnd, userContent: `${conceptRule}\n\n作品骨架：\n${brief}\n\n请为第 ${batchStart + 1} 至第 ${batchEnd} 章生成细纲（场景级 beat），每章 3-6 个场景。\n\n各章信息：\n${JSON.stringify(beatsReq, null, 2)}` });
+        // 批间衔接：前一批各章的结尾一拍传给后批，防止场景断链（批间上下文断层导致细纲剧情跳跃）
+        const prevBatch = batchStart > 0 ? plan.chapters.slice(Math.max(0, batchStart - BEATS_BATCH), batchStart) : [];
+        const prevTails = prevBatch.map((c, i) => {
+          const b = Array.isArray(c.beats) && c.beats.length ? c.beats[c.beats.length - 1] : null;
+          const action = b ? String(b.action || b.content || b.desc || '').slice(0, 60) : '';
+          return action ? `第${batchStart - prevBatch.length + i + 1}章末拍：${action}` : '';
+        }).filter(Boolean).join('\n');
+         batches.push({ batchStart, batchEnd, userContent: `${conceptRule}\n\n作品骨架：\n${brief}\n\n请为第 ${batchStart + 1} 至第 ${batchEnd} 章生成细纲（场景级 beat），每章 3-6 个场景。${prevTails ? `\n\n【前批细纲结尾（本批第 ${batchStart + 1} 章的场景应自然承接这些末拍，不得凭空跳跃）】\n${prevTails}` : ''}\n\n各章信息：\n${JSON.stringify(beatsReq, null, 2)}` });
       }
       const runBatch = async (b) => {
         // 每批最多重试 3 次，失败再整批补试一次；正文创作时按大纲兜底
@@ -3402,7 +3474,27 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 - 本章允许出场或被提及的角色，仅限：${[...new Set(allowedNames)].join('、')}，以及本章剧情概要中明确点名的角色。
 - 以下角色属后续章节才会登场的人物，本章严禁让他们以任何形式出现——包括正面出场、对话、回忆、梦境、照片、书信、他人转述：${later.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、')}。
 - 本章严禁出现"从秘境/试炼/大比归来""与同伴会合""宗门/势力日常"等中后期才能发生的情节；开局阶段主角应处于符合本章概要的初始处境（如初入新世界、孤立无援）。
-- 若上方【主要角色】清单或场景规划中出现了上述角色的名字（含场景细节里的痕迹），一律忽略并以本限制为准。`;
+ - 若上方【主要角色】清单或场景规划中出现了上述角色的名字（含场景细节里的痕迹），一律忽略并以本限制为准。`;
+      }
+    }
+
+    // 全书脉络注入（防快进源头）：把全书章节概要压缩成脉络时间线，标注本章所处阶段，
+    // 明确"概要时间线在本章之后的内容都是后面章节的事，严禁提前写进本章"
+    let arcTimelineBlock = '';
+    {
+      const allChs = db.prepare("SELECT chapter_index, summary FROM chapters WHERE novel_id = ? AND summary != '' ORDER BY chapter_index").all(novel.id);
+      if (allChs.length > 2) {
+        const pos = allChs.findIndex((c) => c.chapter_index === idx);
+        const lines = [];
+        for (let i = 0; i < allChs.length; i += 5) {
+          const seg = allChs.slice(i, i + 5);
+          const segNo = `${seg[0].chapter_index}-${seg[seg.length - 1].chapter_index}`;
+          const before = pos >= 0 && seg[seg.length - 1].chapter_index < idx;
+          const after = pos >= 0 && seg[0].chapter_index > idx;
+          const tag = before ? '（前情）' : after ? '（后续，严禁提前写）' : '（本章附近）';
+          lines.push(`第${segNo}章${tag}：${seg.map((c) => String(c.summary).slice(0, 22)).join(' / ')}`);
+        }
+        arcTimelineBlock = `\n【全书脉络时间线（本章只写"本章附近"段落的内容，标"后续"的段落是后面章节的戏，严禁提前发生）】\n${lines.join('\n')}`;
       }
     }
 
@@ -3425,6 +3517,7 @@ ${prevTailBlock}
  ${enhancedMemBlock}
  ${ragBlock}
  ${castBlock}
+ ${arcTimelineBlock}
  ${beatsBlock}
  ${referenceBlock}
  
@@ -3442,8 +3535,16 @@ ${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水
 - 小说类型：${novel.genre || '未设定'}，本章的题材基调必须严格符合该类型（恐怖小说要有恐怖氛围与惊悚逻辑，玄幻要有修炼体系，都市要有现实感，不得脱离类型写走样）
 - 目标字数：约 ${targetWordsN} 字
 
- 重要：正文开头不要写章节标题（如"第X章 XXX"），直接从故事内容开始。标题由系统独立管理。
+  重要：正文开头不要写章节标题（如"第X章 XXX"），直接从故事内容开始。标题由系统独立管理。
  ${prevChapter ? `\n【关键衔接要求】本章第一句必须从上文"上一章结尾"的最后一个动作/对话/悬念直接接续。上章结尾停在："…${String(prevChapter.content).slice(-100)}"。本章开场必须是这个画面的下一秒，不得另起炉灶。` : ''}
+ ${(() => {
+    // 章末因果链：下一章概要已规划时，要求本章结尾钩子自然导向它（下一章开篇顺理成章），
+    // 同时严禁提前演出下一章剧情
+    const nc = getChapter(novel.id, idx + 1);
+    return nc && nc.summary && !String(nc.summary).includes('自动生成占位')
+      ? `\n【下一章预告（因果衔接）】下一章将写：${String(nc.summary).slice(0, 120)}。本章结尾钩子应自然导向该事件（留下人物决定/线索浮现/危机逼近的迹象），让下一章开篇顺理成章；但严禁在本章把下一章的剧情提前写出来。`
+      : '';
+  })()}
 
  请开始创作本章正文。`;
 
@@ -3921,6 +4022,11 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         }
         // 开局章节快进检测：前3章把后续剧情写完（三章的量塞进一章）是严重节奏事故
         if (idx <= 3) {
+          // 规则级黑名单兜底（模型无关）：LLM 检测可能漏报/网关不稳，
+          // "第31章的剧情出现在第1章"的极端快进先用里程碑正则稳定拦截
+          for (const ms of scanLateMilestones(full)) {
+            behaviorIssues.push(`剧情快进（规则命中）：全书前3章出现了中后期里程碑"${ms.hit}"（${ms.label}）——开局阶段主角应处于初始处境（初入新世界/初始实力低微/初步冲突），删除该里程碑情节，本章只写本章概要规划的内容`);
+          }
           try {
             const nextSums = [1, 2, 3].map((off) => {
               const c = getChapter(novel.id, idx + off);
