@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     title="批量生成章节"
-    :model-value="modelValue"
+    :model-value="props.visible"
     @update:modelValue="emit('update:visible', $event)"
     :close-on-click-modal="false"
     :close-on-press-escape="!busy"
@@ -70,7 +70,7 @@ import { ElMessage } from 'element-plus';
 import { useEditorStore } from '../stores/editor';
 
 const props = defineProps({
-  modelValue: { type: Boolean, default: false },
+  visible: { type: Boolean, default: false },
 });
 const emit = defineEmits(['update:visible']);
 const store = useEditorStore();
