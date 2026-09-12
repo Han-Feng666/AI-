@@ -434,23 +434,24 @@ function pickReviewerConfig(currentConfig) {
   return null;
 }
 
-function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, timeout, streamIdleTimeout } = {}) {
+async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, timeout, streamIdleTimeout } = {}) {
   // 流式调用默认给更长空闲阈值（10 分钟）：思考型模型开头可能长时间无流式输出，300s 会被误杀
   const idleTimeout = Number(streamIdleTimeout) > 0 ? streamIdleTimeout : 600000;
+  const callChat = () => chat({
+    config,
+    task,
+    messages,
+    maxTokens,
+    signal: ctrl?.signal,
+    timeout: timeout || 600000
+  });
   if (config?.forceNonStreaming) {
-    return chat({
-      config,
-      task,
-      messages,
-      maxTokens,
-      signal: ctrl?.signal,
-      timeout: timeout || 600000
-    }).then((r) => {
+    return callChat().then((r) => {
       if (r?.content && onDelta) onDelta(r.content);
       return r;
     });
   }
-  return chat({
+  const r = await chat({
     config,
     task,
     messages,
@@ -459,6 +460,26 @@ function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, timeou
     onDelta,
     streamIdleTimeout: idleTimeout
   });
+  // 空输出兜底：流式正常结束但 content 为空（思考型模型把输出全耗在思考上/网关空响应），
+  // 自动用非流式重试一次，maxTokens 翻倍防思考再吞输出。调用方不再需要各自处理"AI 未返回内容"
+  const content = String(r?.content || '');
+  if (!content.trim() && !ctrl?.signal?.aborted) {
+    const retry = await chat({
+      config,
+      task,
+      messages,
+      maxTokens: Math.min(65536, (Number(maxTokens) || 4096) * 2),
+      signal: ctrl?.signal,
+      timeout: timeout || 600000
+    }).catch(() => null);
+    const retryText = String(retry?.content || '');
+    if (retryText.trim()) {
+      if (onDelta) onDelta(retryText);
+      return retry;
+    }
+    return retry || r;
+  }
+  return r;
 }
 
 // 429（限流/配额）识别：兼容 "HTTP 429"、"rpm exhausted"、"rate limit"、"too many requests"、"quota"

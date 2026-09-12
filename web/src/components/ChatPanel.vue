@@ -415,21 +415,21 @@ function onKeydown(e) {
   border-top-left-radius: 3px;
   font-size: 12px;
 }
-.tool-tag { font-weight: 700; font-size: 11px; color: #b45309; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+.tool-tag { font-weight: 700; font-size: 12.5px; color: #b45309; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
 .tool-toggle { font-weight: 400; color: #6366f1; cursor: pointer; padding: 0 4px; user-select: none; }
 .tool-toggle:hover { color: #4f46e5; text-decoration: underline; }
 .tool-result {
   margin: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
+  font-size: 13px;
   white-space: pre-wrap;
   word-break: break-all;
-  line-height: 1.6;
-  max-height: 220px;
+  line-height: 1.7;
+  max-height: 260px;
   overflow-y: auto;
 }
-.tool-result.collapsed { max-height: 64px; overflow: hidden; }
-.collapsed-hint { display: block; color: #9ca3af; font-size: 11px; padding-top: 4px; }
+.tool-result.collapsed { max-height: 68px; overflow: hidden; }
+.collapsed-hint { display: block; color: #9ca3af; font-size: 12px; padding-top: 4px; }
 .manager-progress {
   display: flex;
   flex-direction: column;
@@ -437,16 +437,16 @@ function onKeydown(e) {
   min-width: 180px;
 }
 .progress-bar { width: 100%; }
-.progress-text { font-size: 12px; color: #6b7280; }
-.progress-tool { font-size: 11px; color: #9ca3af; font-style: italic; }
+.progress-text { font-size: 13px; color: #6b7280; }
+.progress-tool { font-size: 12.5px; color: #9ca3af; font-style: italic; }
 .pending-card {
   margin: 10px 0;
 }
 .pending-icon { width: 26px; height: 26px; border-radius: 50%; background: #fed7aa; color: #c2410c; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.pending-title { font-weight: 700; font-size: 13px; color: #9a3412; }
-.pending-desc { font-size: 12.5px; color: #7c2d12; margin-top: 4px; line-height: 1.6; }
+.pending-title { font-weight: 700; font-size: 13.5px; color: #9a3412; }
+.pending-desc { font-size: 13.5px; color: #7c2d12; margin-top: 4px; line-height: 1.7; }
 .pending-args { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 8px; }
-.pending-args code { font-size: 11px; padding: 2px 6px; background: #ffedd5; color: #9a3412; border-radius: 4px; }
+.pending-args code { font-size: 12.5px; padding: 2px 6px; background: #ffedd5; color: #9a3412; border-radius: 4px; }
 .pending-actions { margin-top: 8px; display: flex; gap: 8px; }
 .quick-row {
   display: flex;
