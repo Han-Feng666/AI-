@@ -9,6 +9,17 @@ const store = useEditorStore();
 const contentBox = ref(null);
 const genFloatBox = ref(null);
 const showGenStream = ref(false);
+const showBeats = ref(false);
+
+const beatsList = computed(() => {
+  const raw = store.activeChapter?.beats;
+  if (!raw) return [];
+  try {
+    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(arr) ? arr : [];
+  } catch { return [];
+  }
+});
 const showSummary = ref(false);
 
 // 正文按段落拆分渲染（首行缩进）
@@ -373,7 +384,7 @@ watch(
 
 <template>
   <div class="chapter-area">
-     <!-- 生成中：顶部状态条 + 浮动生成流（不盖住阅读区，可切换章节查看） -->
+     <!-- 生成中：顶部状态条（不遮盖阅读区，生成过程中仍可切换章节查看正文） -->
      <div v-if="store.busy" class="gen-head-bar">
        <div class="gen-status">
          <el-icon class="is-loading"><Loading /></el-icon>
@@ -385,20 +396,19 @@ watch(
        </el-button>
      </div>
 
-     <div v-if="store.busy && store.genStream" class="gen-float" :class="{ expanded: showGenStream }">
-       <div class="gen-float-head" @click="showGenStream = !showGenStream">
-         <el-icon><ArrowDown /></el-icon>
-         <span style="margin-left:4px">实时生成（{{ store.genProgress }}%）</span>
-       </div>
-       <div v-show="showGenStream" ref="genFloatBox" class="gen-float-body">{{ store.genStream }}</div>
-     </div>
-
-     <!-- 空状态 -->
-     <div v-else-if="!store.activeChapter" class="empty-area">
+     <!-- 空状态（无章节且非生成中） -->
+     <div v-if="!store.activeChapter && !store.busy" class="empty-area">
        <el-empty :description="store.hasPlanned ? '从左侧章节列表选择一章开始阅读，或点击「生成下一章」' : '先输入灵感想法，让 AI 生成创作方案'" />
      </div>
 
-     <!-- 章节阅读/编辑 -->
+     <!-- 生成中且尚无章节正文：居中占位提示 -->
+     <div v-else-if="store.busy && !store.activeChapter" class="gen-placeholder">
+       <el-icon class="is-loading" :size="28"><Loading /></el-icon>
+       <p class="gen-placeholder-text">{{ store.busyLabel || '正在生成…' }}</p>
+       <p v-if="store.genProgress > 0" class="gen-placeholder-pct">{{ store.genProgress }}%</p>
+     </div>
+
+     <!-- 章节阅读/编辑（busy 时同样显示，支持生成中查看/切换章节） -->
      <div v-else class="chapter-read">
       <div class="chapter-head">
         <div class="chapter-title-wrap">
@@ -415,12 +425,22 @@ watch(
           <el-tag size="small" type="info" effect="plain">第 {{ store.activeChapter.chapter_index }} 章</el-tag>
           <el-tag size="small" type="success" effect="plain">{{ store.activeChapter.word_count || 0 }} 字</el-tag>
           <el-tag v-if="store.activeChapter.summary && !store.chapterEdit" size="small" type="warning" effect="plain" @click="showSummary = !showSummary">{{ showSummary ? '隐藏概要' : '章节概要' }}</el-tag>
+          <el-tag v-if="beatsList.length && !store.chapterEdit" size="small" type="primary" effect="plain" @click="showBeats = !showBeats">{{ showBeats ? '隐藏细纲' : '章节细纲' }}</el-tag>
         </div>
       </div>
 
       <div v-if="showSummary && store.activeChapter?.summary && !store.chapterEdit" class="chapter-summary-bar">
         <el-icon style="margin-right:4px"><Document /></el-icon>
         <span>{{ store.activeChapter.summary }}</span>
+      </div>
+
+      <div v-if="showBeats && beatsList.length && !store.chapterEdit" class="beats-bar">
+        <div class="beats-title"><el-icon><Tickets /></el-icon>本章细纲（{{ beatsList.length }} 个场景）</div>
+        <div v-for="(b, i) in beatsList" :key="i" class="beats-item">
+          <span class="beats-idx">场景 {{ i + 1 }}</span>
+          <span class="beats-scene">{{ b.scene || b.title || b.name || '' }}</span>
+          <span class="beats-action">{{ b.action || b.content || b.desc || b.summary || '' }}</span>
+        </div>
       </div>
 
       <div class="chapter-tools">
@@ -551,6 +571,15 @@ watch(
         </el-button>
       </div>
     </div>
+
+    <!-- 生成流浮动面板：右下角折叠，独立于主区渲染链 -->
+    <div v-if="store.busy && store.genStream" class="gen-float" :class="{ expanded: showGenStream }">
+      <div class="gen-float-head" @click="showGenStream = !showGenStream">
+        <el-icon><ArrowDown /></el-icon>
+        <span style="margin-left:4px">实时生成（{{ store.genProgress }}%）</span>
+      </div>
+      <div v-show="showGenStream" ref="genFloatBox" class="gen-float-body">{{ store.genStream }}</div>
+    </div>
   </div>
 </template>
 
@@ -564,6 +593,19 @@ watch(
   box-shadow: 0 1px 3px rgba(20,24,80,.06);
   overflow: hidden;
 }
+/* 生成中且尚无章节正文时的居中占位提示 */
+.gen-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #4f46e5;
+}
+.gen-placeholder-text { font-size: 15px; font-weight: 600; margin: 0; }
+.gen-placeholder-pct { font-size: 13px; color: #9ca3af; margin: 0; }
+
 /* 生成中顶部状态条：固定在 chapter-area 顶部，不遮盖阅读区，生成过程中仍可切换章节查看正文 */
 .gen-head-bar {
   flex: 0 0 auto;
@@ -656,6 +698,39 @@ watch(
   gap: 4px;
   line-height: 1.7;
 }
+.beats-bar {
+  margin: 0 28px 8px;
+  padding: 10px 14px;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #3730a3;
+}
+.beats-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.beats-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  line-height: 1.6;
+}
+.beats-idx {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #6366f1;
+  background: #e0e7ff;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.beats-scene { font-weight: 600; flex: 0 0 auto; }
+.beats-action { color: #4b5563; }
 .word-progress-bar {
   display: flex;
   align-items: center;

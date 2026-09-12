@@ -222,14 +222,18 @@ async function runFamilyViolationCheck(config, concept, full, kinMatches) {
 }
 
 // 开局章节快进检测：前3章正文若已把后续章节的剧情写完（把三章的量塞进一章），判定为节奏事故
-// 由模型对照"本章概要"与"正文结尾"判断，宁放行不误伤
-async function runAdvanceCheck(config, idx, targetChapters, summary, full) {
+// 对照"本章概要 + 后续章节概要"与"正文全文抽样"判断，reason 须指出撞了后面哪章的什么剧情
+async function runAdvanceCheck(config, idx, targetChapters, summary, full, nextSummaries = []) {
+  const nextText = (nextSummaries || []).filter(Boolean).map((s, i) => `第${idx + i + 1}章概要：${String(s).slice(0, 120)}`).join('\n');
+  const text = String(full || '');
+  const midStart = Math.floor(text.length * 0.4);
+  const sample = `${text.slice(0, 400)}\n……（中段）……\n${text.slice(midStart, midStart + 600)}\n……（结尾）……\n${text.slice(-800)}`;
   const r = await chat({
     config,
     task: 'analysis',
     messages: [
       { role: 'system', content: ADVANCE_CHECK_SYSTEM },
-      { role: 'user', content: `【本章序号】第${idx}章（全书规划 ${targetChapters || '?'} 章）\n【本章剧情概要】\n${String(summary || '（未提供）')}\n\n【正文结尾（最后600字）】\n${String(full).slice(-600)}\n\n请判定正文是否已超出本章概要范围，把后续章节的剧情提前写完。` }
+      { role: 'user', content: `【本章序号】第${idx}章（全书规划 ${targetChapters || '?'} 章）\n【本章剧情概要（本章只允许写这些内容）】\n${String(summary || '（未提供）')}\n\n【后续章节概要（这些内容严禁在本章提前出现）】\n${nextText || '（后续章节概要未提供，请按本章概要范围判断）'}\n\n【正文抽样（开头/中段/结尾）】\n${sample}\n\n请判定正文是否把后续章节概要中的核心事件提前写完了。判定要点：正文里出现的事件若能在"后续章节概要"中找到对应（如境界突破/拜师/击败某敌/进入某地图），即为快进。仅在本章概要范围内推进到收尾钩子不算快进。` }
     ],
     maxTokens: 300
   });
@@ -2269,7 +2273,7 @@ ${prevBlock || '（无，这是开头章节）'}
          batches.push({ batchStart, batchEnd, userContent: `${conceptRule}\n\n作品骨架：\n${brief}\n\n请为第 ${batchStart + 1} 至第 ${batchEnd} 章生成细纲（场景级 beat），每章 3-6 个场景。\n\n各章信息：\n${JSON.stringify(beatsReq, null, 2)}` });
       }
       const runBatch = async (b) => {
-        // 每批最多重试 2 次，失败不阻塞，正文创作时按大纲兜底
+        // 每批最多重试 3 次，失败再整批补试一次；正文创作时按大纲兜底
         let beatsRes = await jsonFrom(
           [
             { role: 'system', content: PLAN_BEATS_SYSTEM },
@@ -2277,7 +2281,7 @@ ${prevBlock || '（无，这是开头章节）'}
           ],
           `正在生成细纲（第 ${b.batchStart + 1}-${b.batchEnd} 章）…`,
           skeletonMaxOut,
-          { maxAttempts: 2, cap: skeletonMaxOut }
+          { maxAttempts: 3, cap: skeletonMaxOut }
         );
         // 无家人约束校验：细纲给主角安排在世亲人则带修正提示重试一次（细纲错则正文必错，源头拦截成本最低）
         if (beatsRes && typeof beatsRes === 'object' && analyzeConceptConstraints(conceptText).noFamily) {
@@ -2297,12 +2301,37 @@ ${prevBlock || '（无，这是开头章节）'}
           }
         }
         if (beatsRes && typeof beatsRes === 'object') {
+          // key 归一化匹配：模型返回的章号 key 形态多样（"1"/1/"第1章"/"chapter 1"），
+          // 统一提取数字后再匹配；若整体包了一层（如 {chapters:{...}}）则下钻一层；
+          // 归一化后仍对不上但值都是数组且数量足够时，按批内顺序兜底对应
+          let pool = beatsRes;
+          const poolKeys = Object.keys(pool);
+          if (!poolKeys.some((k) => /\d/.test(k)) && poolKeys.length === 1 && typeof pool[poolKeys[0]] === 'object' && pool[poolKeys[0]] !== null) {
+            pool = pool[poolKeys[0]];
+          }
+          const numFromKey = (k) => { const m = String(k).match(/\d+/); return m ? Number(m[0]) : null; };
+          const matched = new Set();
           for (let i = b.batchStart; i < b.batchEnd; i++) {
             const idx = i + 1;
-            const chBeats = beatsRes[String(idx)];
+            let chBeats = null;
+            for (const k of Object.keys(pool)) {
+              if (numFromKey(k) === idx) { const v = pool[k]; if (Array.isArray(v) && v.length) chBeats = v; break; }
+            }
+            if (!chBeats) {
+              // 顺序兜底：值全为数组且个数不小于批内章数时，按出现顺序对齐
+              const arrVals = Object.values(pool).filter((v) => Array.isArray(v) && v.length);
+              if (arrVals.length >= (b.batchEnd - b.batchStart) && Object.keys(pool).every((k) => Array.isArray(pool[k]))) {
+                chBeats = arrVals[i - b.batchStart];
+              }
+            }
             if (Array.isArray(chBeats) && chBeats.length) {
               plan.chapters[i].beats = chBeats;
+              matched.add(idx);
             }
+          }
+          // 批内一章都没匹配上且模型明明返回了内容：输出告警便于诊断
+          if (!matched.size && Object.keys(pool).length) {
+            console.warn(`[plan] 细纲批次 ${b.batchStart + 1}-${b.batchEnd} key 匹配失败，模型返回 keys: ${Object.keys(pool).slice(0, 8).join(',')}`);
           }
         }
       };
@@ -3893,7 +3922,11 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         // 开局章节快进检测：前3章把后续剧情写完（三章的量塞进一章）是严重节奏事故
         if (idx <= 3) {
           try {
-            const advCheck = await runAdvanceCheck(config, idx, novel.target_chapters, existing?.summary, full);
+            const nextSums = [1, 2, 3].map((off) => {
+              const c = getChapter(novel.id, idx + off);
+              return c ? c.summary : '';
+            });
+            const advCheck = await runAdvanceCheck(config, idx, novel.target_chapters, existing?.summary, full, nextSums);
             if (advCheck.advanced) {
               behaviorIssues.push(`剧情快进：第${idx}章已超出本章概要范围，把后续章节的剧情提前写完（${advCheck.reason.slice(0, 80)}）——本章只写概要规划的内容，收尾停在本章概要终点，超出部分删除，用具体场景/细节/心理活动把概要内的内容写细写透`);
             }

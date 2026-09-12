@@ -5,6 +5,7 @@
     @update:modelValue="emit('update:visible', $event)"
     :close-on-click-modal="false"
     :close-on-press-escape="!busy"
+    :show-close="!busy"
     destroy-on-close
     width="420px"
   >
