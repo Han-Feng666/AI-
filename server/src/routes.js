@@ -527,6 +527,46 @@ async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, 
   return r;
 }
 
+// 通用：流式生成 + JSON 解析，失败带格式强化提示自动重试（最多 3 次，重试时递增 max_tokens）。
+// 返回解析后的对象，3 次全败返回 null（由调用方决定降级/报错），并留存坏样本供离线诊断
+async function streamJsonWithRetry(config, { ctrl, send, baseMsgs, maxTokens, task = 'planning', attemptStart = 1, onDeltaExtra }) {
+  const REMINDER = '\n\n【重要提醒】你上一次的输出无法被解析为 JSON。请严格只输出一个 JSON 对象或数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
+  let lastFull = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      send?.({ type: 'status', message: `AI 返回格式异常，正在重试（第 ${attempt} 次）…` });
+      await new Promise((r) => setTimeout(r, 2000 * attempt));
+    }
+    const msgs = attempt === 1 ? baseMsgs : [...baseMsgs, { role: 'user', content: REMINDER }];
+    const mt = attempt > 1 ? Math.min(65536, Math.round(maxTokens * (1 + attempt * 0.5))) : maxTokens;
+    let full = '';
+    await runLLMStream(config, msgs, {
+      ctrl,
+      task,
+      maxTokens: mt,
+      onDelta: (d) => { full += d; send?.({ type: 'delta', content: d }); onDeltaExtra?.(d, full); }
+    });
+    lastFull = full;
+    const obj = extractJson(full);
+    if (obj) return obj;
+  }
+  // 坏输出样本留存（最近 20 条）
+  try {
+    const fs = await import('node:fs');
+    const pathMod = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dataDir = process.env.NOVEL_DATA_DIR || pathMod.join(pathMod.dirname(fileURLToPath(import.meta.url)), 'data');
+    const sampleFile = pathMod.join(dataDir, 'bad_json_samples.log');
+    const entry = `[${new Date().toISOString()}] len=${String(lastFull || '').length} head=${String(lastFull || '').slice(0, 300).replace(/\s+/g, ' ')}\n`;
+    fs.appendFileSync(sampleFile, entry);
+    try {
+      const lines = fs.readFileSync(sampleFile, 'utf8').trim().split('\n');
+      if (lines.length > 20) fs.writeFileSync(sampleFile, lines.slice(-20).join('\n') + '\n');
+    } catch { /* 截断失败不阻塞 */ }
+  } catch { /* 样本留存失败不阻塞 */ }
+  return null;
+}
+
 // 429（限流/配额）识别：兼容 "HTTP 429"、"rpm exhausted"、"rate limit"、"too many requests"、"quota"
 function isRateLimitError(e) {
   return /429|quota|too many|rate limit|rpm/i.test(e?.message || '');
@@ -2552,21 +2592,43 @@ ${feedback}
 请输出修订后的完整创作方案 JSON，字段与结构必须与当前方案完全一致：{"title": "...", "genre": "...", "world_view": "...", "outline": "...", "characters": [{"name": "...", "role_type": "...", "personality": "...", "background": "...", "description": "...", "faction": "...", "goal": "...", "ability": "..."}], "factions": [{"name": "...", "type": "...", "description": "..."}], "relationships": [{"a": "角色名", "b": "角色名", "relation_type": "朋友", "description": "..."}], "chapters": [{"title": "...", "summary": "..."}]}`;
 
   try {
-    let full = '';
-    await runLLMStream(config, [
+    // 解析失败自动重试（最多 3 次）：V4 Flash 的 JSON 输出不稳，单次解析成功率低，
+    // 此前一次失败即报"无法解析为方案"。重试时追加格式强化提示
+    const REVISE_FORMAT_REMINDER = '\n\n【重要提醒】你上一次的输出无法被解析为 JSON。请严格只输出一个 JSON 对象，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
+    const baseMsgs = [
       { role: 'system', content: PLAN_REVISE_SYSTEM },
       { role: 'user', content: userPrompt }
-    ], {
-      ctrl,
-      maxTokens: maxOut,
-      onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
-    });
-
-    const plan = extractJson(full);
+    ];
+    let plan = null;
+    let full = '';
+    for (let attempt = 1; attempt <= 3 && !plan; attempt++) {
+      if (attempt > 1) {
+        send({ type: 'status', message: `AI 返回格式异常，正在重试（第 ${attempt} 次）…` });
+        await new Promise((r) => setTimeout(r, 2000 * attempt));
+      }
+      const msgs = attempt === 1 ? baseMsgs : [baseMsgs[0], baseMsgs[1], { role: 'user', content: REVISE_FORMAT_REMINDER }];
+      full = '';
+      await runLLMStream(config, msgs, {
+        ctrl,
+        maxTokens: attempt > 1 ? Math.min(32000, maxOut * (1 + attempt)) : maxOut,
+        onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
+      });
+      plan = extractJson(full);
+    }
     if (!plan) {
+      // 坏输出样本留存（与 /plan 主流程同款，便于离线诊断）
+      try {
+        const fs = await import('node:fs');
+        const pathMod = await import('node:path');
+        const { fileURLToPath } = await import('node:url');
+        const dataDir = process.env.NOVEL_DATA_DIR || pathMod.join(pathMod.dirname(fileURLToPath(import.meta.url)), 'data');
+        const sampleFile = pathMod.join(dataDir, 'bad_json_samples.log');
+        const entry = `[${new Date().toISOString()}] route=plan/revise len=${String(full || '').length} head=${String(full || '').slice(0, 300).replace(/\s+/g, ' ')}\n`;
+        fs.appendFileSync(sampleFile, entry);
+      } catch { /* 样本留存失败不阻塞 */ }
       updateJob(job.id, { status: 'failed', error: 'AI 返回内容无法解析为方案', stream_cursor: full });
       // REQ-01 AC3：不进重试死循环，一次失败即告知用户，旧版方案保留不变
-      return end({ type: 'error', message: 'AI 返回的内容无法解析为方案，当前方案保留不变。原始输出已附在返回内 raw 字段，可参考后重试。', raw: full });
+      return end({ type: 'error', message: 'AI 返回的内容无法解析为方案（已自动重试 2 次仍失败），当前方案保留不变。原始输出已附在返回内 raw 字段，可参考后重试。', raw: full });
     }
     // Phase3：写候选版本，不直接落库；用户在前端 diff 视图点"采纳"才落库
     const snapshot = { ...plan };
@@ -2622,34 +2684,28 @@ router.post('/novels/:id/adaptation/plan', async (req, res) => {
   const userPrompt = `以下是待改编的小说章节清单：\n\n${chapterList || '（无章节）'}\n\n用户的改编意图：\n${intent}\n\n请输出完整的改编方案 JSON。`;
 
   try {
-    let full = '';
     send({ type: 'progress', progress: 1, message: '正在生成改编方案(1%)…' });
     send({ type: 'status', message: '正在分析原著章节并构思改编方案，请稍候…' });
     let deltaCount = 0;
-    await runLLMStream(config, [
-      { role: 'system', content: ADAPTATION_PLAN_SYSTEM },
-      { role: 'user', content: userPrompt }
-    ], {
-      ctrl,
-      task: 'planning',
+    const plan = await streamJsonWithRetry(config, {
+      ctrl, send,
+      baseMsgs: [
+        { role: 'system', content: ADAPTATION_PLAN_SYSTEM },
+        { role: 'user', content: userPrompt }
+      ],
       maxTokens: Math.max(4096, Number(config.maxTokens) || 8192),
-      onDelta: (d) => {
-        full += d;
+      task: 'planning',
+      onDeltaExtra: () => {
         deltaCount++;
-        send({ type: 'delta', content: d });
         if (deltaCount % 2 === 0) {
           const pct = Math.min(89, 1 + Math.floor(deltaCount / 2));
           send({ type: 'progress', progress: pct, message: `正在生成改编方案(${pct}%)…` });
         }
       }
     });
-
-    send({ type: 'progress', progress: 92, message: '正在解析AI返回的改编方案…' });
-    send({ type: 'status', message: '正在解析AI返回的改编方案…' });
-    const plan = extractJson(full);
     if (!plan) {
       db.prepare("UPDATE adaptation_jobs SET status = 'failed', error = ?, updated_at = datetime('now','localtime') WHERE id = ?").run('AI 返回内容无法解析为改编方案', jobId);
-      return end({ type: 'error', message: 'AI 返回的内容无法解析为改编方案，请重试。原始输出已附在 raw 字段。', raw: full });
+      return end({ type: 'error', message: 'AI 返回的内容无法解析为改编方案（已自动重试 2 次），请重试。' });
     }
     // 多方案兼容：新版输出 {plans:[...]}，旧版输出单个方案对象
     let plans = Array.isArray(plan.plans) && plan.plans.length ? plan.plans : [];
@@ -2663,7 +2719,7 @@ const planPayload = { original_info: plan.original_info || { title: novel.title,
     db.prepare("UPDATE adaptation_jobs SET plan = ?, plans = ?, status = ?, updated_at = datetime('now','localtime') WHERE id = ?")
       .run(JSON.stringify(planPayload), JSON.stringify(plans || []), plans.length ? 'plan_ready' : 'failed', jobId);
     if (!plans.length) {
-      return end({ type: 'error', message: '改编方案解析后为空，请重试。', raw: full });
+      return end({ type: 'error', message: '改编方案解析后为空，请重试。' });
     }
     send({ type: 'progress', progress: 100, message: `已生成 ${plans.length} 个改编方案` });
     return end({ type: 'done', data: { jobId, plan: planPayload, plans } });
@@ -2719,34 +2775,28 @@ ${lyrics}
 请根据以上歌词，输出一份完整的小说改编方案 JSON。`;
 
   try {
-    let full = '';
     send({ type: 'progress', progress: 1, message: '正在生成改编方案(1%)…' });
     send({ type: 'status', message: '正在根据歌词构思小说改编方案，请稍候…' });
     let deltaCount = 0;
-    await runLLMStream(config, [
-      { role: 'system', content: LYRICS_TO_NOVEL_SYSTEM },
-      { role: 'user', content: userPrompt }
-    ], {
-      ctrl,
-      task: 'planning',
+    const plan = await streamJsonWithRetry(config, {
+      ctrl, send,
+      baseMsgs: [
+        { role: 'system', content: LYRICS_TO_NOVEL_SYSTEM },
+        { role: 'user', content: userPrompt }
+      ],
       maxTokens: Math.max(4096, Number(config.maxTokens) || 8192),
-      onDelta: (d) => {
-        full += d;
+      task: 'planning',
+      onDeltaExtra: () => {
         deltaCount++;
-        send({ type: 'delta', content: d });
         if (deltaCount % 2 === 0) {
           const pct = Math.min(89, 1 + Math.floor(deltaCount / 2));
           send({ type: 'progress', progress: pct, message: `正在生成改编方案(${pct}%)…` });
         }
       }
     });
-
-    send({ type: 'progress', progress: 92, message: '正在解析AI返回的改编方案…' });
-    send({ type: 'status', message: '正在解析AI返回的改编方案…' });
-    const plan = extractJson(full);
     if (!plan) {
       db.prepare("UPDATE adaptation_jobs SET status = 'failed', error = ?, updated_at = datetime('now','localtime') WHERE id = ?").run('AI 返回内容无法解析为改编方案', jobId);
-      return end({ type: 'error', message: 'AI 返回的内容无法解析为改编方案，请重试。', raw: full });
+      return end({ type: 'error', message: 'AI 返回的内容无法解析为改编方案（已自动重试 2 次），请重试。' });
     }
     let plans = Array.isArray(plan.plans) && plan.plans.length ? plan.plans : [];
     if (!plans.length && (plan.chapters || plan.global_notes || plan.intent_summary)) {
@@ -2758,7 +2808,7 @@ ${lyrics}
     db.prepare("UPDATE adaptation_jobs SET plan = ?, plans = ?, status = ?, updated_at = datetime('now','localtime') WHERE id = ?")
       .run(JSON.stringify(planPayload), JSON.stringify(plans || []), plans.length ? 'plan_ready' : 'failed', jobId);
     if (!plans.length) {
-      return end({ type: 'error', message: '改编方案解析后为空，请重试。', raw: full });
+      return end({ type: 'error', message: '改编方案解析后为空，请重试。' });
     }
     send({ type: 'progress', progress: 100, message: `已生成 ${plans.length} 个改编方案` });
     return end({ type: 'done', data: { jobId, plan: planPayload, plans } });
