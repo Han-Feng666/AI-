@@ -1387,6 +1387,12 @@ const LATE_MILESTONE_RULES = [
   { re: /(?:飞升|渡劫成功|羽化登仙|白日飞升)/, label: '飞升结局' },
   { re: /(?:成为|坐上|登上了?|接任).{0,8}(?:宗主|掌门|家主|族长|皇帝|女帝|帝君|国师)/, label: '执掌高位' },
   { re: /(?:一统|统一|吞并|覆灭|横扫).{0,10}(?:宗门|家族|王朝|大陆|天下|九州)/, label: '统一大业' },
+  // 都市/现实向中后期里程碑（公司上市/执掌集团/收购等）——开篇不该出现
+  { re: /(?:公司|企业|集团).{0,6}(?:上市|挂牌|敲钟)/, label: '公司上市' },
+  { re: /(?:收购|并购|吞并).{0,10}(?:公司|集团|企业)/, label: '收购集团' },
+  { re: /(?:当上|成为|出任|接任|升任).{0,6}(?:总裁|董事长|CEO|首席执行官|总经理|掌门人)/, label: '执掌公司' },
+  { re: /(?:公司|集团|企业).{0,8}(?:破产|倒闭|清算)/, label: '商业帝国覆灭' },
+  { re: /(?:夺回|拿回|收回).{0,10}(?:公司|股权|家产|遗产|集团)/, label: '夺回家业' },
 ];
 function scanLateMilestones(text) {
   const hits = [];
@@ -3316,6 +3322,45 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     : (existing && existing.title && !existing.content && !isPlaceholderTitle(existing.title) ? existing.title : null);
 
   try {
+    // 开篇概要自动修正（源头治理）：用户书的方案可能本身就把中后期剧情规划进了第 1-3 章
+    // （正文忠实跟概要走 → 每次重新生成都快进）。生成正文前先校验概要，命中里程碑则
+    // 自动重写概要并落库，正文按修正后的概要生成——用户无需重新生成整个方案
+    let summaryOverride = '';
+    if (idx <= 3 && existing?.summary) {
+      const blob = `${existing.title || ''} ${existing.summary} ${existing.hook || ''} ${existing.arc_hint || ''}`;
+      const hits = scanLateMilestones(blob);
+      if (hits.length) {
+        send({ type: 'status', message: `检测到第 ${idx} 章概要含中后期剧情（${hits[0].label}），正在自动修正概要…` });
+        try {
+          const nextSums = [1, 2, 3].map((off) => getChapter(novel.id, idx + off)?.summary || '').filter(Boolean).map((s) => s.slice(0, 80));
+          const fixed = await streamJsonWithRetry(config, {
+            ctrl, send,
+            baseMsgs: [
+              { role: 'system', content: PLAN_CHAPTERS_SYSTEM },
+              { role: 'user', content: `${buildConceptFidelityRule(novel.concept || '')}\n\n【小说背景】《${novel.title}》（${novel.genre || '未注明'}），全书 ${novel.target_chapters || '?'} 章。当前要重写第 ${idx} 章的章节规划。\n${nextSums.length ? `后续章节概要（供参考剧情走向，这些内容第 ${idx} 章不得提前写）：\n${nextSums.map((s, i) => `第${idx + i + 1}章：${s}`).join('\n')}` : ''}\n\n【强制修正】下面这份第 ${idx} 章规划把只应在数十章后出现的中后期里程碑写进了开篇（${hits.map((h) => `${h.label}：${h.hit}`).join('；')}）。第 ${idx} 章是全书开篇，必须写主角的初始处境：初入环境、实力/资源低微、面对最初的小冲突或生存压力。请重写该章规划：删除中后期里程碑情节，保留符合开篇节奏的核心（主角登场、初始困境、第一个小目标），并让结尾钩子自然引出后续剧情。\n\n原规划：\n${JSON.stringify({ [idx]: { title: existing.title, summary: existing.summary, emotion: existing.emotion, arc_hint: existing.arc_hint, hook: existing.hook } }, null, 2)}\n\n输出重写后的第 ${idx} 章规划，JSON 键为"${idx}"，字段保持 title/summary/emotion/arc_hint/hook。` }
+            ],
+            maxTokens: Math.max(4096, Number(config.maxTokens) || 8192),
+            task: 'planning'
+          });
+          const fixedCh = fixed && typeof fixed === 'object' ? (fixed[String(idx)] || Object.values(fixed).find((v) => v && typeof v === 'object' && v.summary)) : null;
+          if (fixedCh && fixedCh.summary) {
+            const newSummary = String(fixedCh.summary);
+            const newTitle = String(fixedCh.title || existing.title || `第${idx}章`);
+            db.prepare('UPDATE chapters SET title = ?, summary = ?, emotion = ?, arc_hint = ?, hook = ?, beats = NULL WHERE id = ?')
+              .run(newTitle, newSummary, String(fixedCh.emotion || existing.emotion || ''), String(fixedCh.arc_hint || existing.arc_hint || ''), String(fixedCh.hook || existing.hook || ''), existing.id);
+            summaryOverride = newSummary;
+            // 同步内存对象：后续 userPrompt 的 emotion/arc_hint/hook 引用须拿到修正后的值
+            existing.title = newTitle;
+            existing.summary = newSummary;
+            existing.emotion = String(fixedCh.emotion || existing.emotion || '');
+            existing.arc_hint = String(fixedCh.arc_hint || existing.arc_hint || '');
+            existing.hook = String(fixedCh.hook || existing.hook || '');
+            send({ type: 'status', message: `第 ${idx} 章概要已修正，按新概要生成正文…` });
+          }
+        } catch { /* 概要修正失败保留原概要（正文层还有规则+LLM 快进检测兜底） */ }
+      }
+    }
+
     if (!title) {
       send({ type: 'status', message: `正在构思第 ${idx} 章标题…` });
       send({ type: 'progress', progress: 10, message: `正在构思第 ${idx} 章标题…` });
@@ -3506,7 +3551,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
           task: 'writing',
           messages: [
             { role: 'system', content: CHAPTER_BEAT_SYSTEM },
-            { role: 'user', content: `小说：《${novel.title}》题材：${novel.genre}\n第${idx}章 ${title}\n本章剧情概要：${existing?.summary || '承接前文继续推进'}\n本章情绪基调：${existing?.emotion || '（由你判断）'}\n本章推进：${existing?.arc_hint || '推进主线'}\n\n出场角色参考：${characters.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、') || '（由你判断）'}\n${idx <= 3 && characters.length ? `【出场限制】本章属全书开局阶段：场景中只允许主角及概要中明确点名的角色出现，其他角色（主角团/反派/导师等后续人物）严禁以任何形式出现——包括对话、回忆、照片、梦境、他人转述；严禁出现"秘境归来""与同伴会合"等中后期情节。` : ''}\n\n请将本章拆解为场景级 beat。` }
+            { role: 'user', content: `小说：《${novel.title}》题材：${novel.genre}\n第${idx}章 ${title}\n本章剧情概要：${summaryOverride || existing?.summary || '承接前文继续推进'}\n本章情绪基调：${existing?.emotion || '（由你判断）'}\n本章推进：${existing?.arc_hint || '推进主线'}\n\n出场角色参考：${characters.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、') || '（由你判断）'}\n${idx <= 3 && characters.length ? `【出场限制】本章属全书开局阶段：场景中只允许主角及概要中明确点名的角色出现，其他角色（主角团/反派/导师等后续人物）严禁以任何形式出现——包括对话、回忆、照片、梦境、他人转述；严禁出现"秘境归来""与同伴会合"等中后期情节。` : ''}\n\n请将本章拆解为场景级 beat。` }
           ],
           maxTokens: 2000
         });
@@ -3708,7 +3753,7 @@ ${ch1Note}
 - 全书共 ${novel.target_chapters || '?'} 章，当前处于 ${chapterStageLabel(idx, novel.target_chapters)}
 - 章节标题：${title}
 - 本书主角：${characters.filter((c) => String(c.role_type || '').includes('主角')).map((c) => c.name).join('、') || '（见【主要角色】中 role_type 为"主角"的角色）'}
-- 本章剧情概要：${existing?.summary && !String(existing.summary).includes('自动生成占位') && !String(existing.summary).includes('根据大纲推进剧情') ? existing.summary : '（未提供）——一切情节以衔接上方【上一章结尾】的场面为准'}
+- 本章剧情概要：${summaryOverride || (existing?.summary && !String(existing.summary).includes('自动生成占位') && !String(existing.summary).includes('根据大纲推进剧情') ? existing.summary : '（未提供）——一切情节以衔接上方【上一章结尾】的场面为准')}
 ${existing?.emotion ? `- 本章情绪基调：${existing.emotion}（全章要有意识地营造该情绪氛围，但不能全程紧绷——情绪要有起伏，以该基调为底色）` : ''}
 ${existing?.arc_hint ? `- 本章推进的剧情线：${existing.arc_hint}（本章的戏份应优先围绕这条线展开，其余线索以呼应/推进伏笔为主）` : ''}
 ${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水到渠成地导向这个结尾，收尾时落实到具体场景/物件/对话，让读者想翻下一章）` : ''}
