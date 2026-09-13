@@ -214,7 +214,8 @@ export async function chat(opts) {
     onDelta,
     signal,
     tools,
-    toolChoice
+    toolChoice,
+    wantsJson
   } = opts;
 
   let cfg = { ...DEFAULT_CONFIG, ...config };
@@ -251,14 +252,19 @@ export async function chat(opts) {
     0
   );
   const isStream = typeof onDelta === 'function';
-  // 过载类错误识别：网关 503/529/overload 等瞬时故障，可退避重试
-  const isOverloadError = (e) => /overloaded|overload|503|529|Service temporarily|capacity|server busy|upstream|timeout/i.test(e?.message || '');
+  // JSON 模式：DeepSeek/OpenAI 兼容接口的 response_format=json_object 从解码层面强制合法 JSON，
+  // 从源头减少格式错误重试。网关不支持时 400 参数自愈链自动剔除（与 thinking 参数同机制）
+  // JSON 任务同时降温（默认 0.9 偏高，随机性是坏格式来源之一）
+  const effectiveTemp = temperature !== undefined
+    ? safeNum(temperature, 0.9)
+    : (wantsJson ? 0.4 : safeNum(cfg.temperature, 0.9));
   const body = {
     model: String(cfg.model || ''),
     messages,
     stream: isStream,
-    temperature: safeNum(cfg.temperature, 0.9)
+    temperature: effectiveTemp
   };
+  if (wantsJson) body.response_format = { type: 'json_object' };
   if (effectiveMax) body.max_tokens = effectiveMax;
   // Phase 5：tool-use 透传（非流式）
   if (Array.isArray(tools) && tools.length) {

@@ -211,6 +211,7 @@ async function runFamilyViolationCheck(config, concept, full, kinMatches) {
   const r = await chat({
     config,
     task: 'analysis',
+    wantsJson: true,
     messages: [
       { role: 'system', content: CONCEPT_FAMILY_CHECK_SYSTEM },
       { role: 'user', content: userContent }
@@ -244,6 +245,7 @@ async function updateCharacterStates(config, novel, idx, full) {
   const r = await chat({
     config,
     task: 'analysis',
+    wantsJson: true,
     messages: [
       { role: 'system', content: CHARACTER_STATE_SYSTEM },
       { role: 'user', content: `${prevBlock}\n\n【第${idx}章正文】\n${String(full).slice(0, 6000)}` }
@@ -276,6 +278,7 @@ async function runAdvanceCheck(config, idx, targetChapters, summary, full, nextS
   const r = await chat({
     config,
     task: 'analysis',
+    wantsJson: true,
     messages: [
       { role: 'system', content: ADVANCE_CHECK_SYSTEM },
       { role: 'user', content: `【本章序号】第${idx}章（全书规划 ${targetChapters || '?'} 章）\n【本章剧情概要（本章只允许写这些内容）】\n${String(summary || '（未提供）')}\n\n【后续章节概要（这些内容严禁在本章提前出现）】\n${nextText || '（后续章节概要未提供，请按本章概要范围判断）'}\n\n【正文抽样（开头/中段/结尾）】\n${sample}\n\n请判定正文是否把后续章节概要中的核心事件提前写完了。判定要点：正文里出现的事件若能在"后续章节概要"中找到对应（如境界突破/拜师/击败某敌/进入某地图），即为快进。仅在本章概要范围内推进到收尾钩子不算快进。` }
@@ -290,6 +293,7 @@ async function runDetection(config, text) {
   const r = await chat({
     config,
     task: 'analysis',
+    wantsJson: true,
     messages: [
       { role: 'system', content: AI_DETECT_SYSTEM },
       { role: 'user', content: `请检测以下章节的 AI 痕迹。\n\n${String(text).slice(0, 6000)}` }
@@ -311,6 +315,7 @@ async function runReadability(config, text) {
   const r = await chat({
     config,
     task: 'analysis',
+    wantsJson: true,
     messages: [
       { role: 'system', content: STORY_READABILITY_SYSTEM },
       { role: 'user', content: `请评估以下章节的故事可读性。\n\n${sampleText(String(text), 6000)}` }
@@ -479,7 +484,7 @@ function pickReviewerConfig(currentConfig) {
   return null;
 }
 
-async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, timeout, streamIdleTimeout } = {}) {
+async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, timeout, streamIdleTimeout, wantsJson } = {}) {
   // 流式调用默认给更长空闲阈值（10 分钟）：思考型模型开头可能长时间无流式输出，300s 会被误杀
   const idleTimeout = Number(streamIdleTimeout) > 0 ? streamIdleTimeout : 600000;
   const callChat = () => chat({
@@ -488,7 +493,8 @@ async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, 
     messages,
     maxTokens,
     signal: ctrl?.signal,
-    timeout: timeout || 600000
+    timeout: timeout || 600000,
+    wantsJson
   });
   if (config?.forceNonStreaming) {
     return callChat().then((r) => {
@@ -503,7 +509,8 @@ async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, 
     maxTokens,
     signal: ctrl?.signal,
     onDelta,
-    streamIdleTimeout: idleTimeout
+    streamIdleTimeout: idleTimeout,
+    wantsJson
   });
   // 空输出兜底：流式正常结束但 content 为空（思考型模型把输出全耗在思考上/网关空响应），
   // 自动用非流式重试一次，maxTokens 翻倍防思考再吞输出。调用方不再需要各自处理"AI 未返回内容"
@@ -530,7 +537,7 @@ async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, 
 // 通用：流式生成 + JSON 解析，失败带格式强化提示自动重试（最多 3 次，重试时递增 max_tokens）。
 // 返回解析后的对象，3 次全败返回 null（由调用方决定降级/报错），并留存坏样本供离线诊断
 async function streamJsonWithRetry(config, { ctrl, send, baseMsgs, maxTokens, task = 'planning', attemptStart = 1, onDeltaExtra }) {
-  const REMINDER = '\n\n【重要提醒】你上一次的输出无法被解析为 JSON。请严格只输出一个 JSON 对象或数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
+  const REMINDER = '\n\n【重要提醒】你上一次的输出无法被解析为 JSON。输出前先在脑内构造完整、合法、可解析的 JSON，再一次性输出。只输出一个 JSON 对象或数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
   let lastFull = '';
   for (let attempt = 1; attempt <= 3; attempt++) {
     if (attempt > 1) {
@@ -544,6 +551,7 @@ async function streamJsonWithRetry(config, { ctrl, send, baseMsgs, maxTokens, ta
       ctrl,
       task,
       maxTokens: mt,
+      wantsJson: true,
       onDelta: (d) => { full += d; send?.({ type: 'delta', content: d }); onDeltaExtra?.(d, full); }
     });
     lastFull = full;
@@ -2066,13 +2074,14 @@ const userPrompt = `${conceptRule}
     let full = '';
     send({ type: 'status', message: label });
     if (config?.forceNonStreaming) {
-      const r = await chat({ config, messages, maxTokens: mt, timeout: 300000 });
+      const r = await chat({ config, messages, maxTokens: mt, timeout: 300000, wantsJson: true });
       full = r?.content || '';
     } else {
       await runLLMStream(config, messages, {
         ctrl,
         task: 'planning',
         maxTokens: mt,
+        wantsJson: true,
         onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
       });
     }
@@ -2084,7 +2093,7 @@ const userPrompt = `${conceptRule}
 
   // 流式生成 + 解析 JSON，最多重试 maxAttempts 次（流式 + 非流式交替 + 指数退避）
   // 重试时追加格式强化提示，降低格式出错率。重试时递增 max_tokens 防止截断（上限 cap）
-  const FORMAT_REMINDER = '\n\n【重要提醒】你之前的输出无法被解析为 JSON。请严格只输出一个 JSON 对象或数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
+  const FORMAT_REMINDER = '\n\n【重要提醒】你之前的输出无法被解析为 JSON。输出前先在脑内构造完整、合法、可解析的 JSON，再一次性输出。只输出一个 JSON 对象或数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
 const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
     const maxAttempts = Number(opts.maxAttempts) > 0 ? opts.maxAttempts : 5;
     const cap = Number(opts.cap) > 0 ? opts.cap : maxOut;
@@ -2109,7 +2118,7 @@ const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
           if (!ctrl.signal.aborted) {
             send({ type: 'status', message: `流式响应超时，正在用非流式重试（第 ${attempt} 次）…` });
             try {
-              const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 300000 });
+              const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 300000, wantsJson: true });
               lastText = retry?.content || '';
             } catch (e2) {
               if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
@@ -2135,7 +2144,7 @@ const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
         } else {
           send({ type: 'status', message: `流式请求失败，正在用非流式重试（第 ${attempt} 次）…` });
           try {
-            const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 300000 });
+            const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 300000, wantsJson: true });
             lastText = retry?.content || '';
           } catch (e2) {
             if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
@@ -2600,7 +2609,7 @@ ${feedback}
   try {
     // 解析失败自动重试（最多 3 次）：V4 Flash 的 JSON 输出不稳，单次解析成功率低，
     // 此前一次失败即报"无法解析为方案"。重试时追加格式强化提示
-    const REVISE_FORMAT_REMINDER = '\n\n【重要提醒】你上一次的输出无法被解析为 JSON。请严格只输出一个 JSON 对象，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
+    const REVISE_FORMAT_REMINDER = '\n\n【重要提醒】你上一次的输出无法被解析为 JSON。输出前先在脑内构造完整、合法、可解析的 JSON，再一次性输出。只输出一个 JSON 对象，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
     const baseMsgs = [
       { role: 'system', content: PLAN_REVISE_SYSTEM },
       { role: 'user', content: userPrompt }
@@ -3337,6 +3346,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
           const judge = await chat({
             config,
             task: 'analysis',
+            wantsJson: true,
             messages: [
               { role: 'system', content: OPENING_JUDGE_SYSTEM },
               { role: 'user', content: `【本书】《${novel.title}》（${novel.genre || '未注明'}），全书 ${novel.target_chapters || '?'} 章\n【第 ${idx} 章概要（待判定）】\n${String(existing.summary).slice(0, 400)}\n${existing.hook ? `【本章结尾钩子】${String(existing.hook).slice(0, 80)}` : ''}\n【后续章节概要（这些才是后面章节该写的事）】\n${outlinePeek.map((c) => `第${c.chapter_index}章：${String(c.summary).slice(0, 60)}`).join('\n') || '（无）'}` }
