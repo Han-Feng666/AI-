@@ -29,7 +29,7 @@ import {
 import {
   NOVEL_PLAN_SYSTEM, PLAN_SKELETON_SYSTEM, PLAN_CHAPTERS_SYSTEM, PLAN_REVISE_SYSTEM,
   buildConceptFidelityRule, detectConceptViolations, analyzeConceptConstraints,
-  CONCEPT_FAMILY_CHECK_SYSTEM, ADVANCE_CHECK_SYSTEM, CHARACTER_STATE_SYSTEM, KIN_RE, detectKinMentions,
+  CONCEPT_FAMILY_CHECK_SYSTEM, ADVANCE_CHECK_SYSTEM, CHARACTER_STATE_SYSTEM, OPENING_JUDGE_SYSTEM, KIN_RE, detectKinMentions,
   CHAPTER_SYSTEM, CHAPTER_TITLE_SYSTEM,
   CHAPTER_SUMMARY_SYSTEM, POLISH_SYSTEM, STYLE_ANALYZE_SYSTEM,
   CHAT_SYSTEM, COMPRESS_SYSTEM, COMPRESS_UPDATE_SYSTEM,
@@ -3328,16 +3328,37 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     let summaryOverride = '';
     if (idx <= 3 && existing?.summary) {
       const blob = `${existing.title || ''} ${existing.summary} ${existing.hook || ''} ${existing.arc_hint || ''}`;
-      const hits = scanLateMilestones(blob);
-      if (hits.length) {
-        send({ type: 'status', message: `检测到第 ${idx} 章概要含中后期剧情（${hits[0].label}），正在自动修正概要…` });
+      // 触发条件双通道：①规则黑名单命中（网关宕机也能拦典型形态）②LLM 开篇判定不合格
+      // （枚举规则永远有漏，LLM 像"读者/总管"一样判断"这像不像开篇"）
+      let summaryHits = scanLateMilestones(blob);
+      if (!summaryHits.length) {
+        try {
+          const outlinePeek = db.prepare("SELECT chapter_index, summary FROM chapters WHERE novel_id = ? AND summary != '' AND chapter_index BETWEEN ? AND ? ORDER BY chapter_index").all(novel.id, idx + 1, idx + 5);
+          const judge = await chat({
+            config,
+            task: 'analysis',
+            messages: [
+              { role: 'system', content: OPENING_JUDGE_SYSTEM },
+              { role: 'user', content: `【本书】《${novel.title}》（${novel.genre || '未注明'}），全书 ${novel.target_chapters || '?'} 章\n【第 ${idx} 章概要（待判定）】\n${String(existing.summary).slice(0, 400)}\n${existing.hook ? `【本章结尾钩子】${String(existing.hook).slice(0, 80)}` : ''}\n【后续章节概要（这些才是后面章节该写的事）】\n${outlinePeek.map((c) => `第${c.chapter_index}章：${String(c.summary).slice(0, 60)}`).join('\n') || '（无）'}` }
+            ],
+            maxTokens: 200
+          });
+          const jj = extractJson(judge.content) || {};
+          if (jj.not_opening) {
+            summaryHits = [{ label: `开篇合理性判定：${String(jj.reason || '概要内容属于中后期剧情').slice(0, 50)}`, hit: String(jj.reason || '').slice(0, 40) }];
+          }
+        } catch { /* LLM 判定失败（网关不稳）→ 依赖规则黑名单结果 */ }
+      }
+      if (summaryHits.length) {
+        send({ type: 'status', message: `检测到第 ${idx} 章概要含中后期剧情（${summaryHits[0].label}），正在自动修正概要…` });
+        let fixedOk = false;
         try {
           const nextSums = [1, 2, 3].map((off) => getChapter(novel.id, idx + off)?.summary || '').filter(Boolean).map((s) => s.slice(0, 80));
           const fixed = await streamJsonWithRetry(config, {
             ctrl, send,
             baseMsgs: [
               { role: 'system', content: PLAN_CHAPTERS_SYSTEM },
-              { role: 'user', content: `${buildConceptFidelityRule(novel.concept || '')}\n\n【小说背景】《${novel.title}》（${novel.genre || '未注明'}），全书 ${novel.target_chapters || '?'} 章。当前要重写第 ${idx} 章的章节规划。\n${nextSums.length ? `后续章节概要（供参考剧情走向，这些内容第 ${idx} 章不得提前写）：\n${nextSums.map((s, i) => `第${idx + i + 1}章：${s}`).join('\n')}` : ''}\n\n【强制修正】下面这份第 ${idx} 章规划把只应在数十章后出现的中后期里程碑写进了开篇（${hits.map((h) => `${h.label}：${h.hit}`).join('；')}）。第 ${idx} 章是全书开篇，必须写主角的初始处境：初入环境、实力/资源低微、面对最初的小冲突或生存压力。请重写该章规划：删除中后期里程碑情节，保留符合开篇节奏的核心（主角登场、初始困境、第一个小目标），并让结尾钩子自然引出后续剧情。\n\n原规划：\n${JSON.stringify({ [idx]: { title: existing.title, summary: existing.summary, emotion: existing.emotion, arc_hint: existing.arc_hint, hook: existing.hook } }, null, 2)}\n\n输出重写后的第 ${idx} 章规划，JSON 键为"${idx}"，字段保持 title/summary/emotion/arc_hint/hook。` }
+              { role: 'user', content: `${buildConceptFidelityRule(novel.concept || '')}\n\n【小说背景】《${novel.title}》（${novel.genre || '未注明'}），全书 ${novel.target_chapters || '?'} 章。当前要重写第 ${idx} 章的章节规划。\n${nextSums.length ? `后续章节概要（供参考剧情走向，这些内容第 ${idx} 章不得提前写）：\n${nextSums.map((s, i) => `第${idx + i + 1}章：${s}`).join('\n')}` : ''}\n\n【强制修正】下面这份第 ${idx} 章规划把只应在数十章后出现的中后期里程碑写进了开篇（${summaryHits.map((h) => `${h.label}：${h.hit}`).join('；')}）。第 ${idx} 章是全书开篇，必须写主角的初始处境：初入环境、实力/资源低微、面对最初的小冲突或生存压力。请重写该章规划：删除中后期里程碑情节，保留符合开篇节奏的核心（主角登场、初始困境、第一个小目标），并让结尾钩子自然引出后续剧情。\n\n原规划：\n${JSON.stringify({ [idx]: { title: existing.title, summary: existing.summary, emotion: existing.emotion, arc_hint: existing.arc_hint, hook: existing.hook } }, null, 2)}\n\n输出重写后的第 ${idx} 章规划，JSON 键为"${idx}"，字段保持 title/summary/emotion/arc_hint/hook。` }
             ],
             maxTokens: Math.max(4096, Number(config.maxTokens) || 8192),
             task: 'planning'
@@ -3355,9 +3376,15 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
             existing.emotion = String(fixedCh.emotion || existing.emotion || '');
             existing.arc_hint = String(fixedCh.arc_hint || existing.arc_hint || '');
             existing.hook = String(fixedCh.hook || existing.hook || '');
+            fixedOk = true;
             send({ type: 'status', message: `第 ${idx} 章概要已修正，按新概要生成正文…` });
           }
-        } catch { /* 概要修正失败保留原概要（正文层还有规则+LLM 快进检测兜底） */ }
+        } catch { /* 修正失败走下方 fallback 提示 */ }
+        if (!fixedOk) {
+          // 修正失败（多为网关不稳）：明确告知 + 正文 prompt 注入开篇铁律强化约束，
+          // 不再静默用坏概要生成让用户白白等几分钟
+          send({ type: 'status', message: `第 ${idx} 章概要自动修正失败（网络/模型不稳），将按原概要生成并强约束开篇范围——若生成结果仍像中后期剧情，建议稍后重试。` });
+        }
       }
     }
 
@@ -3692,6 +3719,16 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       }
     }
 
+    // 开篇范围硬约束（prompt 层兜底，不依赖网关）：概要若含中后期剧情（概要修正失败时），
+    // 模型必须只写概要中符合开篇阶段的部分
+    let openingScopeBlock = '';
+    if (idx <= 3) {
+      openingScopeBlock = `\n【开篇范围硬约束（第 ${idx} 章属全书开局，最高优先级）】
+- 本章正文只允许出现开篇阶段的内容：主角在初始环境中登场、实力/资源/地位处于起点、最初的生存压力或小冲突、主线引子。
+- 若"本章剧情概要"或"本章场景规划"中出现了明显需要数十章铺垫才可能发生的事（强大实力/高位身份/团队齐整/重大冲突决战/复仇或事业已达成等），一律只作为远景目标提及（一笔带过或完全略去），严禁作为本章实际发生的情节展开。
+- 概要与开篇阶段冲突时，以本约束为准：把概要中符合开篇的部分写实写细，超出开篇阶段的内容删除。`;
+    }
+
     // 全书脉络注入（防快进源头）：把全书章节概要压缩成脉络时间线，标注本章所处阶段，
     // 明确"概要时间线在本章之后的内容都是后面章节的事，严禁提前写进本章"
     // 角色状态快照注入（逻辑一致性防护）：断腿的人下章健步如飞、没见过面直呼其名、
@@ -3741,6 +3778,7 @@ ${prevTailBlock}
  ${enhancedMemBlock}
  ${ragBlock}
  ${castBlock}
+ ${openingScopeBlock}
  ${charStateBlock}
  ${arcTimelineBlock}
  ${beatsBlock}
