@@ -1615,6 +1615,23 @@ export function extractJson(text) {
   return null;
 }
 
+// 期待顶层数组的任务专用：json_object 模式（response_format）强制顶层对象，
+// 模型会把数组包进 {"beats":[...]} 之类的单键对象——extractJson 返回对象导致
+// Array.isArray 判空。此处做单键数组下钻；期待对象的调用方请继续用 extractJson。
+export function extractArray(text) {
+  const v = extractJson(text);
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const keys = Object.keys(v);
+    if (keys.length === 1 && Array.isArray(v[keys[0]])) return v[keys[0]];
+    const ARRAY_KEYS = ['beats', 'list', 'items', 'data', 'results', 'names', 'ideas', 'tags', 'events', 'issues', 'changes', 'facts'];
+    for (const k of ARRAY_KEYS) {
+      if (k in v && Array.isArray(v[k])) return v[k];
+    }
+  }
+  return null;
+}
+
 // ===== P0-P3 长篇记忆提取提示词 =====
 
 // P1-1: 结构化事实抽取

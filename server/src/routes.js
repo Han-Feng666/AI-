@@ -41,7 +41,7 @@ import {
   ADAPTATION_PLAN_SYSTEM, ADAPTATION_CHAPTER_SYSTEM, LYRICS_TO_NOVEL_SYSTEM,
   IDEAS_SYSTEM,
   buildNovelContext, buildChapterSystem, buildPolishSystem,
-  buildPolishWithIssues, buildPlotFixSystem, extractJson, buildReviseSystem,
+  buildPolishWithIssues, buildPlotFixSystem, extractJson, extractArray, buildReviseSystem,
 getGenreGuide, getGenreGuides
 } from './prompts.js';
 import {
@@ -1001,7 +1001,7 @@ async function tagSlicesRateLimited({ config, ctrl, slices, sse }) {
           { role: 'system', content: SCENE_TAG_SYSTEM },
           { role: 'user', content: user }
         ], { ctrl, maxTokens: 800, streamIdleTimeout: 600000 });
-        const arr = extractJson(r?.content || '');
+        const arr = extractArray(r?.content || '');
         if (Array.isArray(arr)) {
           for (const item of arr) {
             const idx = Number(item?.index);
@@ -1401,6 +1401,24 @@ const LATE_MILESTONE_RULES = [
   { re: /(?:当上|成为|出任|接任|升任).{0,6}(?:总裁|董事长|CEO|首席执行官|总经理|掌门人)/, label: '执掌公司' },
   { re: /(?:公司|集团|企业).{0,8}(?:破产|倒闭|清算)/, label: '商业帝国覆灭' },
   { re: /(?:夺回|拿回|收回).{0,10}(?:公司|股权|家产|遗产|集团)/, label: '夺回家业' },
+  // 末世向
+  { re: /(?:建立|建成|组建).{0,8}(?:基地|安全区|避难所|避难城|聚居地)/, label: '建立基地' },
+  { re: /(?:成为|当上|被推举为|被选为).{0,8}(?:基地首领|指挥官|幸存者领袖|区长大人|首领)/, label: '末世首领' },
+  { re: /(?:尸潮|兽潮).{0,8}(?:被消灭|被击退|被荡平|终于退去)/, label: '尸潮终结' },
+  { re: /(?:解药|疫苗|血清).{0,8}(?:研制成功|研发成功|终于问世|批量生产)/, label: '解药问世' },
+  // 悬疑/刑侦向
+  { re: /(?:真凶|凶手|凶手终于).{0,6}(?:落网|伏法|被抓获|归案|绳之以法)/, label: '真凶落网' },
+  { re: /(?:连环杀人|悬案|大案|灭门案).{0,8}(?:告破|侦破|成功告破|终于告破)/, label: '大案告破' },
+  { re: /(?:升任|当上|成为).{0,6}(?:队长|支队长|局长|刑侦队长|督察长)/, label: '警队晋升' },
+  // 游戏/电竞向
+  { re: /(?:夺得|获得|拿下|斩获|赢得).{0,10}(?:世界冠军|全球总冠军|全国大赛冠军|联赛冠军|总决赛冠军|总冠军)|夺冠/, label: '电竞夺冠' },
+  { re: /(?:成为|当上).{0,8}(?:公会会长|战队队长|国家队队长)/, label: '执掌战队' },
+  { re: /(?:升到|练到|满级|达到).{0,4}(?:满级|100级|一百级)/, label: '满级大号' },
+  // 娱乐圈向
+  { re: /(?:拿下|获得|捧起|摘得).{0,8}(?:影帝|影后|金像奖|金鸡奖|百花奖|最佳男主角|最佳女主角|格莱美|奥斯卡)/, label: '影帝影后' },
+  { re: /(?:成为|成为名副其实的).{0,6}(?:顶流|一线巨星|天王|天后|国际巨星)/, label: '登顶顶流' },
+  // 通用强信号：长跨度时间跳跃总结（开篇正文中出现"多年以后"是概要中后期化的典型症状）
+  { re: /(?:多年以后|数年之后|多年后|几年后|十年后|十年之后|数十年后)/, label: '多年后时间跳跃' },
 ];
 function scanLateMilestones(text) {
   const hits = [];
@@ -1627,7 +1645,7 @@ ${parts.join('\n\n')}
     }
     send({ type: 'status', message: '创意构思完成，正在解析…' });
 
-    let ideas = extractJson(full);
+    let ideas = extractArray(full);
     if (Array.isArray(ideas)) {
       ideas = ideas.map((it, i) => ({
         id: `idea-${Date.now()}-${i}`,
@@ -1645,7 +1663,7 @@ ${parts.join('\n\n')}
     send({ type: 'status', message: '创意解析失败，将重试一次…' });
 
     // 容错：重试一次解析（模型返回了文本但没有规整 JSON 时补个兜底）
-    const retry = extractJson(full.replace(/[\n\r]+/g, '\n'));
+    const retry = extractArray(full.replace(/[\n\r]+/g, '\n'));
     if (Array.isArray(retry) && retry.length && Array.isArray(retry[0]) && retry[0].length > 0 && retry[0][0] && typeof retry[0][0] === 'object' && retry[0][0].title) {
       const arr = retry[0];
       const ideas2 = arr.map((it, i) => ({
@@ -3335,11 +3353,14 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     // （正文忠实跟概要走 → 每次重新生成都快进）。生成正文前先校验概要，命中里程碑则
     // 自动重写概要并落库，正文按修正后的概要生成——用户无需重新生成整个方案
     let summaryOverride = '';
+    // 命中记录供 openingScopeBlock 点名使用（修正失败时把泛化约束升级为针对命中点的具体指令）
+    let openingHits = [];
     if (idx <= 3 && existing?.summary) {
       const blob = `${existing.title || ''} ${existing.summary} ${existing.hook || ''} ${existing.arc_hint || ''}`;
       // 触发条件双通道：①规则黑名单命中（网关宕机也能拦典型形态）②LLM 开篇判定不合格
       // （枚举规则永远有漏，LLM 像"读者/总管"一样判断"这像不像开篇"）
       let summaryHits = scanLateMilestones(blob);
+      openingHits = summaryHits;
       if (!summaryHits.length) {
         try {
           const outlinePeek = db.prepare("SELECT chapter_index, summary FROM chapters WHERE novel_id = ? AND summary != '' AND chapter_index BETWEEN ? AND ? ORDER BY chapter_index").all(novel.id, idx + 1, idx + 5);
@@ -3356,6 +3377,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
           const jj = extractJson(judge.content) || {};
           if (jj.not_opening) {
             summaryHits = [{ label: `开篇合理性判定：${String(jj.reason || '概要内容属于中后期剧情').slice(0, 50)}`, hit: String(jj.reason || '').slice(0, 40) }];
+            openingHits = summaryHits;
           }
         } catch { /* LLM 判定失败（网关不稳）→ 依赖规则黑名单结果 */ }
       }
@@ -3590,9 +3612,10 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
             { role: 'system', content: CHAPTER_BEAT_SYSTEM },
             { role: 'user', content: `小说：《${novel.title}》题材：${novel.genre}\n第${idx}章 ${title}\n本章剧情概要：${summaryOverride || existing?.summary || '承接前文继续推进'}\n本章情绪基调：${existing?.emotion || '（由你判断）'}\n本章推进：${existing?.arc_hint || '推进主线'}\n\n出场角色参考：${characters.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、') || '（由你判断）'}\n${idx <= 3 && characters.length ? `【出场限制】本章属全书开局阶段：场景中只允许主角及概要中明确点名的角色出现，其他角色（主角团/反派/导师等后续人物）严禁以任何形式出现——包括对话、回忆、照片、梦境、他人转述；严禁出现"秘境归来""与同伴会合"等中后期情节。` : ''}\n\n请将本章拆解为场景级 beat。` }
           ],
-          maxTokens: 2000
+          maxTokens: 2000,
+          wantsJson: true
         });
-        const beats = extractJson(btRes.content);
+        const beats = extractArray(btRes.content);
         if (Array.isArray(beats) && beats.length) {
           // 保存到数据库以供后续章节引用
           try {
@@ -3730,13 +3753,16 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     }
 
     // 开篇范围硬约束（prompt 层兜底，不依赖网关）：概要若含中后期剧情（概要修正失败时），
-    // 模型必须只写概要中符合开篇阶段的部分
+    // 模型必须只写概要中符合开篇阶段的部分；有具体命中点时点名禁止（遵守率远高于泛化约束）
     let openingScopeBlock = '';
     if (idx <= 3) {
       openingScopeBlock = `\n【开篇范围硬约束（第 ${idx} 章属全书开局，最高优先级）】
 - 本章正文只允许出现开篇阶段的内容：主角在初始环境中登场、实力/资源/地位处于起点、最初的生存压力或小冲突、主线引子。
 - 若"本章剧情概要"或"本章场景规划"中出现了明显需要数十章铺垫才可能发生的事（强大实力/高位身份/团队齐整/重大冲突决战/复仇或事业已达成等），一律只作为远景目标提及（一笔带过或完全略去），严禁作为本章实际发生的情节展开。
 - 概要与开篇阶段冲突时，以本约束为准：把概要中符合开篇的部分写实写细，超出开篇阶段的内容删除。`;
+      if (openingHits.length) {
+        openingScopeBlock += `\n- 【命中点禁写清单】概要中以下内容已被判定为中后期剧情，本章正文严禁出现、严禁展开：${openingHits.map((h) => `「${String(h.hit).slice(0, 30)}」（${h.label}）`).join('；')}。这些内容只能作为主角尚未触及的远期目标或不存在的传闻，本章只写主角走向它们的第一小步。`;
+      }
     }
 
     // 全书脉络注入（防快进源头）：把全书章节概要压缩成脉络时间线，标注本章所处阶段，
@@ -7396,7 +7422,7 @@ router.post('/namegen/ai', async (req, res) => {
       ],
       maxTokens: 500
     });
-    const arr = extractJson(r.content);
+    const arr = extractArray(r.content);
     if (Array.isArray(arr)) return res.json({ names: arr.map(String) });
     // fallback: 按行或顿号分割
     const names = (r.content || '').split(/[、\n，,]/).map((s) => s.trim()).filter(Boolean);
@@ -7422,16 +7448,26 @@ router.post('/novels/:id/chapters/:idx/beats', async (req, res) => {
   if (!chapter) return res.status(404).json({ error: '章节不存在' });
   const characters = getCharacters(novel.id);
   try {
+    const conceptText = novel.concept || novel.description || '';
     const r = await chat({
       config,
+      task: 'writing',
       messages: [
         { role: 'system', content: CHAPTER_BEAT_SYSTEM },
-        { role: 'user', content: `小说：《${novel.title}》题材：${novel.genre}\n第${idx}章 ${chapter.title}\n章节概要：${chapter.summary || '（无概要）'}\n角色：${characters.map((c) => c.name + '（' + c.role_type + '）').join('、')}\n\n请拆解为场景级 beat。` }
+        { role: 'user', content: `小说：《${novel.title}》题材：${novel.genre}\n${conceptText ? `灵感约束：${String(conceptText).slice(0, 1500)}\n` : ''}第${idx}章 ${chapter.title || ''}\n本章剧情概要：${chapter.summary || '承接前文继续推进'}\n本章情绪基调：${chapter.emotion || '（由你判断）'}\n本章推进：${chapter.arc_hint || '推进主线'}\n\n出场角色参考：${characters.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、') || '（由你判断）'}\n${idx <= 3 && characters.length ? `【出场限制】本章属全书开局阶段：场景中只允许主角及概要中明确点名的角色出现，其他角色（主角团/反派/导师等后续人物）严禁以任何形式出现——包括对话、回忆、照片、梦境、他人转述；严禁出现"秘境归来""与同伴会合"等中后期情节。` : ''}\n\n请将本章拆解为场景级 beat，3-6 个场景。` }
       ],
-      maxTokens: 2000
+      maxTokens: 2000,
+      wantsJson: true
     });
-    const beats = extractJson(r.content);
-    return res.json({ beats: Array.isArray(beats) ? beats : [] });
+    const beats = extractArray(r.content);
+    const arr = Array.isArray(beats) ? beats : [];
+    if (arr.length) {
+      // 落库保存：生成一次永久生效，正文生成与前端细纲面板共用
+      try {
+        db.prepare('UPDATE chapters SET beats = ? WHERE id = ?').run(JSON.stringify(arr), chapter.id);
+      } catch { /* 保存失败不影响返回 */ }
+    }
+    return res.json({ beats: arr, saved: arr.length > 0 });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

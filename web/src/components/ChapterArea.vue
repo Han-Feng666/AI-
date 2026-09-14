@@ -314,13 +314,37 @@ async function revise() {
 async function removeChapter() {
   const idx = store.activeChapter.chapter_index;
   try {
-    await ElMessageBox.confirm(`确定删除第 ${idx} 章吗？此操作不可恢复。`, '删除章节', { type: 'warning' });
+    await ElMessageBox.confirm(
+      `将永久删除第 ${idx} 章的全部内容（标题、概要、正文、细纲），删除后需重新生成整章，且不可恢复。\n\n如果只是想重新生成本章正文，请点「取消」，然后使用下方工具栏的「重新生成」按钮。`,
+      '删除本章',
+      { type: 'warning', confirmButtonText: '确认删除整章', cancelButtonText: '取消', customStyle: { whiteSpace: 'pre-line' } }
+    );
   } catch { return; }
   try {
     await store.deleteChapter(idx);
     ElMessage.success('已删除');
   } catch (e) {
     ElMessage.error(e.message);
+  }
+}
+
+// 生成本章细纲（概要存在但无细纲数据时补生成，落库后刷新）
+const beatsLoading = ref(false);
+async function generateBeats() {
+  if (!store.activeChapter) return;
+  beatsLoading.value = true;
+  try {
+    const data = await api.getChapterBeats(store.novelId, store.activeChapter.chapter_index);
+    if (data?.beats?.length) {
+      await store.selectChapter(store.activeChapter.chapter_index);
+      ElMessage.success('细纲已生成');
+    } else {
+      ElMessage.warning('未生成有效细纲，请稍后重试');
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '细纲生成失败');
+  } finally {
+    beatsLoading.value = false;
   }
 }
 
@@ -425,7 +449,7 @@ watch(
           <el-tag size="small" type="info" effect="plain">第 {{ store.activeChapter.chapter_index }} 章</el-tag>
           <el-tag size="small" type="success" effect="plain">{{ store.activeChapter.word_count || 0 }} 字</el-tag>
           <el-tag v-if="store.activeChapter.summary && !store.chapterEdit" size="small" type="warning" effect="plain" @click="showSummary = !showSummary">{{ showSummary ? '隐藏概要' : '章节概要' }}</el-tag>
-          <el-tag v-if="beatsList.length && !store.chapterEdit" size="small" type="primary" effect="plain" @click="showBeats = !showBeats">{{ showBeats ? '隐藏细纲' : '章节细纲' }}</el-tag>
+          <el-tag v-if="store.activeChapter.summary && !store.chapterEdit" size="small" type="primary" effect="plain" @click="showBeats = !showBeats">{{ showBeats ? '隐藏细纲' : '章节细纲' }}</el-tag>
         </div>
       </div>
 
@@ -434,13 +458,17 @@ watch(
         <span>{{ store.activeChapter.summary }}</span>
       </div>
 
-      <div v-if="showBeats && beatsList.length && !store.chapterEdit" class="beats-bar">
+      <div v-if="showBeats && store.activeChapter?.summary && !store.chapterEdit && beatsList.length" class="beats-bar">
         <div class="beats-title"><el-icon><Tickets /></el-icon>本章细纲（{{ beatsList.length }} 个场景）</div>
         <div v-for="(b, i) in beatsList" :key="i" class="beats-item">
           <span class="beats-idx">场景 {{ i + 1 }}</span>
           <span class="beats-scene">{{ b.scene || b.title || b.name || '' }}</span>
           <span class="beats-action">{{ b.action || b.content || b.desc || b.summary || '' }}</span>
         </div>
+      </div>
+      <div v-else-if="showBeats && store.activeChapter?.summary && !store.chapterEdit && !beatsList.length" class="beats-bar beats-empty-bar">
+        <div class="beats-empty-text"><el-icon><Tickets /></el-icon>本章暂无细纲数据，可基于章节概要补生成</div>
+        <el-button size="small" type="primary" plain :loading="beatsLoading" @click="generateBeats"><el-icon style="margin-right:4px"><MagicStick /></el-icon>生成本章细纲</el-button>
       </div>
 
       <div class="chapter-tools">
@@ -454,7 +482,7 @@ watch(
           <el-button size="small" @click="openBackups"><el-icon style="margin-right:4px"><Clock /></el-icon>历史版本</el-button>
           <el-button size="small" type="warning" plain @click="regenerate"><el-icon style="margin-right:4px"><Refresh /></el-icon>重新生成</el-button>
           <el-button size="small" type="primary" plain @click="localGenerate" :loading="localGenLoading"><el-icon style="margin-right:4px"><Cpu /></el-icon>本地生成</el-button>
-          <el-button size="small" type="danger" plain @click="removeChapter"><el-icon style="margin-right:4px"><Delete /></el-icon>删除</el-button>
+          <el-button size="small" type="danger" plain @click="removeChapter"><el-icon style="margin-right:4px"><Delete /></el-icon>删除本章</el-button>
         </template>
         <template v-else>
           <el-button size="small" type="primary" @click="saveEdit"><el-icon style="margin-right:4px"><Check /></el-icon>保存</el-button>
@@ -731,6 +759,19 @@ watch(
 }
 .beats-scene { font-weight: 600; flex: 0 0 auto; }
 .beats-action { color: #4b5563; }
+.beats-empty-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.beats-empty-text {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #64748b;
+  font-size: 12.5px;
+}
 .word-progress-bar {
   display: flex;
   align-items: center;
