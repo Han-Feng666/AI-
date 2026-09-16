@@ -55,6 +55,7 @@ import {
   saveDraft, getDraft, buildSnapshot
 } from './planVersions.js';
 import { toolRegistry, getToolSchemas } from './tools.js';
+import { applyPatch, getCurrentVersion } from './updater.js';
 import { randomUUID } from 'node:crypto';
 import { relationshipRouter, sharedCharactersRouter } from './routes/relationshipAndShared.js';
 import { managerMemoryRouter } from './routes/managerMemory.js';
@@ -4388,10 +4389,10 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         if (/眼前一黑.{0,15}(再睁眼|醒来|睁开眼)|一睁眼.{0,15}(躺|发现自己|身处)/.test(full)) aiTropes.push('眼前一黑+睁眼穿越模板');
         if (/手机.{0,8}(没信号|没电|关机|百分之)|电量.{0,6}百分之|看.{0,4}手机.{0,6}(信号|电量)/.test(full)) aiTropes.push('穿越后查看手机电量/信号套路');
         if (/穿越.{0,8}第一时间.{0,6}查看.{0,6}手机|醒来.{0,10}手机/.test(full)) aiTropes.push('穿越后第一时间掏手机');
-        if (/签到.{0,6}(获得|奖励|领取)|在.{0,8}签到.{0,6}(获得|奖励)/.test(full) && !/签到/.test(sysExempt)) aiTropes.push('签到系统');
-        // 强化：系统绑定、系统面板、新手礼包、境界突破等游戏化设定
         // 豁免口径放宽：灵感/世界观/题材/本章概要任一含"系统"即视为本书金手指设定，不再判为 AI 套路
         const sysExempt = String(`${novel.concept || ''} ${novel.world_view || ''} ${novel.genre || ''} ${existing?.summary || ''}`);
+        if (/签到.{0,6}(获得|奖励|领取)|在.{0,8}签到.{0,6}(获得|奖励)/.test(full) && !/签到/.test(sysExempt)) aiTropes.push('签到系统');
+        // 强化：系统绑定、系统面板、新手礼包、境界突破等游戏化设定
         if (/签到诸天|系统绑定|系统提示|叮[，~！]|发布.{0,3}任务|系统空间|属性面板|宿主：/.test(full) && !/系统/.test(sysExempt)) aiTropes.push('系统/签到/游戏化设定');
         if (/新手礼包|获得：|淬体丹|淬体境|境界：|突破.{0,6}(重|阶|期)|功法：|武技：|积分[：:]\d/.test(full) && !/修炼|境界|突破/.test(sysExempt)) aiTropes.push('游戏化境界/积分/系统奖励');
         if (/(?:穿越|重生).{0,20}(?:第一时间|第一反应|第一个念头).{0,10}(?:查看手机|摸手机|掏手机|看手机)/.test(full)) aiTropes.push('穿越后第一反应掏手机');
@@ -7902,6 +7903,56 @@ router.put('/search/settings', (req, res) => {
   if (bing_api_key !== undefined) setSetting('bing_api_key', bing_api_key);
   if (bing_endpoint !== undefined) setSetting('bing_endpoint', bing_endpoint);
   res.json({ ok: true });
+});
+
+// ========== 增量热更新 ==========
+// 应用补丁：body 为补丁对象 { version, files: [{ path, content, encoding }] }
+// 文件覆盖到 resources 下对应目录（仅 server/ 与 web/dist），自动备份旧文件
+// 应用完成后前端提示重启，由 Electron 主进程重启应用（server + 前端一同重载）
+router.post('/update/apply', (req, res) => {
+  try {
+    const patch = req.body;
+    if (!patch || !Array.isArray(patch.files) || !patch.files.length) {
+      return res.status(400).json({ error: '补丁无效：缺少 files 数组或为空' });
+    }
+    const backupRoot = process.env.NOVEL_DATA_DIR
+      ? process.env.NOVEL_DATA_DIR.replace(/[/\\]+$/, '') + '/patch-backups'
+      : undefined;
+    const result = applyPatch(patch, { backupRoot });
+    // 记录更新历史到 settings，便于回溯
+    try {
+      const log = JSON.parse(getSetting('update_log', '[]') || '[]');
+      log.unshift({ version: result.version, applied: result.applied, skipped: result.skipped, errors: result.errors, at: new Date().toISOString() });
+      setSetting('update_log', JSON.stringify(log.slice(0, 20)));
+    } catch { /* 日志写失败不影响更新 */ }
+    res.json({
+      ok: result.errors.length === 0,
+      applied: result.applied,
+      skipped: result.skipped,
+      errors: result.errors,
+      version: result.version,
+      needRestart: result.needRestart
+    });
+  } catch (e) {
+    res.status(500).json({ error: `应用补丁失败: ${e.message}` });
+  }
+});
+
+router.get('/update/info', (req, res) => {
+  const version = getCurrentVersion();
+  let lastUpdate = null;
+  try {
+    const log = JSON.parse(getSetting('update_log', '[]') || '[]');
+    if (log.length) lastUpdate = log[0];
+  } catch {}
+  res.json({ version, lastUpdate });
+});
+
+// 触发应用重启：server 以约定退出码 43 退出，Electron 主进程检测后 relaunch 整个应用
+router.post('/update/restart', (req, res) => {
+  res.json({ ok: true, message: '即将重启应用' });
+  // 给响应一点时间发出去，再退出
+  setTimeout(() => process.exit(43), 200);
 });
 
 export default router;

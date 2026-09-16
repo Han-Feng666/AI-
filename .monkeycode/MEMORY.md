@@ -534,4 +534,17 @@ Entries discovered by the Agent during task execution should follow this format:
     3. 将 `CONCEPT_FIDELITY_CORE` 注入 NOVEL_PLAN_SYSTEM / PLAN_SKELETON_SYSTEM / PLAN_CHAPTERS_SYSTEM / PLAN_REVISE_SYSTEM 四个系统提示词
     4. routes.js 生成骨架时调用 `detectConceptViolations` 校验，若违反则自动重试一次，前端提示冲突内容
     5. userPrompt（骨架/章节/修订/细纲）统一注入 `buildConceptFidelityRule(conceptText)` 作为最高优先级约束
-    6. GENRE_GUIDE_REBIRTH 新增第60b条：身穿与魂穿必须按灵感区分，严禁把身穿默认写成魂穿进世家废物
+     6. GENRE_GUIDE_REBIRTH 新增第60b条：身穿与魂穿必须按灵感区分，严禁把身穿默认写成魂穿进世家废物
+
+[Project Knowledge Summary]
+- Date: 2026-09-16
+- Context: Discovered by Agent while implementing incremental hot-update to eliminate 30-min full-installer downloads
+- Category: Build Methods / Operations & Deployment
+- Instructions:
+  - 增量热更新机制：补丁格式为 JSON `{ version, files: [{ path, content, encoding }] }`，path 相对 resources 目录（server/ 或 web/dist），encoding 为 utf8（文本）或 base64（二进制），零依赖无需解压库。
+  - 后端模块 `server/src/updater.js`：`applyPatch()`（路径沙箱限制在 server/ 和 web/dist，旧文件备份到 userData/backups/）、`getCurrentVersion()`（读 server/package.json）、`buildPatchFromFileList()`。
+  - 路由（routes.js 末尾 export 前）：`POST /api/update/apply`（接收补丁 JSON，覆盖文件，记录 update_log 到 settings 表）、`GET /api/update/info`（返回当前版本+最近更新记录）、`POST /api/update/restart`（200ms 后 `process.exit(43)` 触发重启）。
+  - Electron 重启（desktop/electron/main.cjs）：`serverProc.on('exit')` 检测 code===43 → `app.relaunch(); app.exit(0)`。main.cjs 在 asar 内（不可通过补丁更新），但首个含此功能的 NSIS 安装包已包含重启逻辑，后续补丁只需更新 server/ 和 web/dist。
+  - 前端 UI（Settings.vue）：「软件增量更新」卡片——隐藏 file input 选 .patch.json → ElMessageBox 确认 → POST /api/update/apply → 显示结果 → 延迟调 POST /api/update/restart 触发重启。API 层（web/src/api/index.js）：`getUpdateInfo`/`applyUpdate`/`restartApp`。
+  - 补丁生成器 `scripts/make-patch.cjs`：开发环境用，`node scripts/make-patch.cjs [--build] [--out <path>] [--from <ref>]`。用 `git diff --name-only` + `git status --porcelain` 收集 server/ 变动文件（含未跟踪），web/dist 因 gitignored 全量打包（walkDir 递归）。版本号读 desktop/package.json。
+  - 工作流：改代码 → `cd web && npm run build` → `node scripts/make-patch.cjs` → 用户在「设置→软件增量更新」选 .patch.json → 自动应用+重启。补丁典型 1-3 MB vs 完整安装包 134 MB。

@@ -91,6 +91,14 @@ function startBackend() {
         const wasSettled = settled;
         const proc = serverProc;
         serverProc = null;
+        // 增量更新后主动重启：server 以约定码 43 退出 → 重启整个 Electron 应用
+        // （server 与前端 dist 文件已被覆盖，需要重新 fork server 并重新加载页面）
+        if (code === 43) {
+          try { fs.appendFileSync(logFile, '[main] update restart requested (exit 43), relaunching app\n'); } catch {}
+          app.relaunch();
+          app.exit(0);
+          return;
+        }
         if (!wasSettled) {
           fail(`内置服务进程异常退出（code=${code ?? '未知'}）。\n\n请打开上面的日志文件，把内容发给我排查。`);
           return;

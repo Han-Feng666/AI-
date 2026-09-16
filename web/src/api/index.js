@@ -399,6 +399,11 @@ export const api = {
   skipCandidate: (cid) => http.post(`/adaptation-candidates/${cid}/skip`, {}),
   retryCandidate: (cid) => http.post(`/adaptation-candidates/${cid}/retry`, {}),
   batchAdaptationCandidates: (body) => http.post('/adaptation-candidates/batch', body),
+
+  // 增量热更新
+  getUpdateInfo: () => http.get('/update/info'),
+  applyUpdate: (patch) => http.post('/update/apply', patch),
+  restartApp: () => http.post('/update/restart'),
 };
 
 export default api;

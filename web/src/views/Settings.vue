@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { useSettingsStore } from '../stores/settings';
 import api from '../api';
 
@@ -654,6 +654,7 @@ onMounted(async () => {
   loadRecommendedModels();
   loadBuiltinModels();
   loadSearchSettings();
+  loadUpdateInfo();
 });
 
 async function saveStorage() {
@@ -815,6 +816,59 @@ async function fetchModels(auto = false) {
     if (!auto) ElMessage.error(fetchError.value);
   } finally {
     fetchingModels.value = false;
+  }
+}
+
+// ========== 增量热更新 ==========
+const updateInfo = ref({ version: '', lastUpdate: null });
+const applyingUpdate = ref(false);
+const updateFileInput = ref(null);
+
+async function loadUpdateInfo() {
+  try {
+    const r = await api.getUpdateInfo();
+    updateInfo.value = r;
+  } catch { /* 忽略 */ }
+}
+
+function pickUpdateFile() {
+  updateFileInput.value?.click();
+}
+
+async function onUpdateFileChosen(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  e.target.value = '';
+  applyingUpdate.value = true;
+  try {
+    const text = await file.text();
+    let patch;
+    try { patch = JSON.parse(text); }
+    catch { ElMessage.error('文件不是有效的补丁 JSON'); return; }
+    const summary = `版本：${patch.version || '未知'}\n文件数：${patch.files?.length || 0}`;
+    try {
+      await ElMessageBox.confirm(
+        `即将应用增量更新补丁\n${summary}\n\n旧文件会自动备份，应用后需要重启应用。是否继续？`,
+        '应用增量更新',
+        { confirmButtonText: '应用并重启', cancelButtonText: '取消', type: 'warning' }
+      );
+    } catch { return; }
+    const r = await api.applyUpdate(patch);
+    if (r.errors?.length) {
+      ElMessage.warning(`应用完成：${r.applied} 个成功，${r.skipped} 个跳过，${r.errors.length} 个错误`);
+      r.errors.slice(0, 3).forEach((err) => ElMessage.error(err));
+    } else {
+      ElMessage.success(`已应用 ${r.applied} 个文件更新，正在重启…`);
+    }
+    await loadUpdateInfo();
+    // 触发重启（server 以 exit 43 退出，Electron 主进程 relaunch）
+    setTimeout(async () => {
+      try { await api.restartApp(); } catch { /* 进程已退出，忽略 */ }
+    }, 800);
+  } catch (e) {
+    ElMessage.error(e.message || '应用更新失败');
+  } finally {
+    applyingUpdate.value = false;
   }
 }
 
@@ -1356,6 +1410,26 @@ async function fetchModels(auto = false) {
       </el-form>
     </div>
 
+    <div class="settings-card update-card">
+      <h3 class="card-title">软件增量更新</h3>
+      <p class="update-tip">
+        在开发环境生成增量补丁（.patch.json，通常几十 KB～几 MB）下载到本机后，在此选择补丁文件应用，
+        软件会自动覆盖对应文件并重启——无需下载完整安装包。
+      </p>
+      <div class="update-info">
+        <span class="ver">当前版本：v{{ updateInfo.version || '未知' }}</span>
+        <span v-if="updateInfo.lastUpdate" class="last">
+          最近更新：v{{ updateInfo.lastUpdate.version }}（{{ updateInfo.lastUpdate.applied }} 个文件，{{ updateInfo.lastUpdate.at?.slice(0, 16).replace('T', ' ') }}）
+        </span>
+      </div>
+      <input ref="updateFileInput" type="file" accept=".json,.patch.json,application/json" style="display:none" @change="onUpdateFileChosen" />
+      <div class="actions">
+        <el-button type="primary" :loading="applyingUpdate" @click="pickUpdateFile">
+          选择补丁文件应用更新
+        </el-button>
+      </div>
+    </div>
+
     <div class="tips-card">
       <h4>使用提示</h4>
       <ul>
@@ -1389,6 +1463,11 @@ async function fetchModels(auto = false) {
   box-sizing: border-box;
 }
 .storage-card { margin-top: 20px; }
+.update-card { margin-top: 20px; }
+.update-tip { color: #6b7280; font-size: 13px; line-height: 1.7; margin: 4px 0 12px; }
+.update-info { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; font-size: 13px; }
+.update-info .ver { color: #1e1b4b; font-weight: 600; }
+.update-info .last { color: #6b7280; }
 .storage-tip {
   margin: 6px 0 16px;
   font-size: 13px;
