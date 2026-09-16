@@ -1868,7 +1868,10 @@ async function applyPlan(novel, plan, opts = {}) {
   const genreV = String(plan.genre || novel.genre || '').trim();
   const worldView = String(plan.world_view || '').trim();
   const outline = String(plan.outline || '').trim();
-  const storyArcs = Array.isArray(plan.story_arcs) ? JSON.stringify(plan.story_arcs) : (novel.story_arcs || null);
+  // novel.story_arcs 已被 getNovel 解析为数组，直接绑定会抛
+  // "Provided value cannot be bound to SQLite parameter 9"，落库前统一序列化为字符串
+  const rawArcs = Array.isArray(plan.story_arcs) ? plan.story_arcs : (novel.story_arcs || null);
+  const storyArcs = rawArcs == null ? null : (typeof rawArcs === 'string' ? rawArcs : JSON.stringify(rawArcs));
 
   db.prepare('UPDATE novels SET title = ?, genre = ?, world_view = ?, outline = ?, concept = ?, chapter_word_count = ?, target_chapters = ?, status = ?, story_arcs = ?, protagonist_name = ?, heroine_name = ? WHERE id = ?')
     .run(title, genreV, worldView, outline, concept, words, target, 'planned', storyArcs, String(plan.protagonist_name || novel.protagonist_name || ''), String(plan.heroine_name || novel.heroine_name || ''), novel.id);
@@ -3515,6 +3518,13 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       ? `【世界观设定（创作时须严格遵守，不得与既定设定冲突）】\n${formatWorldSettings(getWorldSettings(novel.id))}`
       : '';
 
+    // 灵感/金手指注入：concept 只在方案生成阶段使用，正文阶段若不注入，
+    // 系统文等金手指设定会随概要断线从第 2 章起淡出。每章强制携带灵感核心。
+    const conceptText = String(novel.concept || '').trim();
+    const conceptBlock = conceptText
+      ? `\n【灵感设定（本书设定的真相来源，每章创作都必须遵守）】\n${conceptText.slice(0, 600)}${conceptText.length > 600 ? '…（灵感较长已截断）' : ''}\n- 若灵感含系统/金手指设定，本章必须按其规则自然延续（任务/奖励/惩罚/面板等至少一处体现），不得让金手指本章消失`
+      : '';
+
     // 关键剧情事实锚点：长期连载中防设定冲突与关键信息遗忘（仅取本章之前确立的）
     const kmItems = getKeyMoments(novel.id, 80, idx);
     const kmBlock = formatKeyMoments(kmItems)
@@ -3619,7 +3629,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
           task: 'writing',
           messages: [
             { role: 'system', content: CHAPTER_BEAT_SYSTEM },
-            { role: 'user', content: `小说：《${novel.title}》题材：${novel.genre}\n第${idx}章 ${title}\n本章剧情概要：${summaryOverride || existing?.summary || '承接前文继续推进'}\n本章情绪基调：${existing?.emotion || '（由你判断）'}\n本章推进：${existing?.arc_hint || '推进主线'}\n\n出场角色参考：${characters.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、') || '（由你判断）'}\n${idx <= 3 && characters.length ? `【出场限制】本章属全书开局阶段：场景中只允许主角及概要中明确点名的角色出现，其他角色（主角团/反派/导师等后续人物）严禁以任何形式出现——包括对话、回忆、照片、梦境、他人转述；严禁出现"秘境归来""与同伴会合"等中后期情节。` : ''}\n\n请将本章拆解为场景级 beat。` }
+            { role: 'user', content: `小说：《${novel.title}》题材：${novel.genre}\n第${idx}章 ${title}\n本章剧情概要：${summaryOverride || existing?.summary || '承接前文继续推进'}\n本章情绪基调：${existing?.emotion || '（由你判断）'}\n本章推进：${existing?.arc_hint || '推进主线'}\n${conceptText ? `灵感核心（系统/金手指等设定须在场景中自然延续）：${conceptText.slice(0, 200)}\n` : ''}\n出场角色参考：${characters.map((c) => c.name + '（' + (c.role_type || '配角') + '）').join('、') || '（由你判断）'}\n${idx <= 3 && characters.length ? `【出场限制】本章属全书开局阶段：场景中只允许主角及概要中明确点名的角色出现，其他角色（主角团/反派/导师等后续人物）严禁以任何形式出现——包括对话、回忆、照片、梦境、他人转述；严禁出现"秘境归来""与同伴会合"等中后期情节。` : ''}\n\n请将本章拆解为场景级 beat。` }
           ],
           maxTokens: 2000,
           wantsJson: true
@@ -3816,6 +3826,7 @@ ${prevTailBlock}
 - 角色说过的每一句话必须在本章正文中有明确出处，不得让角色"想起"本章未发生过的对话。
  ${foresBlock}
  ${worldBlock}
+ ${conceptBlock}
  ${storyLogBlock}
  ${kmBlock}
  ${stageBlock}
@@ -4377,10 +4388,12 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         if (/眼前一黑.{0,15}(再睁眼|醒来|睁开眼)|一睁眼.{0,15}(躺|发现自己|身处)/.test(full)) aiTropes.push('眼前一黑+睁眼穿越模板');
         if (/手机.{0,8}(没信号|没电|关机|百分之)|电量.{0,6}百分之|看.{0,4}手机.{0,6}(信号|电量)/.test(full)) aiTropes.push('穿越后查看手机电量/信号套路');
         if (/穿越.{0,8}第一时间.{0,6}查看.{0,6}手机|醒来.{0,10}手机/.test(full)) aiTropes.push('穿越后第一时间掏手机');
-        if (/签到.{0,6}(获得|奖励|领取)|在.{0,8}签到.{0,6}(获得|奖励)/.test(full) && !/签到/.test(String(novel.concept || ''))) aiTropes.push('签到系统');
+        if (/签到.{0,6}(获得|奖励|领取)|在.{0,8}签到.{0,6}(获得|奖励)/.test(full) && !/签到/.test(sysExempt)) aiTropes.push('签到系统');
         // 强化：系统绑定、系统面板、新手礼包、境界突破等游戏化设定
-        if (/签到诸天|系统绑定|系统提示|叮[，~！]|发布.{0,3}任务|系统空间|属性面板|宿主：/.test(full) && !/系统/.test(String(novel.concept || ''))) aiTropes.push('系统/签到/游戏化设定');
-        if (/新手礼包|获得：|淬体丹|淬体境|境界：|突破.{0,6}(重|阶|期)|功法：|武技：|积分[：:]\d/.test(full) && !/修炼|境界|突破/.test(String(novel.concept || ''))) aiTropes.push('游戏化境界/积分/系统奖励');
+        // 豁免口径放宽：灵感/世界观/题材/本章概要任一含"系统"即视为本书金手指设定，不再判为 AI 套路
+        const sysExempt = String(`${novel.concept || ''} ${novel.world_view || ''} ${novel.genre || ''} ${existing?.summary || ''}`);
+        if (/签到诸天|系统绑定|系统提示|叮[，~！]|发布.{0,3}任务|系统空间|属性面板|宿主：/.test(full) && !/系统/.test(sysExempt)) aiTropes.push('系统/签到/游戏化设定');
+        if (/新手礼包|获得：|淬体丹|淬体境|境界：|突破.{0,6}(重|阶|期)|功法：|武技：|积分[：:]\d/.test(full) && !/修炼|境界|突破/.test(sysExempt)) aiTropes.push('游戏化境界/积分/系统奖励');
         if (/(?:穿越|重生).{0,20}(?:第一时间|第一反应|第一个念头).{0,10}(?:查看手机|摸手机|掏手机|看手机)/.test(full)) aiTropes.push('穿越后第一反应掏手机');
         if (/白光.{0,10}(?:炸开|一闪)|眼前(?:一黑|白光)/.test(full)) aiTropes.push('AI穿越标配白光/眼前一黑');
         if (/龙傲天|林傲天|叶傲天|楚傲天|傲天.{0,4}(少爷|哥)|踩在.{0,6}脸上.{0,12}(废物|蝼蚁)/.test(full) && !/傲天/.test(String(novel.concept || ''))) aiTropes.push('龙傲天式反派+踩脸羞辱模板');
