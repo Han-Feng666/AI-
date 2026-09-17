@@ -1238,6 +1238,8 @@ export function scanAiPunctuation(text) {
 export function cleanAiText(text) {
   let s = String(text || '');
   if (!s) return s;
+  // 0) 剥离 markdown 代码围栏：模型可能把正文包在 ```...``` 或 ```json...``` 里
+  s = s.replace(/^```[a-zA-Z]*\s*\n?/g, '').replace(/\n?```\s*$/g, '').replace(/^\s*```\s*$/gm, '');
   // 1) 英文标点一律转全角（仅处理中文相邻的半角标点，保留句子中真正的英文内容）
   s = s
     .replace(/([\u4e00-\u9fff\u3000-\u303f])[ \t]*,[ \t]*(?=[\u4e00-\u9fff\u201c\u2018])/g, '$1，')

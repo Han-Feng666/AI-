@@ -3923,6 +3923,8 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
       // 自动续写：单次输出被 max_tokens 截断（finish_reason=length）或模型提前停止时继续往下写，直到达到目标字数
       // 续写轮数上限从12降到6，减少内存峰值
       for (let round = 0; round < 6; round++) {
+        // 快照本轮起始时的 full，用于网络重试时回退，避免内容重复追加
+        const fullAtRoundStart = full;
         const msgs = round === 0
           ? [
               { role: 'system', content: chapterSystemPrompt },
@@ -3949,8 +3951,8 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
             const waitMs = isRateLimit ? (netTry === 1 ? 20000 : 45000) : (netTry === 1 ? 5000 : 12000);
             send({ type: 'status', message: `生成被网关打断（${lastStreamErr || '服务过载'}），${waitMs / 1000} 秒后重试第 ${round + 1} 轮（第 ${netTry + 1} 次连接）…` });
             await new Promise((resolve) => setTimeout(resolve, waitMs));
-            if (round === 0 && full.trim()) {
-              full = '';
+            if (full !== fullAtRoundStart) {
+              full = fullAtRoundStart;
               send({ type: 'reset' });
             }
           }
