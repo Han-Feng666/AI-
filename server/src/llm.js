@@ -285,21 +285,10 @@ export async function chat(opts) {
     } else if (cfg.provider === 'qwen') {
       body.enable_thinking = true;
     } else if (isDeepSeekV4) {
-      // DeepSeek V4 思考模式：官方参数
-      body.thinking = { type: 'enabled' };
-      body.reasoning_effort = reasoning;
-    } else if (/o1|o3|o4|gpt-5|thinking/.test(model)) {
-      body.reasoning_effort = reasoning;
-    }
-  } else {
-    // reasoning=off 时，对支持思考的模型显式关闭，防止默认思考吞掉 max_tokens
-    if (isDeepSeekV4) {
       body.thinking = { type: 'disabled' };
-      // 网关兼容：部分严格网关只认 reasoning_effort 控制思考（会 400 拒绝 thinking 参数）。
-      // 两个参数都发：官方 API 认 thinking；严格网关 400 后由自愈剔除 thinking，
-      // reasoning_effort=minimal 兜底生效，防止模型默认开思考吞掉 max_tokens 导致 JSON 输出截断。
-      body.reasoning_effort = 'minimal';
-      // 注意：enable_thinking 是 Qwen 系参数，发给 DeepSeek 端点会被严格网关 400 拒绝（Unsupported parameter），不再发送
+      // reasoning_effort=none 与 thinking.type=disabled 一致，API 规则要求两者搭配
+      // 若严格网关 400 拒绝 thinking 参数，自愈剔除 thinking 后仅剩 reasoning_effort=none 仍合法生效
+      body.reasoning_effort = 'none';
     } else if (isDeepSeekLegacy) {
       body.enable_thinking = false;
     }

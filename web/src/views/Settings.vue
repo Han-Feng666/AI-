@@ -955,6 +955,7 @@ async function onUpdateFileChosen(e) {
               <el-option label="低" value="low" />
               <el-option label="中" value="medium" />
               <el-option label="高" value="high" />
+              <el-option label="极高" value="xhigh" />
             </el-select>
           </el-form-item>
         </div>
