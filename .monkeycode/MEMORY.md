@@ -548,3 +548,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 前端 UI（Settings.vue）：「软件增量更新」卡片——隐藏 file input 选 .patch.json → ElMessageBox 确认 → POST /api/update/apply → 显示结果 → 延迟调 POST /api/update/restart 触发重启。API 层（web/src/api/index.js）：`getUpdateInfo`/`applyUpdate`/`restartApp`。
   - 补丁生成器 `scripts/make-patch.cjs`：开发环境用，`node scripts/make-patch.cjs [--build] [--out <path>] [--from <ref>]`。用 `git diff --name-only` + `git status --porcelain` 收集 server/ 变动文件（含未跟踪），web/dist 因 gitignored 全量打包（walkDir 递归）。版本号读 desktop/package.json。
   - 工作流：改代码 → `cd web && npm run build` → `node scripts/make-patch.cjs` → 用户在「设置→软件增量更新」选 .patch.json → 自动应用+重启。补丁典型 1-3 MB vs 完整安装包 134 MB。
+
+[User Instruction Summary]
+- Date: 2026-09-16
+- Context: 用户要求——每次修复/优化代码后，必须自动构建并生成增量补丁给用户下载，不能只改代码不产出补丁
+- Instructions:
+  - **修复/优化代码后必须执行**：跑 `node scripts/build-and-patch.cjs --bump` 一键生成增量补丁。此脚本自动：递增版本号 → 构建前端 → 检测改动 → 生成 .patch.json 到 `desktop/release/update-<版本号>.patch.json`。
+  - `--bump` 每次必加（递增 patch 版本号，如 1.4.15→1.4.16），让用户更新历史能看到版本变化。
+  - 若仅改后端（无前端改动），可加 `--no-build` 跳过前端构建加快速度。
+  - 脚本会自动检测基准：有未提交改动时对比 HEAD，已全部 commit 时对比 HEAD~1。也可用 `--from <ref>` 手动指定。
+  - 产出后告知用户补丁路径（`desktop/release/update-<版本号>.patch.json`），用户在已安装软件「设置→软件增量更新」选择该文件应用即可。
+  - 补丁生成后再 commit + push 代码。顺序：改代码 → `build-and-patch.cjs --bump` → commit → push。
+  - `scripts/build-and-patch.cjs` 与 `scripts/make-patch.cjs` 的区别：前者是面向 Agent 的一键流程（含版本递增+前端构建），后者是底层工具（仅生成补丁）。日常用前者。
