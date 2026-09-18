@@ -43,7 +43,7 @@ import {
   IDEAS_SYSTEM,
   buildNovelContext, buildChapterSystem, buildPolishSystem,
   buildPolishWithIssues, buildPlotFixSystem, buildElevateSystem, extractJson, extractArray, buildReviseSystem,
-getGenreGuide, getGenreGuides
+getGenreGuide, getGenreGuides, buildPlanGenreConformity
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
@@ -2196,6 +2196,7 @@ const userPrompt = `${conceptRule}
   ${novel.meme_elements ? `\n【网络梗/元素要求】本书需要融入以下网络梗或趣味元素：${novel.meme_elements}。请在剧情、对话或角色设定中自然融入这些元素，让小说更具网感和趣味性。梗的使用要自然不生硬，可以化用、变体，不要生搬硬套。` : ''}
 
 【题材边界强调】所选类型为：${genre || novel.genre || '未指定'}。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等超凡标签，则本书为现实向，力量体系只能是武功谋略，严禁把"学习/修炼"写成玄幻修仙境界（灵气、金丹、元婴、御剑等等一概禁止）；意外死亡穿越也不是获得超凡能力的理由。
+ ${buildPlanGenreConformity(genre || novel.genre || '')}
  
  【严禁止凭空编造——灵感唯一性铁律】
  用户灵感是本作唯一真相来源。灵感中未提及的情节（如被家族打死、被嘲讽退婚、获得系统等），严禁在方案中自行添加。禁止套用网文默认模板（如"废物嫡子""退婚打脸""签到系统""新手礼包"等）。主角开局处境必须严格按灵感描述，不得额外添加恩怨/家族/机缘设定。
@@ -2403,9 +2404,12 @@ ${parts.join('\n\n')}
       return guides.length ? `\n\n${guides.join('\n\n')}` : '';
     })() : '';
 
+    // 注入题材贴合硬约束（现实向题材禁穿越/重生/系统/召唤/契约，青春题材锁学生身份）
+    const planConformityBlock = buildPlanGenreConformity(genre || novel.genre || '');
+
     // 阶段 1：作品骨架
     // 预算裁剪：防止系统提示词超限导致模型输出乱码/垃圾
-    const sysContent = PLAN_SKELETON_SYSTEM + planKnowledgeBlock + planSkillsBlock + planGenreBlock + planStyleBlock;
+    const sysContent = PLAN_SKELETON_SYSTEM + planKnowledgeBlock + planSkillsBlock + planGenreBlock + planStyleBlock + (planConformityBlock ? `\n\n${planConformityBlock}` : '');
     const sysTokens = estimateTokens(sysContent);
     const budget = contextBudget(config);
     const trimmedSys = sysTokens > budget - estimateTokens(userPrompt) - 1024
@@ -2758,7 +2762,7 @@ ${snapshot}${anchor}
 用户提出的修改意见（请据此修订；除用户明确指出的改动外，其他字段 MUST 保持原样，绝不让角色改名或主线错位）：
 ${feedback}
 
-【题材边界提醒】本书类型为「${novel.genre || '未注明'}」。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等标签，则本书为现实向：世界观与角色的"修炼/能力"只能是武术、谋略、医术等现实可及的能力，严禁引入修炼境界、灵气、金丹、御剑、系统面板等玄幻修行元素。请仅依据用户意见修订，不要顺手把现实向设定改成玄幻修行。
+${buildPlanGenreConformity(novel.genre) || `【题材边界提醒】本书类型为「${novel.genre || '未注明'}」。请仅依据用户意见修订，不要擅自更改题材方向。`}
  ${novel.meme_elements ? `\n【网络梗/元素要求】本书需要融入以下网络梗或趣味元素：${novel.meme_elements}。请在修订方案时保留并体现这些元素。` : ''}
 
 请输出修订后的完整创作方案 JSON，字段与结构必须与当前方案完全一致：{"title": "...", "genre": "...", "world_view": "...", "outline": "...", "characters": [{"name": "...", "role_type": "...", "personality": "...", "background": "...", "description": "...", "faction": "...", "goal": "...", "ability": "..."}], "factions": [{"name": "...", "type": "...", "description": "..."}], "relationships": [{"a": "角色名", "b": "角色名", "relation_type": "朋友", "description": "..."}], "chapters": [{"title": "...", "summary": "..."}]}`;
