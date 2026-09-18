@@ -1636,7 +1636,7 @@ router.post('/novels/import-txt/preview', (req, res) => {
 
 // 灵感生成器：无灵感时按「题材 + 风格」批量产出多个小说创意大纲供浏览挑选
 router.post('/ideas', async (req, res) => {
-  const { genres = [], stylePresets = [], styleIds = [], count = 3 } = req.body || {};
+  const { genres = [], stylePresets = [], styleIds = [], count = 3, excludeIdeas = [] } = req.body || {};
   const { config, error } = requireLLM();
   if (error) return res.status(400).json({ error: error.message });
 
@@ -1664,7 +1664,35 @@ ${parts.join('\n\n')}
     ? `\n\n【创作风格基调】${presets.join('、')}\n\n构思的创意应贴合这些风格基调（例如悬念、燃向、轻松日常等）。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${styleBlock}${presetBlock}\n\n请一次构思 ${ideaCount} 个不同方向的小说创意，输出 JSON 数组。`;
+  // 随机差异化轴：为每个创意槽位分配不同的金手指类型 + 主角初始身份，
+  // 从源头打破模型对同一题材反复输出套路化创意（只换名字）的倾向
+  const GF_POOL = ['系统面板/数值化', '血脉体质觉醒', '古老传承记忆', '器物法宝', '特殊技能天赋', '预知信息优势', '契约召唤', '规则因果操控', '商业资源整合', '战斗本能武学'];
+  const ID_POOL = ['底层草根', '落魄贵族后人', '隐世传人', '现代上班族穿越', '市井游民', '少年天才', '军方武力背景', '商贾之后', '工匠手艺人', '戴罪之身'];
+  const shuffle = (arr) => arr.map((v) => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
+  const gfSlots = shuffle(GF_POOL).slice(0, ideaCount);
+  const idSlots = shuffle(ID_POOL).slice(0, ideaCount);
+  const axisBlock = gfSlots.map((gf, i) => `创意${i + 1}：金手指类型必须属于「${gf}」，主角初始身份必须是「${idSlots[i]}」`).join('\n');
+
+  // 跨批次去重：把用户已生成过的创意（标题/梗概/金手指）列入禁重清单
+  const excluded = (Array.isArray(excludeIdeas) ? excludeIdeas : [])
+    .map((it) => {
+      if (!it || typeof it !== 'object') return null;
+      const t = String(it.title || '').trim();
+      const l = String(it.logline || '').trim();
+      const gf = String(it.golden_finger || it.protagonist?.golden_finger || '').trim();
+      return [t, l, gf].filter(Boolean).join('｜');
+    })
+    .filter(Boolean).slice(0, 12);
+  const excludeBlock = excluded.length
+    ? `\n\n【已生成过的创意——本次构思必须与之明显不同（金手指/世界观/核心冲突/主角身份至少3项不同），严禁只换名字或换皮】\n${excluded.map((e, i) => `${i + 1}. ${e}`).join('\n')}`
+    : '';
+
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${styleBlock}${presetBlock}${excludeBlock}
+
+【差异化强制分配（每个创意必须严格采用对应槽位的金手指类型与主角身份，不得互换或自行替换为同类）】
+${axisBlock}
+
+请一次构思 ${ideaCount} 个彼此完全不同的小说创意，输出 JSON 数组。`;
 
   try {
     const maxOut = Math.max(8192, Number(config.maxTokens) || 8192);

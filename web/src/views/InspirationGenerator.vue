@@ -17,6 +17,8 @@ const styleLibsLoading = ref(false);
 const generating = ref(false);
 const statusText = ref('');
 const ideas = ref([]);
+// 跨批次去重：累积所有已生成创意的签名（标题/梗概/金手指），下次生成时传给后端排除
+const historyIdeas = ref([]);
 const selectedId = ref(null);
 const creating = ref(false);
 const askOpen = ref(false);
@@ -67,12 +69,21 @@ async function generate() {
       genres: genres.value,
       stylePresets: stylePresets.value,
       styleIds: styleIds.value,
-      count: 3
+      count: 3,
+      excludeIdeas: historyIdeas.value
     }, {
       onStatus: (m) => { statusText.value = m; },
       onError: (m) => { if (m) ElMessage.error(m); }
     });
     ideas.value = (data?.ideas || []).map((it) => ({ ...it, expanded: false }));
+    // 累积本轮创意签名，供下一批生成时去重
+    for (const it of ideas.value) {
+      historyIdeas.value.push({
+        title: it.title || '',
+        logline: it.logline || '',
+        golden_finger: it.protagonist?.golden_finger || ''
+      });
+    }
     if (!ideas.value.length) ElMessage.info('本次没有生成到创意，请换个题材组合再试');
     statusText.value = '';
   } catch (e) {
@@ -201,14 +212,17 @@ onMounted(loadStyleLibrary);
             >{{ s.name }}</span>
           </div>
         </el-form-item>
-        <el-form-item>
-          <div class="gen-actions">
-            <el-button type="primary" size="large" :loading="generating" @click="generate">
-              <el-icon style="margin-right: 6px"><MagicStick /></el-icon>
-              {{ generating ? '构思中…' : (ideas.length ? '重新生成（换一批创意）' : '批量生成创意') }}
-            </el-button>
-            <span class="gen-hint">每次生成 3 个创意，不满意就重新生成，直到你满意为止</span>
-          </div>
+         <el-form-item>
+           <div class="gen-actions">
+             <el-button type="primary" size="large" :loading="generating" @click="generate">
+               <el-icon style="margin-right: 6px"><MagicStick /></el-icon>
+               {{ generating ? '构思中…' : (ideas.length ? '重新生成（换一批创意）' : '批量生成创意') }}
+             </el-button>
+             <el-button v-if="historyIdeas.length" size="large" text @click="historyIdeas = []" :disabled="generating">
+               清空去重记录（{{ historyIdeas.length }}）
+             </el-button>
+             <span class="gen-hint">每次生成 3 个创意，已生成过的会自动避开，直到你满意为止</span>
+           </div>
           <div v-if="generating" class="idea-progress">
             <el-progress :percentage="99" :stroke-width="6" :show-text="false" :indeterminate="true" :duration="3" />
             <span class="idea-progress-text">{{ statusText || 'AI 正在构思创意…' }}</span>
