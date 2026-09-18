@@ -967,6 +967,81 @@ function stripDialogue(text) {
   return String(text || '').replace(/["""''「『【（][^""""''」』】）]*["""''」』】）]/g, '');
 }
 
+// 对话"直说情绪/意图"检测：角色在对话里直接宣布自己的情绪或意图（on-the-nose dialogue），
+// 是 AI 对话最大破绽之一。真人对话有潜台词、有回避、有答非所问。
+// 检测模式：引号内出现"我+情绪词"（"我生气了""我害怕"）或意图宣告（"我一定要去"）
+export function scanDialogueOnTheNose(text) {
+  const s = String(text || '');
+  if (s.length < 500) return [];
+  const hits = [];
+  const dialogues = s.match(/[""''「][^""''」]{2,120}[""''」]/g) || [];
+  if (dialogues.length < 4) return hits;
+  const emotionRe = /[我你他她]?(很|真的|真的好)?(生气|害怕|难过|开心|高兴|喜欢|讨厌|失望|紧张|担心|后悔|委屈|心寒|心烦|心疼|不甘)/;
+  const intentRe = /我(一定要|必须要|肯定会|一定会|绝不会|绝对不会|就是想|本来想|其实想)/;
+  let onNose = 0;
+  const examples = [];
+  for (const d of dialogues) {
+    const inner = d.slice(1, -1);
+    if (emotionRe.test(inner) || intentRe.test(inner)) {
+      onNose++;
+      if (examples.length < 2) examples.push(inner.slice(0, 30));
+    }
+  }
+  if (onNose >= 3) {
+    hits.push({
+      word: `对话直说情绪/意图(${onNose}处，如"${examples[0] || ''}"。角色在对话里直接宣布"我生气了""我一定要去"是 AI 对话最大破绽，真人说话有潜台词——"挺好的"可能是"糟透了"，把情绪藏在动作和语气里)`,
+      count: onNose,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 抽象描写检测：叙述中使用模糊量词/泛指词（"很多""各种""一些""之类"），
+// 缺乏具体性。真人写作用具体数字或具象物件。
+export function scanVagueDescription(text) {
+  const s = String(text || '');
+  if (s.length < 800) return [];
+  const hits = [];
+  const narrOnly = s.replace(/[""''「][^""''」]{1,120}[""''」]/g, '');
+  const vagueWords = ['很多', '许多', '不少', '若干', '各种', '种种', '一些', '之类', '什么的', '之类的', '这一类', '那一类', '许许多多'];
+  let total = 0;
+  const found = [];
+  for (const w of vagueWords) {
+    const c = (narrOnly.match(new RegExp(w, 'g')) || []).length;
+    if (c > 0) { total += c; found.push(`${w}×${c}`); }
+  }
+  if (total >= 4) {
+    hits.push({
+      word: `叙述模糊量词过多(${found.join('、')}。真人用具体数字或具象物件——"三本书"而非"很多书"，"两把旧椅子"而非"一些椅子"。模糊词堆砌是 AI 缺乏想象力的标志)`,
+      count: total,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 对话标签过载检测：连续对话中"X道/X说/X问"出现过于频繁，
+// 真人写作常用动作替代或直接省略标签
+export function scanDialogueTagOverload(text) {
+  const s = String(text || '');
+  if (s.length < 800) return [];
+  const hits = [];
+  const tagRe = /[\u4e00-\u9fa5]{1,4}(道|说(了|道)?|问(道)?|笑道|冷笑|苦笑|喊道|低声|轻声|沉声|冷声|怒道|叹道|答道)/g;
+  const tags = s.match(tagRe) || [];
+  const dialogues = s.match(/[""''「][^""''」]{2,120}[""''」]/g) || [];
+  if (dialogues.length < 6) return hits;
+  const ratio = tags.length / dialogues.length;
+  if (ratio >= 0.6 && tags.length >= 6) {
+    hits.push({
+      word: `对话标签过密(${tags.length}个标签/${dialogues.length}句对话，占比${Math.round(ratio * 100)}%。真人常用动作替代标签——"他头也不回往外走"代替"他说"，或直接省略。同段对话"道/说"超三次即删多余)`,
+      count: tags.length,
+      template: true
+    });
+  }
+  return hits;
+}
+
 // 对白/叙述结构失衡检测：全章零对话=流水账旁白体，全章近乎全对话=剧本化。
 // 正常章节对白与叙述交织，两类失衡都显著降低可读性。返回人类可读的问题描述数组，供润色定向修复。
 export function scanStructureBalance(text) {

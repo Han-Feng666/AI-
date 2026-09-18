@@ -13,6 +13,7 @@ import {
   scanAiPatterns, blacklistPenalty, blacklistFlagWords, cleanAiText, scanTopicDrift,
   scanStructureBalance, scanCrossChapterRepeats, longestDuplicateLength,
   scanTimelineContradiction, scanKinshipTitleConflict, scanSceneElementMismatch,
+  scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
 } from './lib.js';
@@ -36,12 +37,12 @@ import {
   FORESHADOW_ANALYZE_SYSTEM, AI_DETECT_SYSTEM, KEY_MOMENTS_SYSTEM, PLAN_ADVANCE_SYSTEM, STAGE_SUMMARY_SYSTEM, CHARACTER_CONSISTENCY_SYSTEM,
   FACT_EXTRACT_SYSTEM, CHAR_CHANGE_EXTRACT_SYSTEM, FORESHADOW_RECALL_PREDICT_SYSTEM, TIMELINE_EXTRACT_SYSTEM, HIERARCHICAL_SUMMARY_SYSTEM,
   CHARACTER_VOICE_EXTRACT_SYSTEM, PLOT_CONSISTENCY_CHECK_SYSTEM, NOVEL_CONSTITUTION_BUILD_SYSTEM,
-  CHAPTER_BEAT_SYSTEM, PLAN_BEATS_SYSTEM, WRITING_QUALITY_SYSTEM, AUTO_SUMMARY_SYSTEM, STORY_READABILITY_SYSTEM, STYLE_LEARN_APPLY_SYSTEM, NAMEGEN_SYSTEM,
+  CHAPTER_BEAT_SYSTEM, PLAN_BEATS_SYSTEM, WRITING_QUALITY_SYSTEM, WRITING_ELEVATE_SYSTEM, AUTO_SUMMARY_SYSTEM, STORY_READABILITY_SYSTEM, STYLE_LEARN_APPLY_SYSTEM, NAMEGEN_SYSTEM,
   ARC_PLAN_SYSTEM, WORLD_EXPAND_SYSTEM, EMOTION_CURVE_SYSTEM,
   ADAPTATION_PLAN_SYSTEM, ADAPTATION_CHAPTER_SYSTEM, LYRICS_TO_NOVEL_SYSTEM,
   IDEAS_SYSTEM,
   buildNovelContext, buildChapterSystem, buildPolishSystem,
-  buildPolishWithIssues, buildPlotFixSystem, extractJson, extractArray, buildReviseSystem,
+  buildPolishWithIssues, buildPlotFixSystem, buildElevateSystem, extractJson, extractArray, buildReviseSystem,
 getGenreGuide, getGenreGuides
 } from './prompts.js';
 import {
@@ -4730,6 +4731,53 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
           }
         }
       } catch { /* 交叉终审整体失败不阻塞 */ }
+    }
+
+    // 质感提升（加法层）：所有"减法"层（去AI味/文笔门/交叉终审）完成后，
+    // 对已干净的原稿做一次"加法"增强——补感官细节/对话潜台词/节奏变化。
+    // 仅在 strict 模式 + 文本已通过 AI 门（无黑名单词残留）+ 检测到具体质感缺口时运行，
+    // 避免对未达标原稿做加法（先治好病再补营养），也避免对已足够好的章节做多余改写。
+    // 独立预算（1次调用），不消耗 llmRewriteBudget——这是质量增强不是缺陷修复。
+    if (strictMode()) {
+      const aiClean = (finalBlacklist?.length ?? 0) === 0;
+      if (aiClean && full.length > 800) {
+        try {
+          const elevateIssues = [];
+          const onNose = scanDialogueOnTheNose(full);
+          if (onNose.length) elevateIssues.push({ type: '对话直说', desc: onNose[0].word });
+          const vague = scanVagueDescription(full);
+          if (vague.length) elevateIssues.push({ type: '描写空洞', desc: vague[0].word });
+          const tagOver = scanDialogueTagOverload(full);
+          if (tagOver.length) elevateIssues.push({ type: '对话标签过密', desc: tagOver[0].word });
+          if (elevateIssues.length > 0) {
+            send({ type: 'status', message: `检测到质感提升空间（${elevateIssues.map((i) => i.type).join('、')}），正在做加法增强…` });
+            const eRes = await chat({
+              config,
+              task: 'writing',
+              messages: [
+                { role: 'system', content: buildElevateSystem(
+                  getStyles(parseStyleIds(novel)),
+                  novel.style_baseline,
+                  novel.style_samples,
+                  parseStylePresets(novel),
+                  {
+                    novelVoice: buildNovelVoiceAnchor(novel, idx),
+                    elevateIssues,
+                    ...buildStyleInjection(novel, full.slice(0, 2000))
+                  }
+                ) },
+                { role: 'user', content: `以下是一章已经过质检的小说正文。请只针对系统提示中标注的薄弱处做局部增强，其余内容逐字保留原样，保持剧情、人设与本书语感不变。\n\n原稿：\n${full}` }
+              ],
+              maxTokens: Math.max(4000, Math.min(32000, (full.length + 2000) * 2))
+            });
+            const elevated = (eRes.content || '').trim();
+            if (elevated && elevated.length >= Math.floor(full.length * 0.7)) {
+              full = elevated;
+              send({ type: 'status', message: '质感提升完成' });
+            }
+          }
+        } catch { /* 质感提升失败不阻塞，保留质检通过版 */ }
+      }
     }
 
     // 保存章节（质检通过或达上限后的最终版）

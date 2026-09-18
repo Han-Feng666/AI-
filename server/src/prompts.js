@@ -1003,6 +1003,32 @@ export const REVISE_CHAPTER_SYSTEM = `你是一位资深中文小说编辑，负
 6. 标点自然：连贯动作/心理描写用逗号衔接，不要句号切成碎片；对话标点使用标准格式。省略号只用"……"，分号尽量不用。
 7. 禁止掺杂英文：全文必须纯中文写作，不得出现任何英文单词、短语、句子或中英混写。角色的对话、心理活动、旁白叙述全部使用中文。英文专有名词（品牌名、产品名、技术术语等）应使用中文译名；角色名、地名等专有名词若原文为英文，须保持原文，但其余正文必须全部为中文。`;
 
+// 质感提升系统提示：在所有"减法"层（去AI味/文笔门/交叉终审）完成后，
+// 对已干净的原稿做一次"加法"增强——补感官细节/对话潜台词/记忆点/节奏变化。
+// 与 POLISH_SYSTEM 的区别：POLISH 是减法（删 AI 痕迹），ELEVATE 是加法（补质感）。
+export const WRITING_ELEVATE_SYSTEM = `你是一位资深中文小说编辑，专门在稿件已经清除 AI 痕迹后做"质感提升"——这是加法，让平面的文字立体起来。
+
+最高原则——外科手术式增强（优先级高于以下所有要求）：
+- 这是一次"增强"，不是重写。只针对检测标注的薄弱处做局部增强，已经好的句子必须逐字保留。
+- 整章改动幅度控制在两成以内。禁止把有个性的文字磨平——你的任务是让文字更鲜活，不是更标准。
+- 原稿读起来已经像真人写下的地方，一个字都不要动。
+
+增强方向（只针对检测标注的薄弱处，不主动寻找新问题）：
+1. 【感官锚定】检测标注的"描写空洞"处，补一个具体的感官细节——不是堆砌，只加一个最准确的细节（一种气味、一个声音、一种触感），让场景从纸面立体起来。
+2. 【对话潜台词】检测标注的"对话直说"处，把角色直接宣布情绪/意图的台词改成有潜台词的写法——用动作、语气、答非所问传递，让读者自己读出来。
+3. 【记忆点】如果检测标注"缺乏记忆点"，在关键场景补一个具体的、独特的细节（一件褪色的旧物、一个反常的小动作、一句有味道的台词），让它从全章"凸出来"。
+4. 【节奏变化】检测标注"节奏单调"处，把均匀的长句段落打散——在关键瞬间插入一个短句或短段制造冲击，或把碎片短段合并成有呼吸感的中长段。
+5. 【动词精准】检测标注"动词模糊"处，把"慢慢地走""使劲地打"换成更精准的动词——"踱""砸"。一个精准的动词比三个形容词有力。
+
+绝对禁止：
+- 不新增角色、不新增剧情、不改变人物关系、不改变已确立的设定。
+- 不新增"仿佛/宛如"明喻——明喻整章不超过3处。
+- 不新增省略号、不新增破折号"——"（各整章不超过5处/3处）。
+- 不写情绪标签（"他愤怒了""她委屈"），用动作和身体反应传递情绪。
+- 不写"总结腔"收尾（"这一天注定改变一切"），让故事自己说话。
+
+直接输出增强后的正文，不要任何解释、说明或前后缀。`;
+
 export const CHAT_SYSTEM = (novel, characters, progressText) => `你是一位陪作者并肩创作的资深小说编辑，说话像真人一样自然。
 
 你的任务：
@@ -1387,6 +1413,39 @@ export function buildPolishWithIssues(styles, baseline, samples, issues, blackli
     sys += `\n\n${parts.join('\n\n')}\n\n润色完成后，请通读一遍确认：不再有上述任何一条痕迹，再输出定稿。`;
   }
   return sys;
+}
+
+// 质感提升系统构建器：注入风格基准/范文/本书语感/检测出的质感缺口
+export function buildElevateSystem(styles, baseline, samples, presets, opts = {}) {
+  let sys = WRITING_ELEVATE_SYSTEM;
+  if (presets && presets.length) {
+    sys += `\n\n【创作风格要求】\n本作选定的创作风格：${presets.join('、')}。\n\n增强时在不违背上述要求的前提下，向这些风格基调自然靠拢。`;
+  }
+  if (baseline && String(baseline).trim()) {
+    sys += `\n\n【本作文风基准（增强时必须遵循，保证全书风格统一）】\n${baseline}`;
+  }
+  if (opts.novelVoice && String(opts.novelVoice).trim()) {
+    sys += `\n\n${String(opts.novelVoice).trim()}`;
+  }
+  const dynamicSnippets = opts.styleSnippets && String(opts.styleSnippets).trim() ? String(opts.styleSnippets).trim() : '';
+  const styleExamples = [];
+  if (dynamicSnippets) {
+    styleExamples.push(dynamicSnippets);
+  } else if (samples && String(samples).trim()) {
+    styleExamples.push(String(samples).trim());
+  }
+  if (styleExamples.length) {
+    sys += `\n\n【真人文风参照（模仿其句子长短、语气、节奏，不模仿人物与情节）】\n${styleExamples.join('\n\n---\n\n')}`;
+  }
+  if (opts.elevateIssues && opts.elevateIssues.length) {
+    const list = opts.elevateIssues.slice(0, 6)
+      .map((it, i) => `${i + 1}. 【${it.type}】${it.desc}`)
+      .join('\n');
+    sys += `\n\n【检测标注的薄弱处（只增强这些，其余逐字保留）】\n${list}`;
+  } else {
+    sys += `\n\n【未检测到具体薄弱处时，通读全章后自行判断1-2处最平面的段落做感官或节奏增强，其余逐字保留】`;
+  }
+  return enforceSysBudget(sys);
 }
 
 export function extractJson(text) {
