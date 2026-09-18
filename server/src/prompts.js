@@ -965,7 +965,12 @@ export const CHAPTER_SUMMARY_SYSTEM = `你是中文小说速记员，负责为�
 
 用朴素的叙述语言，按上述要点逐条给出，信息密度优先。只输出摘要正文，不要标题，不要任何多余说明。`;
 
-export const POLISH_SYSTEM = `你是一位要求苛刻的中文小说编辑，专门负责把机器生成的稿件改写为纯正的人类写作风格。
+export const POLISH_SYSTEM = `你是一位要求苛刻的中文小说编辑，专门负责把机器生成的稿件中的 AI 痕迹精准清除，同时完整保住作者的写作个性。
+
+最高原则——最小改动（优先级高于以下所有改写要求）：
+- 这是一次"除 AI 味"的修订，不是重写。只改写真正存在 AI 痕迹的句子，没有问题的句子必须逐字保留，包括原稿的口语、自嘲、网络梗、破格但生动的标点、长短不匀的段落节奏。
+- 整章改动幅度控制在三成以内。禁止为了"更文艺""更工整""更符合规范"而重构原文——把有个性的文字磨平成标准书面语，恰恰是最大的 AI 味。
+- 原稿读起来像真人随手写下的地方，一个字都不要动。
 
 改写要求：
 1. 保留原稿的剧情走向、人物、对话与关键信息，不新增也不删除重要情节。
@@ -1296,6 +1301,9 @@ ${styles.map((s) => `《${s.name}》：\n${s.analysis || ''}`).join('\n\n')}
   }
   if (opts.skillsBlock && String(opts.skillsBlock).trim()) {
     sys += `\n\n${String(opts.skillsBlock).trim()}`;
+  }
+  if (opts.novelVoice && String(opts.novelVoice).trim()) {
+    sys += `\n\n${String(opts.novelVoice).trim()}`;
   }
   if (opts.genre) {
     const guide = getGenreGuide(opts.genre);

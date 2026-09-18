@@ -162,7 +162,8 @@ function startSSE(req, res, opts = {}) {
 }
 
 // ---------- AI 味检测与质量门（铁律模式） ----------
-const AI_SCORE_PASS_DEFAULT = 5; // 达标阈值（更严）：该分以下视为合格的人类文风
+const AI_SCORE_PASS_DEFAULT = 10; // 达标阈值：该分以下视为合格的人类文风。过低（如 5）会让检测噪声
+                                  // 触发无谓的整章重生成/多轮润色，反而把文风洗成模型默认腔（AI 味更重）
 const AI_MAX_ROUNDS = 6;  // 质量门最多迭代轮数（增加）
 const MAX_AUTO_REGENERATE = 3; // 整章重生成最多额外重试次数（共生成 1+3=4 版）
 
@@ -347,12 +348,18 @@ async function runReadability(config, text) {
   };
 }
 
-// 质量门核心：润色 → 检测 → 未达标再润色（带上轮 issues + 黑名单），直到达标或达轮次上限
+// 质量门核心：润色 → 检测 → 未达标再润色（带上轮 issues + 黑名单），直到达标或达轮次上限。
+// 收敛保护：本轮评分没有比上一轮更好时立即停止并回退到上一轮版本——
+// 反复整章改写会让文字向模型默认文风收敛，越改 AI 味越重（过度润色是文风同质化的主因）
 async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX_ROUNDS, opts = {} } = {}) {
   let current = String(text || '').trim();
   let lastDetect = { score: 0, issues: [] };
   let blacklist = [];
   const rounds = [];
+  let prevScore = null;
+  let prevText = null;
+  let prevDet = null;
+  let prevBlacklist = [];
 
   for (let round = 0; round < maxRounds; round++) {
     const hitsBefore = scanAiPatterns(current);
@@ -376,7 +383,7 @@ async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX
           parseStylePresets(novel),
           opts
         ) },
-        { role: 'user', content: `以下是一章小说原稿。请按人类写作风格整体改写，彻底去除一切 AI 痕迹，保留剧情与人设。\n\n原稿：\n${current}` }
+        { role: 'user', content: `以下是一章小说原稿。请只修改存在 AI 痕迹的句子（按系统提示逐条处理），其余内容逐字保留原样，保持剧情、人设与本书语感不变。没有问题的段落一个字都不要动。\n\n原稿：\n${current}` }
       ],
       maxTokens: Math.max(4000, Math.min(32000, (current.length + 2000) * 2))
     });
@@ -392,6 +399,23 @@ async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX
     blacklist = blacklistFlagWords(hitsAfter, current.length);
     const total = Math.min(100, det.score + blacklistPenalty(hitsAfter, current.length));
     rounds.push({ round: round + 1, detectScore: det.score, blacklistPenalty: blacklistPenalty(hitsAfter, current.length), score: total, blacklist });
+
+    // 收敛保护：与上一轮比较，无改善即停（保留更好的上一版）
+    if (prevScore != null && total >= prevScore) {
+      if (prevText) {
+        current = prevText;
+        lastDetect = prevDet || lastDetect;
+        blacklist = prevBlacklist;
+        rounds[rounds.length - 1].reverted = true;
+        if (onStatus) onStatus(`本轮润色未带来改善（${total} 分 ≥ 上一轮 ${prevScore} 分），已保留上一版`);
+      }
+      break;
+    }
+    prevScore = total;
+    prevText = current;
+    prevDet = det;
+    prevBlacklist = blacklist;
+
     if (onStatus && blacklist.length) onStatus(`仍高频复用 AI 腔词：${blacklist.join('、')}…`);
 
     if (total <= aiScorePass() && blacklist.length === 0) break;
@@ -978,6 +1002,24 @@ function buildStyleInjection(novel, query) {
     }
   } catch { /* 回退固定样本注入 */ }
   return out;
+}
+
+// 本书语感锚点：取本书最近已写章节的正文片段，让润色/改写后的文字与前文语感一致。
+// 解决"修订方案重新生成后前后文风断裂"的问题——外部风格库样本再好，也不如本书自己的语感重要
+function buildNovelVoiceAnchor(novel, excludeIdx, maxChars = 1200) {
+  try {
+    const rows = db.prepare(
+      "SELECT chapter_index, content FROM chapters WHERE novel_id = ? AND chapter_index != ? AND content != '' ORDER BY chapter_index DESC LIMIT 2"
+    ).all(novel.id, Number(excludeIdx) || -1);
+    if (!rows.length) return '';
+    const per = Math.max(300, Math.floor(maxChars / rows.length));
+    const parts = rows.map((r) => {
+      const c = String(r.content).replace(/\s+/g, ' ').trim();
+      const start = Math.min(Math.floor(c.length * 0.2), Math.max(0, c.length - per));
+      return `（第${r.chapter_index}章节选）${c.slice(start, start + per)}`;
+    });
+    return `【本书已有章节的语感基准——本书前文的真实语感，优先级高于外部风格样本】\n润色/改写后的文字必须与前文像同一个人写的：叙述口吻、人物说话方式、段落节奏、用词习惯保持一致。前文中的口语、自嘲、俏皮话等个性表达是本书的一部分，禁止把它们"规范化"。${parts.length ? '\n' + parts.join('\n\n') : ''}`;
+  } catch { return ''; }
 }
 
 /**
@@ -1877,6 +1919,19 @@ async function applyPlan(novel, plan, opts = {}) {
   db.prepare('UPDATE novels SET title = ?, genre = ?, world_view = ?, outline = ?, concept = ?, chapter_word_count = ?, target_chapters = ?, status = ?, story_arcs = ?, protagonist_name = ?, heroine_name = ? WHERE id = ?')
     .run(title, genreV, worldView, outline, concept, words, target, 'planned', storyArcs, String(plan.protagonist_name || novel.protagonist_name || ''), String(plan.heroine_name || novel.heroine_name || ''), novel.id);
 
+  // 采纳修订方案前快照已写章节：仅当新方案对应章节的标题与概要都未变时保留正文，
+  // 避免修订方案把用户已写内容全部清空重写（重写会丢失原稿语感且触发重型润色管线）
+  let writtenSnapshot = [];
+  try {
+    writtenSnapshot = db.prepare(
+      "SELECT chapter_index, title, summary, content, word_count, ai_score FROM chapters WHERE novel_id = ? AND content != ''"
+    ).all(novel.id);
+  } catch { /* 快照失败不阻塞 */ }
+  const writtenByKey = new Map();
+  for (const w of writtenSnapshot) {
+    writtenByKey.set(`${String(w.title || '').trim()}||${String(w.summary || '').trim()}`, w);
+  }
+
   db.prepare('DELETE FROM relationships WHERE novel_id = ?').run(novel.id);
   db.prepare('DELETE FROM characters WHERE novel_id = ?').run(novel.id);
   db.prepare('DELETE FROM chapters WHERE novel_id = ?').run(novel.id);
@@ -1922,9 +1977,20 @@ async function applyPlan(novel, plan, opts = {}) {
   }
 
   const chapters = Array.isArray(plan.chapters) ? plan.chapters : [];
+  let preservedChapters = 0;
   for (let i = 0; i < chapters.length; i++) {
     const ch = chapters[i];
     const beatsJson = ch?.beats ? (Array.isArray(ch.beats) ? JSON.stringify(ch.beats) : String(ch.beats)) : '';
+    // 标题+概要均未变的已写章节：恢复正文与完成状态（语感延续，避免无谓重写）
+    const key = `${String(ch?.title || '').trim()}||${String(ch?.summary || '').trim()}`;
+    const kept = writtenByKey.get(key);
+    if (kept) {
+      db.prepare('INSERT INTO chapters (novel_id, chapter_index, title, summary, emotion, arc_hint, hook, beats, content, status, word_count, ai_score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(novel.id, i + 1, String(ch?.title || `第${i + 1}章`), String(ch?.summary || ''), String(ch?.emotion || ''), String(ch?.arc_hint || ''), String(ch?.hook || ''), beatsJson, String(kept.content), 'done', Number(kept.word_count) || 0, kept.ai_score ?? null);
+      writtenByKey.delete(key);
+      preservedChapters++;
+      continue;
+    }
     db.prepare('INSERT INTO chapters (novel_id, chapter_index, title, summary, emotion, arc_hint, hook, beats, content, status) VALUES (?,?,?,?,?,?,?,?,?,?)')
       .run(novel.id, i + 1, String(ch?.title || `第${i + 1}章`), String(ch?.summary || ''), String(ch?.emotion || ''), String(ch?.arc_hint || ''), String(ch?.hook || ''), beatsJson, '', 'planned');
   }
@@ -1938,6 +2004,7 @@ async function applyPlan(novel, plan, opts = {}) {
   updated.relationships = getRelationships(novel.id);
   updated.chapters = getChapters(novel.id);
   updated.total_words = updated.chapters.reduce((s, c) => s + c.word_count, 0);
+  updated.preserved_chapters = preservedChapters;
   // 方案已定，初始化小说文件夹下的「记忆.txt」
   refreshMemoryFile(novel.id);
   return updated;
@@ -3880,6 +3947,9 @@ ${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水
     let finalRounds = [];
     let lastProblems = [];
     let structureFixes = []; // 表达层结构问题（失衡/口癖/复述），注入润色定向修复，不触发整章重生成
+    // 全章 LLM 整章改写总预算：定向润色/autoPolish/文笔门/交叉终审共用。
+    // 每轮整章改写都会让文字向模型默认文风收敛，叠加多层润色会把 AI 味越洗越重，故设硬上限
+    let llmRewriteBudget = 5;
     const perMax = Math.max(2000, Math.min(8000, Math.round(targetWordsN * 1.2)));
 
     const buildRegenFeedback = (problems) => {
@@ -4187,8 +4257,9 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         const templateHits = hits.filter((h) => h.template).length;
         const regexScore = Math.min(50, templateHits * 5);
         const regexTotal = Math.min(100, blacklistPenalty(hits, full.length) + regexScore);
-        // 正则评分已达阈值，直接判定，跳过 LLM 检测
-        if (regexTotal > aiScorePass() || bl.length > 0) {
+        // 正则评分超过阈值才判问题触发重生成；个别黑名单词复用（bl 非空但评分达标）
+        // 交给后续润色层定向替换——为两三个词整章重生成代价太高且会洗掉原稿语感
+        if (regexTotal > aiScorePass()) {
           total = regexTotal;
           det = { score: regexTotal, issues: [] };
           problems.push({ desc: `AI 味明显（${regexTotal} 分，阈值 ${aiScorePass()}${bl.length ? '；高频复用词语：' + bl.join('、') : ''}${templateHits ? `；模板句式命中 ${templateHits} 类` : ''}）` });
@@ -4384,21 +4455,28 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         }
       } catch { /* 概念校验失败不阻塞 */ }
 
-      // 4c) 网文 AI 套路模板硬校验（模型写穿越/玄幻开篇的默认路径，必须拦截）
+      // 4c) 网文 AI 套路模板硬校验（模型写穿越/玄幻开篇的默认路径，必须拦截）。
+      //     灵感/概要本身明确写了的元素（如灵感就写"加班猝死穿越"）不算 AI 套路，予以豁免
       try {
         const aiTropes = [];
-        if (/死过一次|死后重生|加班.{0,8}胸|方案.{0,8}胸|猝死|过劳/.test(full)) aiTropes.push('主角死亡重生开场');
-        if (/眼前一黑.{0,15}(再睁眼|醒来|睁开眼)|一睁眼.{0,15}(躺|发现自己|身处)/.test(full)) aiTropes.push('眼前一黑+睁眼穿越模板');
-        if (/手机.{0,8}(没信号|没电|关机|百分之)|电量.{0,6}百分之|看.{0,4}手机.{0,6}(信号|电量)/.test(full)) aiTropes.push('穿越后查看手机电量/信号套路');
-        if (/穿越.{0,8}第一时间.{0,6}查看.{0,6}手机|醒来.{0,10}手机/.test(full)) aiTropes.push('穿越后第一时间掏手机');
+        const conceptExempt = String(`${novel.concept || ''} ${existing?.summary || ''} ${novel.world_view || ''}`);
+        const tropes = [
+          { name: '主角死亡重生开场', hit: /死过一次|死后重生|加班.{0,8}胸|方案.{0,8}胸|猝死|过劳/.test(full), exempt: /猝死|过劳|加班|穿越前|前世|死过|重生|雷劈|车祸|坠崖/.test(conceptExempt) },
+          { name: '眼前一黑+睁眼穿越模板', hit: /眼前一黑.{0,15}(再睁眼|醒来|睁开眼)|一睁眼.{0,15}(躺|发现自己|身处)/.test(full), exempt: /眼前一黑|眼前发黑|眼前一花|白光|眩晕|昏迷/.test(conceptExempt) },
+          { name: '穿越后查看手机电量/信号套路', hit: /手机.{0,8}(没信号|没电|关机|百分之)|电量.{0,6}百分之|看.{0,4}手机.{0,6}(信号|电量)/.test(full), exempt: /手机/.test(conceptExempt) },
+          { name: '穿越后第一时间掏手机', hit: /穿越.{0,8}第一时间.{0,6}查看.{0,6}手机|醒来.{0,10}手机/.test(full), exempt: /手机/.test(conceptExempt) }
+        ];
+        for (const t of tropes) {
+          if (t.hit && !t.exempt) aiTropes.push(t.name);
+        }
         // 豁免口径放宽：灵感/世界观/题材/本章概要任一含"系统"即视为本书金手指设定，不再判为 AI 套路
         const sysExempt = String(`${novel.concept || ''} ${novel.world_view || ''} ${novel.genre || ''} ${existing?.summary || ''}`);
         if (/签到.{0,6}(获得|奖励|领取)|在.{0,8}签到.{0,6}(获得|奖励)/.test(full) && !/签到/.test(sysExempt)) aiTropes.push('签到系统');
         // 强化：系统绑定、系统面板、新手礼包、境界突破等游戏化设定
         if (/签到诸天|系统绑定|系统提示|叮[，~！]|发布.{0,3}任务|系统空间|属性面板|宿主：/.test(full) && !/系统/.test(sysExempt)) aiTropes.push('系统/签到/游戏化设定');
         if (/新手礼包|获得：|淬体丹|淬体境|境界：|突破.{0,6}(重|阶|期)|功法：|武技：|积分[：:]\d/.test(full) && !/修炼|境界|突破/.test(sysExempt)) aiTropes.push('游戏化境界/积分/系统奖励');
-        if (/(?:穿越|重生).{0,20}(?:第一时间|第一反应|第一个念头).{0,10}(?:查看手机|摸手机|掏手机|看手机)/.test(full)) aiTropes.push('穿越后第一反应掏手机');
-        if (/白光.{0,10}(?:炸开|一闪)|眼前(?:一黑|白光)/.test(full)) aiTropes.push('AI穿越标配白光/眼前一黑');
+        if (/(?:穿越|重生).{0,20}(?:第一时间|第一反应|第一个念头).{0,10}(?:查看手机|摸手机|掏手机|看手机)/.test(full) && !/手机/.test(conceptExempt)) aiTropes.push('穿越后第一反应掏手机');
+        if (/白光.{0,10}(?:炸开|一闪)|眼前(?:一黑|白光)/.test(full) && !/眼前一黑|眼前发黑|眼前一花|白光|眩晕|昏迷/.test(conceptExempt)) aiTropes.push('AI穿越标配白光/眼前一黑');
         if (/龙傲天|林傲天|叶傲天|楚傲天|傲天.{0,4}(少爷|哥)|踩在.{0,6}脸上.{0,12}(废物|蝼蚁)/.test(full) && !/傲天/.test(String(novel.concept || ''))) aiTropes.push('龙傲天式反派+踩脸羞辱模板');
         if (aiTropes.length) behaviorIssues.push(`AI网文套路：检测到"${aiTropes.join('、')}"，属AI生成的典型模板情节，必须删除，用具体的场景与动作开篇`);
       } catch { /* 套路检测失败不阻塞 */ }
@@ -4455,20 +4533,26 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
       // 已达重试上限：用定向润色修复问题，而不是直接保存未修复版本
       send({ type: 'status', message: `自动重试 ${MAX_AUTO_REGENERATE} 次仍有 ${problems.length} 处问题，正在定向润色修复…` });
       try {
-        const fixed = await iteratePolish(config, novel, full, {
-          onStatus: (m) => send({ type: 'status', message: m }),
-          maxRounds: 3,
-          opts: {
-            knowledgeBlock, skillsBlock, genre: novel.genre,
-            extraIssues: problems.map(p => p.desc).slice(0, 5),
-            ...buildStyleInjection(novel, full.slice(0, 2000))
+        if (llmRewriteBudget > 0) {
+          const fixed = await iteratePolish(config, novel, full, {
+            onStatus: (m) => send({ type: 'status', message: m }),
+            maxRounds: Math.min(3, llmRewriteBudget),
+            opts: {
+              knowledgeBlock, skillsBlock, genre: novel.genre,
+              novelVoice: buildNovelVoiceAnchor(novel, idx),
+              extraIssues: problems.map(p => p.desc).slice(0, 5),
+              ...buildStyleInjection(novel, full.slice(0, 2000))
+            }
+          });
+          if (fixed.text && fixed.text.trim()) {
+            full = fixed.text.trim();
+            finalDetect = fixed.lastDetect;
+            finalBlacklist = fixed.blacklist;
+            finalRounds = fixed.rounds;
           }
-        });
-        if (fixed.text && fixed.text.trim()) {
-          full = fixed.text.trim();
-          finalDetect = fixed.lastDetect;
-          finalBlacklist = fixed.blacklist;
-          finalRounds = fixed.rounds;
+          llmRewriteBudget -= fixed.rounds.length;
+        } else {
+          send({ type: 'status', message: '本章改写预算已用完，跳过定向润色，保留当前版本' });
         }
       } catch { /* 润色失败保留原版本 */ }
       send({ type: 'status', message: `定向润色完成，保存当前版本（仍建议在章节操作中继续修改）` });
@@ -4495,28 +4579,39 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
     }
 
     // 自动去除 AI 味（autoPolish 开关）：质量门通过后，若开启则再跑一轮 iteratePolish，
-    // 从机制上进一步压低 AI 分，此时只要求不再命中高频词即为收敛（避免与质量门双重过头）
+    // 从机制上进一步压低 AI 分，此时只要求不再命中高频词即为收敛（避免与质量门双重过头）。
+    // 质量门已达标（评分低于阈值且无黑名单词）时直接跳过——对已干净的原稿再跑整章改写只会
+    // 把文字往模型默认文风洗，AI 味不降反升
     if (strictMode() && config.autoPolish) {
-      try {
-        send({ type: 'status', message: `正在按开关自动去除 AI 味…` });
-        const iter = await iteratePolish(config, novel, full, {
-          onStatus: (m) => send({ type: 'status', message: m }),
-          maxRounds: AI_MAX_ROUNDS,
-          opts: {
-            knowledgeBlock, skillsBlock, genre: novel.genre,
-            extraIssues: structureFixes.length ? structureFixes : undefined,
-            ...buildStyleInjection(novel, full.slice(0, 2000))
+      const alreadyClean = (finalDetect?.score ?? 0) <= aiScorePass() && (finalBlacklist?.length ?? 0) === 0;
+      if (alreadyClean) {
+        send({ type: 'status', message: `本章已通过质量门且无高频词残留，跳过自动去 AI 味（保留原稿语感）` });
+      } else if (llmRewriteBudget <= 0) {
+        send({ type: 'status', message: '本章改写预算已用完，跳过自动去 AI 味' });
+      } else {
+        try {
+          send({ type: 'status', message: `正在按开关自动去除 AI 味…` });
+          const iter = await iteratePolish(config, novel, full, {
+            onStatus: (m) => send({ type: 'status', message: m }),
+            maxRounds: Math.min(AI_MAX_ROUNDS, llmRewriteBudget),
+            opts: {
+              knowledgeBlock, skillsBlock, genre: novel.genre,
+              novelVoice: buildNovelVoiceAnchor(novel, idx),
+              extraIssues: structureFixes.length ? structureFixes : undefined,
+              ...buildStyleInjection(novel, full.slice(0, 2000))
+            }
+          });
+          if (iter.text && iter.text.trim()) {
+            full = iter.text.trim();
+            finalDetect = iter.lastDetect;
+            finalBlacklist = iter.blacklist;
+            finalRounds = iter.rounds;
+            lastProblems = iter.blacklist.length ? [{ desc: `去 AI 味后仍命中高频词：${iter.blacklist.join('、')}` }] : [];
+            send({ type: 'status', message: `自动去 AI 味完成，最终评分 ${iter.rounds.at(-1)?.score ?? iter.lastDetect.score ?? 0}${lastProblems.length ? '，仍有少量高频词残留' : '，全部达标'}` });
           }
-        });
-        if (iter.text && iter.text.trim()) {
-          full = iter.text.trim();
-          finalDetect = iter.lastDetect;
-          finalBlacklist = iter.blacklist;
-          finalRounds = iter.rounds;
-          lastProblems = iter.blacklist.length ? [{ desc: `去 AI 味后仍命中高频词：${iter.blacklist.join('、')}` }] : [];
-          send({ type: 'status', message: `自动去 AI 味完成，最终评分 ${iter.rounds.at(-1)?.score ?? iter.lastDetect.score ?? 0}${lastProblems.length ? '，仍有少量高频词残留' : '，全部达标'}` });
-        }
-      } catch { /* 自动去 AI 味失败不阻塞，保存质量门通过后的版本 */ }
+          llmRewriteBudget -= iter.rounds.length;
+        } catch { /* 自动去 AI 味失败不阻塞，保存质量门通过后的版本 */ }
+      }
     }
 
     // 文笔质量门：文笔总体分 < 6（平淡/对话生硬/句式呆板）时自动触发润色提升，而非仅发提示。
@@ -4554,6 +4649,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
           const needsPolish = wqScore == null || wqScore < 6;
           // 文笔达标但存在结构问题（称呼矛盾/场景错位/口癖固化等）时，仍强制一轮定向润色把问题修掉
           if (!needsPolish && structureFixes.length === 0) break;
+          if (llmRewriteBudget <= 0) { send({ type: 'status', message: '本章改写预算已用完，跳过文笔润色' }); break; }
 
           const reason = wqScore == null ? '文笔评分解析异常' : (`文笔 ${wqScore}/10 偏低（${wqIssues || '表达平淡'}）`);
           send({ type: 'status', message: `${reason}，正在自动润色提升…` });
@@ -4561,12 +4657,13 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
             const wIter = await iteratePolish(config, novel, full, {
               onStatus: (m) => send({ type: 'status', message: m }),
               maxRounds: 1,
-              opts: { knowledgeBlock: wqKnowledgeBlock, skillsBlock: wqSkillsBlock, genre: novel.genre, extraIssues: structureFixes, ...buildStyleInjection(novel, full.slice(0, 2000)) }
+              opts: { knowledgeBlock: wqKnowledgeBlock, skillsBlock: wqSkillsBlock, genre: novel.genre, novelVoice: buildNovelVoiceAnchor(novel, idx), extraIssues: structureFixes, ...buildStyleInjection(novel, full.slice(0, 2000)) }
             });
             if (wIter.text && wIter.text.trim() && wIter.text.trim().length >= Math.floor(full.length * 0.5)) {
               full = wIter.text.trim();
               if (!wqWeak[0]) wqWeak[0] = wqIssues || '提升表达自然度';
             }
+            llmRewriteBudget -= wIter.rounds.length;
             // 本轮润色已携带全部结构问题；文笔达标纯走结构修复时清空，避免第二轮重复修复
             if (!needsPolish) structureFixes = [];
           } catch { /* 文笔润色失败不阻塞，保留原版 */ }
@@ -4589,17 +4686,18 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
             const crossIssues = (rd2.issues || []).slice(0, 4)
               .map((i) => `[${i.dimension || '可读性'}] ${i.suggestion || i.problem || ''}`)
               .filter(Boolean);
-            if (crossIssues.length) {
+            if (crossIssues.length && llmRewriteBudget > 0) {
               send({ type: 'status', message: '交叉读者发现可读性问题，正在按意见定向优化…' });
               const cIter = await iteratePolish(reviewerCfg, novel, full, {
                 onStatus: (m) => send({ type: 'status', message: m }),
                 maxRounds: 1,
-                opts: { knowledgeBlock, skillsBlock, genre: novel.genre, extraIssues: [...crossIssues, ...structureFixes], ...buildStyleInjection(novel, full.slice(0, 2000)) }
+                opts: { knowledgeBlock, skillsBlock, genre: novel.genre, novelVoice: buildNovelVoiceAnchor(novel, idx), extraIssues: [...crossIssues, ...structureFixes], ...buildStyleInjection(novel, full.slice(0, 2000)) }
               });
               if (cIter.text && cIter.text.trim() && cIter.text.trim().length >= Math.floor(full.length * 0.5)) {
                 full = cIter.text.trim();
                 send({ type: 'status', message: '交叉终审优化完成' });
               }
+              llmRewriteBudget -= cIter.rounds.length;
             }
           }
         }
@@ -5165,7 +5263,7 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
       const iter = await iteratePolish(config, novel, chapter.content, {
         onStatus: (m) => send({ type: 'status', message: m }),
         maxRounds: AI_MAX_ROUNDS,
-        opts: { knowledgeBlock, skillsBlock, genre: novel.genre, ...buildStyleInjection(novel, String(chapter.content || '').slice(0, 2000)) }
+        opts: { knowledgeBlock, skillsBlock, genre: novel.genre, novelVoice: buildNovelVoiceAnchor(novel, chapter.chapter_index), ...buildStyleInjection(novel, String(chapter.content || '').slice(0, 2000)) }
       });
       if (!iter.text.trim()) return end({ type: 'error', message: 'AI 未返回内容，请重试。' });
       const finalText = cleanAiText(iter.text.trim());
@@ -5361,6 +5459,7 @@ router.post('/novels/:id/chapters/:idx/polish-by-dna', async (req, res) => {
       maxRounds: 2,
       opts: {
         genre: novel.genre,
+        novelVoice: buildNovelVoiceAnchor(novel, chapter.chapter_index),
         extraIssues: devIssues,
         ...buildStyleInjection(novel, String(chapter.content || '').slice(0, 2000))
       }
@@ -6404,7 +6503,7 @@ router.post('/novels/:id/plan/versions/:vid/accept', async (req, res) => {
     acceptVersionRow(v.id);
     const prevAccepted = listVersions(novel.id).find((x) => x.id !== v.id && x.accepted === 1);
     appendChangeLog(novel.id, prevAccepted?.version_no || null, v.version_no, v.feedback, '采纳候选方案');
-    res.json({ novel: result });
+    res.json({ novel: result, preserved_chapters: result.preserved_chapters || 0 });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
