@@ -13,6 +13,7 @@ export const useSettingsStore = defineStore('settings', {
       maxTokens: 8192,
       contextLength: 32768,
       reasoning: 'off',
+      thinkingTasks: {},
       autoPolish: false,
       autoCompress: true,
       compressThreshold: 0.5

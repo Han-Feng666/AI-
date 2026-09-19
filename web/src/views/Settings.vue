@@ -683,6 +683,24 @@ const PROVIDERS = [
 
 const needKey = computed(() => store.llm_config.provider !== 'ollama');
 
+// 分阶段思考强度：四个生成环节独立档位，'inherit' 跟随全局 reasoning
+const THINKING_STAGES = [
+  { key: 'planning', label: '方案 / 大纲', tip: '结构规划与冲突设计靠推理，建议高' },
+  { key: 'writing', label: '章节正文', tip: '正文靠语感，建议中低——思考过强会产生计划腔' },
+  { key: 'analysis', label: '检测 / 分析', tip: '找问题需要逐段比对，建议中高' },
+  { key: 'polishing', label: '润色 / 摘要', tip: '按清单定向改写，建议中' }
+];
+
+function ensureThinkingTask(key) {
+  if (!store.llm_config.thinkingTasks || typeof store.llm_config.thinkingTasks !== 'object') {
+    store.llm_config.thinkingTasks = {};
+  }
+  const v = store.llm_config.thinkingTasks[key];
+  if (v === 'inherit' || v === undefined || v === null || v === '') {
+    delete store.llm_config.thinkingTasks[key];
+  }
+}
+
 // 模型名 → 该模型支持的最大上下文窗口（token）。按前缀匹配，命中即返回；匹配不到返回空（保留用户手动值）。
 const MODEL_CONTEXT_HINTS = [
   // 官方长上下文旗舰优先
@@ -959,6 +977,23 @@ async function onUpdateFileChosen(e) {
             </el-select>
           </el-form-item>
         </div>
+
+        <el-form-item label="分阶段思考强度（按生成环节单独控制，优先于上面的全局档位）">
+          <div class="thinking-stages">
+            <div class="thinking-stage-row" v-for="st in THINKING_STAGES" :key="st.key">
+              <span class="thinking-stage-label">{{ st.label }}</span>
+              <el-select v-model="store.llm_config.thinkingTasks[st.key]" size="small" style="width: 130px" @change="ensureThinkingTask(st.key)">
+                <el-option label="跟随全局" value="inherit" />
+                <el-option label="关闭" value="off" />
+                <el-option label="低" value="low" />
+                <el-option label="中" value="medium" />
+                <el-option label="高" value="high" />
+                <el-option label="极高" value="xhigh" />
+              </el-select>
+              <span class="thinking-stage-tip">{{ st.tip }}</span>
+            </div>
+          </div>
+        </el-form-item>
 
         <div class="two-col">
           <el-form-item label="温度（越高越有创造性）">
@@ -1481,6 +1516,10 @@ async function onUpdateFileChosen(e) {
 }
 .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px 20px; }
 .field-tip { font-size: 12px; color: #9ca3af; margin: -2px 0 16px; line-height: 1.6; }
+.thinking-stages { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.thinking-stage-row { display: flex; align-items: center; gap: 10px; }
+.thinking-stage-label { width: 92px; flex: none; font-size: 13px; color: #d1d5db; }
+.thinking-stage-tip { font-size: 12px; color: #9ca3af; flex: 1; line-height: 1.4; }
 .memory-tip {
   font-size: 12px;
   color: #047857;

@@ -14,6 +14,7 @@ import {
   scanStructureBalance, scanCrossChapterRepeats, longestDuplicateLength,
   scanTimelineContradiction, scanKinshipTitleConflict, scanSceneElementMismatch,
   scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop, scanDenyReframe,
+  scanRhetoricPileup, scanToldEmotion, scanOverBut,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
@@ -374,7 +375,7 @@ async function iteratePolish(config, novel, text, { onStatus, maxRounds = AI_MAX
 
     const pRes = await chat({
       config,
-      task: 'writing',
+      task: 'polishing',
       messages: [
         { role: 'system', content: buildPolishWithIssues(
           getStyles(parseStyleIds(novel)),
@@ -441,7 +442,7 @@ async function iteratePlotFix(config, novel, text, issues, { onStatus } = {}) {
 
     const r = await chat({
       config,
-      task: 'writing',
+      task: 'polishing',
       messages: [
         { role: 'system', content: buildPlotFixSystem(
           getStyles(parseStyleIds(novel)),
@@ -4578,6 +4579,9 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         structureFixes.push(...scanBeatEcho(full));
         structureFixes.push(...scanActionLoop(full));
         structureFixes.push(...scanDenyReframe(full));
+        structureFixes.push(...scanRhetoricPileup(full));
+        structureFixes.push(...scanToldEmotion(full));
+        structureFixes.push(...scanOverBut(full));
 
         // 5b) 跨章口癖固化：最近 3 章正文与本章比对，找出"每章同款"的固化短语
         const priorRows = db.prepare(
@@ -4801,7 +4805,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
             send({ type: 'status', message: `检测到质感提升空间（${elevateIssues.map((i) => i.type).join('、')}），正在做加法增强…` });
             const eRes = await chat({
               config,
-              task: 'writing',
+              task: 'polishing',
               messages: [
                 { role: 'system', content: buildElevateSystem(
                   getStyles(parseStyleIds(novel)),
@@ -5425,7 +5429,7 @@ router.post('/novels/:id/chapters/:idx/polish', async (req, res) => {
         { role: 'user', content: `以下是一章小说原稿。请按人类写作风格整体改写，彻底去除一切 AI 痕迹，保留剧情与人设。\n\n原稿：\n${chapter.content}` }
       ], {
         ctrl,
-        task: 'writing',
+        task: 'polishing',
         maxTokens: Math.max(4000, Math.min(32000, (chapter.content.length + 2000) * 2)),
         onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
       });

@@ -32,6 +32,19 @@ export function normalizeLLMConfig(cfg) {
   if (out.contextLength !== undefined) out.contextLength = toNum(out.contextLength, 32768);
   if (out.max_tokens !== undefined) out.max_tokens = toNum(out.max_tokens, 8192);
   if (out.compressThreshold !== undefined) out.compressThreshold = Math.min(0.95, Math.max(0.1, toNum(out.compressThreshold, 0.5)));
+  // 分阶段思考强度：{ planning, writing, analysis, summary } 每项 'off'|'low'|'medium'|'high'|'xhigh'|'inherit'
+  // 非法键与非法档位值直接丢弃，防御前端传脏数据
+  if (out.thinkingTasks && typeof out.thinkingTasks === 'object' && !Array.isArray(out.thinkingTasks)) {
+    const VALID = new Set(['off', 'low', 'medium', 'high', 'xhigh', 'inherit']);
+    const clean = {};
+    for (const [k, v] of Object.entries(out.thinkingTasks)) {
+      if (VALID.has(String(v))) clean[k] = String(v);
+    }
+    if (Object.keys(clean).length) out.thinkingTasks = clean;
+    else delete out.thinkingTasks;
+  } else {
+    delete out.thinkingTasks;
+  }
   return out;
 }
 
@@ -1411,6 +1424,71 @@ export function scanDenyReframe(text) {
       rather ? `"与其说…不如说"×${rather}` : ''
     ].filter(Boolean).join('、');
     issues.push(`否定改口腔（${detail}）——"陈述A，立刻收回说其实是B"的自我改口句式是 AI 假装机智的标志性修辞。全章最多保留 1 处真正有信息量的改口，其余改成直接陈述最终事实（如"书脊上的字他认不全，繁体字混着更古的写法"与"一个都不认识——不是不认识，是认不全"同样达意且更干净）`);
+  }
+  return issues;
+}
+
+// 修辞堆砌检测（Rhetoric Pileup）：真人写作修辞点缀情节，AI 把修辞当正文主体。
+// 四类独立计数，各自有独立阈值，合并输出——
+// ① 明喻密度："像/仿佛/如同/好似/宛如/像是/就像"每千字超过 4 处为堆砌
+// ② 段末升华：段落最后一句突然拔高总结（"这一刻他明白了…"/"他忽然觉得，这就是…"/"或许，这就是…",
+//    含"原来…不过/不过就是"式顿悟总结），≥3 处为堆砌
+// ③ 排比三连："有X，有Y，还有Z"/"没有X，没有Y，也没有Z"/"X的，Y的，Z的"式三连排比 ≥3 组为堆砌
+// ④ 程度副词滥用："几乎/仿佛/似乎/显得/颇为/格外/异常/极其"每千字超过 6 处为滥用
+export function scanRhetoricPileup(text) {
+  const s = String(text || '');
+  if (s.length < 600) return [];
+  const issues = [];
+  const count = (re) => (s.match(re) || []).length;
+  const perK = (n) => n / Math.max(1, s.length / 1000);
+  const detail = [];
+
+  const simile = count(/(像是?|仿佛|如同|好似|宛如|恍如|恰似|犹如)/g);
+  if (perK(simile) > 4) detail.push(`明喻×${simile}（${perK(simile).toFixed(1)}/千字）`);
+
+  // 段末升华：以"明白了/懂得/意识到/忽然觉得/或许这就是/这就是/原来…不过是"收束的句子
+  const elevate = count(/[。！？\n]\s*[^。！？\n]{0,25}(这(一)?刻(他|她)?(忽然|突然)?(明白|懂|意识)|忽然(觉得|明白)|突然(觉得|明白)|或许[，,]?这就是|这就是(所谓|真正|生活|人生|长大|命运)|原来[^。]{0,12}(不过是|只是)|一切都(值得|不一样了|不同了))/g);
+  if (elevate >= 3) detail.push(`段末升华×${elevate}`);
+
+  // 排比三连："有X有Y有Z/没有…没有…也没有/一边…一边"式与顿号三连式
+  const triplet = count(/(有的?[^，。\n]{1,8}[，,]有的?[^，。\n]{1,8}[，,]还有的?|没有[^，。\n]{1,8}[，,]没有[^，。\n]{1,8}[，,](也)?没有|一边[^，。\n]{1,10}[，,]一边[^，。\n]{1,10}[，,]一边)/g);
+  if (triplet >= 3) detail.push(`排比三连×${triplet}`);
+
+  const hedge = count(/(几乎|似乎|显得|颇为|格外|异常|极其|莫名地?|无端地?)/g);
+  if (perK(hedge) > 6) detail.push(`程度副词×${hedge}（${perK(hedge).toFixed(1)}/千字）`);
+
+  if (detail.length) {
+    issues.push(`修辞堆砌（${detail.join('、')}）——修辞密度是 AI 文最直观的指纹：真人用比喻服务于具体场景，AI 每段都要来一个明喻；真人段落结束时情节往前走，AI 段落结束时总要升华总结一下。请把明喻删到全章每千字 2 个以内、段末升华清零（让情节本身收尾），排比三连拆散，程度副词能删则删`);
+  }
+  return issues;
+}
+
+// 情绪直给检测（Told Emotion）：直接命名情绪词而不写身体反应与行为——
+// "他感到愤怒/一阵委屈涌上心头/她心里一暖/恐惧攫住了他"。
+// 展示优于讲述（show, don't tell）是小说基本功，AI 默认直给情绪词因为它最快最稳。
+// ≥4 处才报（真人偶尔也会用），只做定向润色信号。
+export function scanToldEmotion(text) {
+  const s = String(text || '');
+  if (s.length < 600) return [];
+  const issues = [];
+  const emotion = /(感到(愤怒|委屈|害怕|恐惧|紧张|欣慰|心酸|愧疚|沮丧|绝望|愤怒|愤怒|高兴|开心|踏实|庆幸|后怕)|一阵(委屈|愤怒|酸楚|暖意|寒意|恐惧|失落|欣慰|愧疚|恶心)(涌上|袭来|爬上|掠过|涌遍|传遍|从)[^。]{0,8}|心里一(暖|酸|沉|紧|凉|软|颤)|心头一(暖|酸|沉|紧|凉|软)|(愤怒|恐惧|委屈|悲伤|绝望|嫉妒)攫住(了)?|被(愤怒|恐惧|悲伤|喜悦)淹没|(涌起|升起)一股(无名火|酸楚|暖意|寒意))/g;
+  const hits = s.match(emotion) || [];
+  if (hits.length >= 4) {
+    issues.push(`情绪直给×${hits.length}（如"${hits.slice(0, 3).join('"、"')}"）——直接命名情绪是讲述，写出身体反应和行为才是展示："他感到愤怒"可改成"他把杯子墩在桌上，茶水溅出来烫了手背也没管"。请把命名的情绪改写为可观察的动作、生理反应或对话变化，每处单独处理，保留情节原样`);
+  }
+  return issues;
+}
+
+// 转折词滥用检测（Over-Butting）：真人转折有节制，AI 平均每段都要"但是/可是/然而/却"一下。
+// 每千字超过 5 个转折连词为滥用，只做定向润色信号。
+export function scanOverBut(text) {
+  const s = String(text || '');
+  if (s.length < 600) return [];
+  const issues = [];
+  const but = (s.match(/(但是|可是|然而|却|不过)[，,]?/g) || []).length;
+  const perK = but / Math.max(1, s.length / 1000);
+  if (perK > 5) {
+    issues.push(`转折词滥用×${but}（${perK.toFixed(1)}/千字）——"但是/可是/然而/却"是 AI 制造戏剧感最偷懒的工具，真人写作大量语句直接顺承推进。请删掉一半以上的转折词：能顺承的就直接顺下去，真有反转的保留转折`);
   }
   return issues;
 }

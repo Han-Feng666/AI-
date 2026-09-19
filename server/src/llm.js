@@ -273,17 +273,33 @@ export async function chat(opts) {
   }
 
   // 思考功能：按 provider/模型注入对应参数（不支持的环境静默忽略，避免 400）
-  const reasoning = String(cfg.reasoning || 'off').toLowerCase();
+  // thinkingFor()：先看该任务是否有独立思考档位（cfg.thinkingTasks[task]），
+  // 未配置时回退全局 cfg.reasoning；'inherit' 表示跟随全局
+  const resolveEffort = () => {
+    const perTask = cfg.thinkingTasks && typeof cfg.thinkingTasks === 'object'
+      ? cfg.thinkingTasks : null;
+    if (perTask && task && perTask[task] && perTask[task] !== 'inherit') {
+      return String(perTask[task]).toLowerCase();
+    }
+    return String(cfg.reasoning || 'off').toLowerCase();
+  };
+  const reasoning = resolveEffort();
   const model = String(cfg.model || '').toLowerCase();
   // DeepSeek V4 系列（deepseek-v4-pro / deepseek-v4-flash）：思考参数为 extra_body.thinking + reasoning_effort
   const isDeepSeekV4 = /deepseek[-._]?v4[-._]?(pro|flash)?/.test(model);
   // 旧版模型名：deepseek-chat（非思考）/ deepseek-reasoner（思考）
   const isDeepSeekLegacy = /deepseek-chat|deepseek[-._]?reasoner/.test(model);
-  if (reasoning !== 'off') {
+  // 档位映射：off → 显式关闭思考；low/medium/high/xhigh → 开启并映射 effort 档位。
+  // DeepSeek V4 的 thinking.type 取值是 enabled/disabled（官方开关），reasoning_effort 取档位；
+  // OpenAI 兼容网关通用参数是 reasoning_effort（low/medium/high），DeepSeek V3.1+ 与多数新网关兼容。
+  // 不在 {off,low,medium,high,xhigh} 里的值按 'off' 处理（防御历史脏数据）
+  const effort = reasoning === 'xhigh' ? 'high' : reasoning;
+  const EFFORT_RANK = new Set(['low', 'medium', 'high']);
+  if (reasoning === 'off' || !EFFORT_RANK.has(effort)) {
     if (cfg.provider === 'ollama') {
-      body.think = true;
+      body.think = false;
     } else if (cfg.provider === 'qwen') {
-      body.enable_thinking = true;
+      body.enable_thinking = false;
     } else if (isDeepSeekV4) {
       body.thinking = { type: 'disabled' };
       // reasoning_effort=none 与 thinking.type=disabled 一致，API 规则要求两者搭配
@@ -291,6 +307,23 @@ export async function chat(opts) {
       body.reasoning_effort = 'none';
     } else if (isDeepSeekLegacy) {
       body.enable_thinking = false;
+    }
+  } else {
+    if (cfg.provider === 'ollama') {
+      body.think = true;
+    } else if (cfg.provider === 'qwen') {
+      body.enable_thinking = true;
+    } else if (isDeepSeekV4) {
+      body.thinking = { type: 'enabled' };
+      // xhigh 归一到 high（DeepSeek effort 只有 low/medium/high 三档）
+      body.reasoning_effort = effort;
+    } else if (isDeepSeekLegacy && /reasoner/.test(model)) {
+      // deepseek-reasoner 恒开思考；deepseek-chat 不支持思考参数（注入反而 400）
+      body.reasoning_effort = effort;
+    } else if (!isDeepSeekLegacy) {
+      // 其他 OpenAI 兼容网关（如 new-api 变体）：reasoning_effort 通用参数，
+      // 不支持的网关走 400 参数自愈链剔除，不影响请求
+      body.reasoning_effort = effort;
     }
   }
 
