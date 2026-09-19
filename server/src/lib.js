@@ -1385,6 +1385,36 @@ export function scanActionLoop(text) {
   return issues;
 }
 
+// 否定改口腔检测（Deny-Reframe）：陈述A后立刻用破折号/逗号收回重说（"一个都不认识——不是不认识，是认不全"
+// "不是不X，是Y"），或堆叠"不是A，而是B"定义式对照、"与其说A不如说B"机灵总结。
+// 这是 LLM 假装机智/制造"深刻感"的标志性修辞，真人偶尔用一次，AI 当万能工具反复用。
+// 只做定向润色信号（≥2 处才报，保留 1 处有信息量的改口空间），不触发重生成。
+export function scanDenyReframe(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const issues = [];
+  const count = (re) => (s.match(re) || []).length;
+  // ① 破折号自我改口："X——不是(不)X" 陈述后立刻收回
+  const dashRetract = count(/——\s*(不是|并非|也不是|而是)/g);
+  // ② 双重否定改口："不是不X，是/而是Y"
+  const doubleNeg = count(/不是[^。！？\n]{0,6}不[^。！？\n]{0,10}[，,]\s*(是|而是|应该?是)/g);
+  // ③ "不是A，而是B"定义式对照密度
+  const denyReframe = count(/(不是|并非|并不是)[^。！？\n；]{1,15}(，|,)\s*(而是|反倒(是)?|是)/g);
+  // ④ "与其说A，不如说B"
+  const rather = count(/与其说[^。！？\n]{1,20}不如说/g);
+  const perK = denyReframe / Math.max(1, s.length / 1000);
+  if (dashRetract + doubleNeg >= 2 || denyReframe >= 4 || perK >= 2.5 || rather >= 2) {
+    const detail = [
+      dashRetract ? `破折号改口×${dashRetract}` : '',
+      doubleNeg ? `双重否定改口×${doubleNeg}` : '',
+      denyReframe ? `"不是…是…"对照×${denyReframe}` : '',
+      rather ? `"与其说…不如说"×${rather}` : ''
+    ].filter(Boolean).join('、');
+    issues.push(`否定改口腔（${detail}）——"陈述A，立刻收回说其实是B"的自我改口句式是 AI 假装机智的标志性修辞。全章最多保留 1 处真正有信息量的改口，其余改成直接陈述最终事实（如"书脊上的字他认不全，繁体字混着更古的写法"与"一个都不认识——不是不认识，是认不全"同样达意且更干净）`);
+  }
+  return issues;
+}
+
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
 export function scanAiPunctuation(text) {
   const s = String(text || '');

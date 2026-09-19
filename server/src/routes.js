@@ -13,7 +13,7 @@ import {
   scanAiPatterns, blacklistPenalty, blacklistFlagWords, cleanAiText, scanTopicDrift,
   scanStructureBalance, scanCrossChapterRepeats, longestDuplicateLength,
   scanTimelineContradiction, scanKinshipTitleConflict, scanSceneElementMismatch,
-  scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop,
+  scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop, scanDenyReframe,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
@@ -4577,6 +4577,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         }
         structureFixes.push(...scanBeatEcho(full));
         structureFixes.push(...scanActionLoop(full));
+        structureFixes.push(...scanDenyReframe(full));
 
         // 5b) 跨章口癖固化：最近 3 章正文与本章比对，找出"每章同款"的固化短语
         const priorRows = db.prepare(
