@@ -13,6 +13,7 @@ import {
   scanAiPatterns, blacklistPenalty, blacklistFlagWords, cleanAiText, scanTopicDrift,
   scanStructureBalance, scanCrossChapterRepeats, longestDuplicateLength,
   scanTimelineContradiction, scanKinshipTitleConflict, scanSceneElementMismatch,
+  scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
@@ -4564,6 +4565,18 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         }
         structureFixes.push(...scanKinshipTitleConflict(full));
         structureFixes.push(...scanSceneElementMismatch(full));
+
+        // 5a3) 章内设定漂移（免费正则，模型无关）：
+        //      品级漂移（"从六品"变"正五品"）、系统条款漂移（"爆毙"变轻惩罚）→ 触发重生成；
+        //      节拍复读（雨×7/凉×5）、动作回环（掐腿确认×2、更衣×2）→ 定向润色。
+        for (const rankIssue of scanRankDrift(full)) {
+          problems.push({ desc: `设定漂移：${rankIssue}` });
+        }
+        for (const ruleIssue of scanRuleDrift(full)) {
+          problems.push({ desc: `设定漂移：${ruleIssue}` });
+        }
+        structureFixes.push(...scanBeatEcho(full));
+        structureFixes.push(...scanActionLoop(full));
 
         // 5b) 跨章口癖固化：最近 3 章正文与本章比对，找出"每章同款"的固化短语
         const priorRows = db.prepare(

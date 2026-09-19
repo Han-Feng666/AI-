@@ -1253,6 +1253,138 @@ export function scanSceneElementMismatch(text) {
   return issues;
 }
 
+// 官职/等级身份漂移检测：同一头衔在章内出现两种不同的品级/等级/段位修饰，
+// 且中间没有修正性表述（"其实""原来""准确地说"等），判定为设定漂移硬伤。
+// 案例：先写"太史令（从六品）"，后文又写"太史令，正五品的官儿"。
+export function scanRankDrift(text) {
+  const s = String(text || '');
+  if (s.length < 200) return [];
+  const issues = [];
+  // 捕获 "头衔，/是 + 品级" 或 "品级 + 的 + 头衔" 两种表述（品级词：正/从/副 + 数字 + 品；或 X级/阶/段/星）
+  const rankRe = /(正|从|副)?\s*([一二三四五六七八九十]{1,2}|[0-9]{1,2})\s*(品|级|阶|段|星)\s*(?:的|官儿|官员)?/g;
+  const titleRe = /(太史令|尚书|侍郎|御史|知府|知县|将军|都尉|校尉|提督|总兵|统领|掌门|长老|宗主|殿主|阁主|城主|院长|会长|队长|团长|祭酒|司业)/;
+  // 策略：找每个"品级短语"出现处，检查其前后 40 字窗口内的头衔，配对成 (头衔, 品级)
+  const rankMarks = [];
+  for (const m of s.matchAll(rankRe)) {
+    const ctx = s.slice(Math.max(0, m.index - 40), m.index + m[0].length + 10);
+    const t = ctx.match(titleRe);
+    if (t) rankMarks.push({ title: t[0], rank: m[0].replace(/的|官儿|官员|\s/g, ''), index: m.index, label: `${t[0]}·${m[0].trim()}` });
+  }
+  for (let i = 0; i < rankMarks.length; i++) {
+    for (let j = i + 1; j < rankMarks.length; j++) {
+      const a = rankMarks[i], b = rankMarks[j];
+      if (a.title !== b.title) continue;
+      if (a.rank === b.rank) continue;
+      const between = s.slice(a.index + a.label.length, b.index);
+      // 有修正表述则放过（作者自己改口是有意的）
+      if (/(其实|原来|准确(来|地)说|确切(来|地)说|应该说|严格来(讲|说)|也就是说|换句话说|后来|升|贬|擢|降为|改授|调任)/.test(between)) continue;
+      const msg = `身份品级漂移：${a.title} 既是「${a.rank}」又是「${b.rank}」（中间无升贬/改授/修正表述）——全章统一为同一品级`;
+      if (!issues.includes(msg)) issues.push(msg);
+      break;
+    }
+    if (issues.length >= 3) break;
+  }
+  return issues;
+}
+
+// 章内设定条款漂移检测：系统/规则/契约类设定，首次出现时写明条款（任务内容/时限/惩罚），
+// 后文复述时参数变了（任务变简单、时限变宽、惩罚从"爆毙/抹除"降级为"惩罚"）且无剧情内理由。
+// 策略：检测同一规则被复述时惩罚措辞强度降级——首次出现硬惩罚（爆毙/抹除等）+ 明确触发条件，
+// 后文复述同一规则时只剩模糊惩罚（"要他的命"算转述放过）或完全丢失触发条件且中间无剧情内解除。
+export function scanRuleDrift(text) {
+  const s = String(text || '');
+  if (s.length < 200) return [];
+  const issues = [];
+  // 模式一：惩罚词降级。强惩罚（爆毙/抹除/处死）先出现，其后又出现"惩罚：X"或"惩罚是X"且 X 为弱词，
+  // 中间无剧情内解除理由（升级/豁免/完成/更新）→ 判漂移
+  const strongRe = /(爆毙|抹除|魂飞魄散|形神俱灭|灰飞烟灭|形销魄散)/g;
+  const weakDeclRe = /惩罚(?:是|为|：|:)\s*([^(爆毙|抹除|魂飞魄散|形神俱灭|灰飞烟灭)]{1,12})(?=[。！？\s]|$)/g;
+  let strongPos = -1;
+  for (const m of s.matchAll(strongRe)) { strongPos = m.index; break; }
+  if (strongPos !== -1) {
+    for (const m of s.matchAll(weakDeclRe)) {
+      if (m.index <= strongPos) continue;
+      const weakWord = (m[1] || '').trim();
+      if (!weakWord) continue;
+      if (/(爆毙|抹除|死|亡|毁灭|消失)/.test(weakWord)) continue; // 弱声明里实际是强词，放过
+      const between = s.slice(strongPos, m.index);
+      if (/(系统(空间|面板|升级|更新)|任务(完成|达成)|豁免|解除|升级|更新|新规则)/.test(between)) continue;
+      issues.push(`设定条款漂移：前文系统的惩罚是硬性致命条款（爆毙/抹除类），后文写"惩罚：${weakWord}"且无剧情内交代——系统规则前后必须一致`);
+      break;
+    }
+  }
+  return issues;
+}
+
+// 节拍复读检测（Beat Echo）：同一个"感官/情绪节拍"在章内反复出现 4 次以上，
+// 是 LLM 无意识复读的最大来源。检测两类：
+//   ① 同一自然意象词（雨/风/雪/雾/灯/火/夜色 等）作为节拍反复被提及
+//   ② 同一身体感受词（凉/冷/热/暖/麻/疼/酸/僵）作为节拍反复被提及
+// 判定：组内任一词 ≥5 次，或组内 ≥2 个词各 ≥3 次（如"凉×4 + 冰凉×1"按词根归并计数）。
+export function scanBeatEcho(text) {
+  const s = String(text || '');
+  if (s.length < 500) return [];
+  const hits = [];
+  const IMAGERY = [['雨'], ['风'], ['雪'], ['雾'], ['灯'], ['火光', '火苗'], ['夜色'], ['月光', '月色'], ['蝉鸣', '蝉声']];
+  const BODY = [['凉', '冰凉', '凉飕飕', '凉丝丝', '发凉'], ['冷', '冰冷', '发冷'], ['热', '燥热', '发烫', '发热'], ['麻', '发麻'], ['疼', '疼得'], ['僵', '发僵']];
+  // 词根归并计数：组内变体都累加到该组；但要排除长包含词被短词重复计（"冰凉"也含"凉"→ 组计数时先数长的）
+  const countGroup = (groups) => {
+    let consumed = s;
+    const counts = [];
+    for (const variants of groups) {
+      // 按长度降序数变体，数过的片段从文本中移除避免重复计数
+      const sorted = [...variants].sort((a, b) => b.length - a.length);
+      let c = 0;
+      for (const w of sorted) {
+        let from = 0;
+        while ((from = consumed.indexOf(w, from)) !== -1) { c++; from += w.length; }
+        consumed = consumed.split(w).join('□'.repeat(w.length));
+      }
+      counts.push({ name: variants[0], count: c });
+    }
+    return counts;
+  };
+  const report = (groups, label) => {
+    const counts = countGroup(groups);
+    // 单组 ≥5 次，或 ≥2 个组各 ≥3 次 → 报
+    const heavy = counts.filter((c) => c.count >= 5);
+    const mid = counts.filter((c) => c.count >= 3);
+    if (heavy.length || mid.length >= 2) {
+      const detail = counts.filter((c) => c.count >= 3).map((c) => `${c.name}×${c.count}`).join('、');
+      hits.push(`${label}节拍复读：${detail}——同一意象/体感全章反复出现，是 AI 无意识复读。开头一次建立氛围即可，其余删掉或换成别的感官通道`);
+    }
+  };
+  report(IMAGERY, '意象');
+  report(BODY, '体感');
+  return hits.slice(0, 2);
+}
+
+// 章内动作回环检测：同一段"准备做X"的动作被写两遍（如"更衣，上朝"后文又写翻柜子找袍子更衣），
+// 或同一确认动作反复发生（掐大腿确认不是梦出现两次）。
+// 策略：找"动词短语 + 了/着/完 + 后续"的最小动作对，同窗口内同一动作短语出现两次且第二次无"再次/又"等显式标记。
+export function scanActionLoop(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const issues = [];
+  const LOOPS = [
+    { re: /掐了?[^。]{0,4}(一)?(把|下)[^。]{0,6}(大腿|胳膊|脸|自己)|掐(?:了|一把|一下)?(?:大腿|胳膊|自己)/g, name: '掐自己确认' },
+    { re: /(整|理)了?(整|理)?衣(领|冠|袍|襟)/g, name: '整理衣领' },
+    { re: /(翻|找出?|换了?)[^。]{0,10}(袍子|衣服|朝服|衣裳)[^。]{0,8}(穿|换|套)/g, name: '翻找更衣' },
+    { re: /(把|将)?[^。]{0,6}纸(条|片)[^。]{0,6}(掏|抽|拿|塞)[^。]{0,4}(出|回|进)/g, name: '纸条掏塞' },
+    { re: /深?吸了?一口气/g, name: '深吸一口气' },
+    { re: /咬(了|了一口)?(?:舌尖|舌尖|嘴唇)/g, name: '咬舌确认' }
+  ];
+  for (const p of LOOPS) {
+    const ms = [...s.matchAll(p.re)];
+    if (ms.length >= 2) {
+      issues.push(`动作回环：同一动作「${p.name}」出现 ${ms.length} 次（如"${ms[0][0]}"、"${ms[1][0]}"）——同一确认/准备动作只写一次，重复的删掉或改为推进剧情的新动作`);
+      if (issues.length >= 3) break;
+    }
+    if (issues.length >= 3) break;
+  }
+  return issues;
+}
+
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
 export function scanAiPunctuation(text) {
   const s = String(text || '');
