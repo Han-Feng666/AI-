@@ -1493,6 +1493,48 @@ export function scanOverBut(text) {
   return issues;
 }
 
+// 上帝视角剧透腔检测（Omniscient Foreshadow）：网文 AI 最浓的指纹——叙述者跳出场景替读者剧透：
+// "他不知道的是，…"/"此时的X还不知道…"/"他更不会想到…"/"命运的齿轮开始转动"/"一切才刚刚开始"/
+// "这个故事要从…说起"。真人网文偶尔在卷首用一次，AI 每章结尾都要拽一句。
+// ≥2 处才报（保留卷首 1 次的合法用法），只做定向润色信号。
+export function scanOminousForeshadow(text) {
+  const s = String(text || '');
+  if (s.length < 600) return [];
+  const issues = [];
+  const hits = s.match(/(他|她|它|他们)?(还)?不知道的是|此时的?[^。！？\n]{1,10}(还|并)?不知道|更(不会|不曾)(想到|知道|料到)|万万没有想到|命运(?:的)?(?:齿轮|车轮|罗盘)(?:开始|缓缓|悄悄)?(转动|滚动|转向)?|一切(?:才)?刚刚开始|故事(?:要)?(?:得)?从[^。！？\n]{1,12}说起|(?:这|那)是(?:后话|后来[^。]{0,6}的事)了/g) || [];
+  if (hits.length >= 2) {
+    issues.push(`上帝视角剧透腔×${hits.length}（如"${hits.slice(0, 3).join('"、"')}"）——"他不知道的是""命运齿轮""一切才刚刚开始"是叙述者跳出故事替读者剧透，全知视角的陈词滥调。视角必须钉在当前场景人物身上：他不知道的事就别写，悬念靠场景内的信息差自然形成。请删除这些剧透句，改用场景内具体动作或对话收尾`);
+  }
+  return issues;
+}
+
+// 俗套神态动作检测（Cliche Gesture）：词级黑名单抓不到的变体形态——
+// "眸中掠过一丝X""唇角噙着笑""挑了挑眉""空气仿佛凝固""手指摩挲着杯壁""似笑非笑"。
+// 单一俗套出现 1 次可容忍，≥4 处说明整章神态描写全是模板拼装。
+export function scanClicheGesture(text) {
+  const s = String(text || '');
+  if (s.length < 600) return [];
+  const issues = [];
+  const count = (re) => (s.match(re) || []).length;
+  const detail = [];
+  const eye = count(/(眸(子|中|光|底)|眼眸|眼底|目光)([^。！？\n]{0,8})(闪|掠|浮|泛|漾|凝|染)/g);
+  if (eye >= 3) detail.push(`眼神闪动×${eye}`);
+  const lip = count(/(唇角|嘴角|薄唇|唇边)([^。！？\n]{0,6})(噙|勾|扬|浮|漾|翘)/g);
+  if (lip >= 3) detail.push(`唇角微动作×${lip}`);
+  const brow = count(/(挑了挑眉|扬了扬眉|皱了皱眉|蹙起眉|拧起眉|眉梢微挑|眉眼弯弯)/g);
+  if (brow >= 3) detail.push(`眉部模板×${brow}`);
+  const air = count(/空气([^。！？\n]{0,6})(凝固|安静|寂静|凝滞|沉重|稠)/g);
+  if (air >= 2) detail.push(`空气凝固×${air}`);
+  const stroke = count(/(摩挲|摩挲着|把玩着|捻着|转着)(笔|杯|茶杯|戒指|打火机|手机|钥匙)/g);
+  if (stroke >= 2) detail.push(`手中把玩×${stroke}`);
+  const halfsmile = count(/似笑非笑|笑意(不达眼底|渐深|更深)|玩味(的|地)(笑|看)|意味不明(的|地)(笑|看)/g);
+  if (halfsmile >= 2) detail.push(`玩味笑×${halfsmile}`);
+  if (detail.length >= 2 || (detail.length === 1 && (eye >= 5 || lip >= 5))) {
+    issues.push(`俗套神态模板（${detail.join('、')}）——神态描写全是网文模板拼装，真人给角色动作会绑定具体场景（他在做什么、面对谁、此刻手边有什么）。请把模板神态替换为与当前场景绑定的具体动作：让角色在做事的过程中流露情绪，而不是停下来摆表情`);
+  }
+  return issues;
+}
+
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
 export function scanAiPunctuation(text) {
   const s = String(text || '');

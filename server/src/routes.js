@@ -14,7 +14,7 @@ import {
   scanStructureBalance, scanCrossChapterRepeats, longestDuplicateLength,
   scanTimelineContradiction, scanKinshipTitleConflict, scanSceneElementMismatch,
   scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop, scanDenyReframe,
-  scanRhetoricPileup, scanToldEmotion, scanOverBut,
+  scanRhetoricPileup, scanToldEmotion, scanOverBut, scanOminousForeshadow, scanClicheGesture,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
@@ -4582,6 +4582,8 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         structureFixes.push(...scanRhetoricPileup(full));
         structureFixes.push(...scanToldEmotion(full));
         structureFixes.push(...scanOverBut(full));
+        structureFixes.push(...scanOminousForeshadow(full));
+        structureFixes.push(...scanClicheGesture(full));
 
         // 5b) 跨章口癖固化：最近 3 章正文与本章比对，找出"每章同款"的固化短语
         const priorRows = db.prepare(
