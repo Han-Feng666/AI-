@@ -678,3 +678,31 @@ Entries discovered by the Agent during task execution should follow this format:
   - 句长窗口教训：先实测 AI 输出的句长分布再定窗口（实测均匀句 35-36 字，直觉定的 10-30 窗口全部漏检）
   - 长度坑第 6/7 次确认：python heredoc 改测试文件的 replace 目标串有 typo 会静默失败，改用 Edit 工具；样本 repeat 计数要算好字数
   - 检测类别已至 40；铁律 22a-22n；9b 自查十项
+
+[Project Knowledge Summary]
+- Date: 2026-09-20
+- Context: 第十一轮增补二（v1.4.36, 见git log）系统题材矛盾禁令全库排查
+- Category: Build Methods
+- Instructions:
+  - 题材禁令铁律：禁单必须按用户勾选的题材动态生成——用户勾了X就严禁在禁单里出现"禁X"，否则模型收到矛盾指令会随机漂移到邻近题材（系统→血脉觉醒即此机制）
+  - 同源三处已修：/ideas 的 genreConformityBlock、prompts.js buildPlanGenreConformity、buildGenreBoundaryRule + routes.js 方案骨架"题材边界强调"；关键词表有三套（FANTASY_KEYWORDS/PLAN_FANTASY_KEYWORDS/SUPERNATURAL_TAGS），"系统流"都在但裸"系统"只在 SYSTEM_KEYWORDS/SUPERNATURAL_TAGS——改动题材判定时三套表都要核对
+  - 系统题材金手指纯净性：勾系统未勾玄幻时，金手指必须是纯系统载体（面板/任务/兑换/签到/模拟），血脉/灵根/传承/法宝/契约全禁
+
+[Project Knowledge Summary]
+- Date: 2026-09-20
+- Context: 第十二轮（v1.4.37）双女主题材+灵感四问+空泛描写检测
+- Category: Build Methods
+- Instructions:
+  - 双女主/双男主：GENRES 标签 + /ideas 的 dualBlock（isDualHeroine/isDualHero）+ IDEAS_SYSTEM 的 protagonist2 字段（含 relation）+ 前端卡片第二主角块；双层主角结构走 protagonist/protagonist2 双字段
+  - 灵感质量靠"优质创意四问"自检清单（金手指代价/钩子绑困境/反派自利/副线第二推动力）压在 IDEAS_SYSTEM 最高层，比加卖点多两句有效
+  - 第19扫描器 scanVagueAbstraction 挂 5a4（空泛感受/难以言喻/物在诉说/气息交织密度检测）；门槛 600
+  - 检测类别已至 41；测试文件拼接模板串时 add_p 常量必须定义在引用之前
+
+[Project Knowledge Summary]
+- Date: 2026-09-20
+- Context: v1.4.38-39 双男主移除/双女主感情线定位
+- Category: Build Methods
+- Instructions:
+  - 用户不要双男主题材（已从 GENRES/dualBlock/IDEAS_SYSTEM 全部移除）；双女主保留
+  - 双女主感情线按用户明确要求：感情文（含百合向爱情线）与羁绊文（姐妹/知己/搭档/亦敌亦友）都允许，由创意风格决定
+  - web/dist 在 gitignore 中，commit 时不要 add web/dist（会被拦截导致整个 commit 失败）；dist 由 build-and-patch 脚本打进补丁
