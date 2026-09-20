@@ -1535,6 +1535,89 @@ export function scanClicheGesture(text) {
   return issues;
 }
 
+// 主角名保护（Name Guard）：用户给角色起的名是硬约束，生成器无权改动。
+// 两层检测——
+// ① 硬伤：主角（role_type 含"主角"）的名字在正文中零出现 → 触发重生成。
+//    中文小说第一章必然点名主角，全文只出现"他/少年"而设定名一次都没有，
+//    大概率是模型擅自换了名字（陈若辰 → 陈辰安正是此类事故）。
+// ② 变体：正文中出现与某角色名"同姓且共享 ≥2 字"的相似名字（陈辰安 vs 陈若辰
+//    共享"陈""辰"）→ 疑似改名，进定向润色。配角也算——配角改名同样是事故。
+// characters 为 DB 角色行数组（至少含 name/role_type 字段）。
+export function scanNameGuard(characters, text) {
+  const s = String(text || '');
+  const hard = [];
+  const soft = [];
+  const list = Array.isArray(characters) ? characters.filter((c) => c && c.name) : [];
+  if (!s || s.length < 300 || !list.length) return { hard, soft };
+
+  const protags = list.filter((c) => String(c.role_type || '').includes('主角'));
+  const targets = protags.length ? protags : list.slice(0, 1);
+
+  // ① 主角名零出现
+  for (const p of targets) {
+    const name = String(p.name).trim();
+    if (name.length >= 2 && !s.includes(name)) {
+      hard.push(`主角名"${name}"在正文中零出现——角色名是用户设定的硬约束，必须逐字使用（姓+名完整出现），严禁改名、换字、缩写、谐音（如把"陈若辰"写成"陈辰安"）或用"少年/男人"全程替代。全章至少让主角名以完整姓名形式出现 2 次（对话称呼或旁白点名均可）`);
+    }
+  }
+
+  // ② 共字变体：姓开头 + 与原名共享 ≥2 字
+  const seen = new Set();
+  for (const c of list) {
+    const name = String(c.name).trim();
+    if (name.length < 2 || s.includes(name)) continue;
+    const surname = name[0];
+    const chars = new Set(name);
+    const re = new RegExp(`${surname}[\\u4e00-\\u9fff]{1,3}`, 'g');
+    for (const m of s.match(re) || []) {
+      if (m === name) continue;
+      let shared = 0;
+      for (const ch of new Set(m)) if (chars.has(ch)) shared++;
+      if (shared >= 2 && !seen.has(m)) {
+        // 候选裁剪：贪婪匹配可能吞掉人名后的汉字（"陈辰安是"），优先取与原名等长的前缀
+        let cand = m;
+        if (m.length > name.length) {
+          const sameLen = m.slice(0, name.length);
+          let sh2 = 0;
+          for (const ch of new Set(sameLen)) if (chars.has(ch)) sh2++;
+          if (sh2 >= 2 && sameLen !== name) cand = sameLen;
+        }
+        if (seen.has(cand)) continue;
+        seen.add(cand);
+        const who = protags.some((p) => p.name === name) ? '主角' : '角色';
+        soft.push(`正文中出现的"${cand}"与${who}设定名"${name}"高度相似（同姓共字），疑似生成时擅自改名——全章统一为设定名"${name}"，逐处核对替换`);
+      }
+    }
+  }
+  return { hard, soft };
+}
+
+// 开局模板检测（Opening Cliche）：LLM 生成第一章的默认开局模板——
+// "X是被一股焦味熏醒的。他趴在硬邦邦的桌面上，脸贴着一堆泛黄的纸页，左胳膊麻得
+// 没了知觉。屋里黑沉沉的，只有窗纸透着点青白的光，案头一盏烛台早烧尽了……那股子
+// 焦味就是从那儿来的。"
+// 六类特征：感官唤醒 / 姿态特写 / 身体麻木 / 暗屋单光源 / 光源特写 / 回环解释。
+// 判定：唤醒句式 + 任意 1 类，或模板特征 ≥3 类（无需唤醒）→ 触发重生成。
+// 只扫开头 450 字——模板开局是全书第一印象，润色修补不如整章重写。
+export function scanOpeningCliche(text) {
+  const s = String(text || '').slice(0, 450);
+  if (s.length < 150) return [];
+  const issues = [];
+  const feats = [];
+  if (/是被[^。！？\n]{1,14}(醒|熏醒|惊醒|吵醒)的|(熏醒|呛醒|冻醒|吵醒|惊醒|震醒|晃醒|硌醒|凉醒|疼醒)/.test(s)) feats.push('感官唤醒');
+  if (/(趴|伏|蜷|瘫)在[^。！？\n]{0,10}(硬邦邦|冰凉|发硬|硌)|脸贴着|(摸到|碰到|枕着|硌着?)[^。！？\n]{0,6}(硬邦邦|冰凉|发硬)/.test(s)) feats.push('姿态特写');
+  if (/(胳膊|手臂|腿|脚|半边脸|手指)(麻|僵)(得|的)(没了|失去|没有)知觉|麻得没了知觉/.test(s)) feats.push('身体麻木');
+  if (/(屋里|房间|屋内|室内)(黑沉沉|昏暗|漆黑|黑黢黢)|只有[^。！？\n]{0,12}(透着|漏进|映着|照进)/.test(s)) feats.push('暗屋单光源');
+  if (/烛(台|芯|火|光)(早|已|都)?(烧尽|燃尽|蜷成|将尽|结了灯花)|油灯(熬干|烧尽|结了灯花)|(快|已|早|将)(燃尽|烧尽|熬干)的(油灯|蜡烛|烛台|灯)/.test(s)) feats.push('光源特写');
+  if (/那股(子)?[^。！？\n]{0,6}(味|臭|香|声)[^。！？\n]{0,4}就是从(那儿|那里|这里|那头)来/.test(s)) feats.push('回环解释');
+
+  const nonAwaken = feats.filter((f) => f !== '感官唤醒');
+  if ((feats.includes('感官唤醒') && nonAwaken.length >= 1) || nonAwaken.length >= 3) {
+    issues.push(`开局撞上 AI 默认模板（${feats.join('、')}）——"被X熏醒/惊醒+趴在硬物上+胳膊麻+黑屋单光源+烛芯特写+那股味就是从那儿来的"是模型生成第一章的高频模板，几乎每本书都这么开。必须换开局：从主角正在做的具体事件中途切入（正在还价/正在翻墙/正在改卷子），或从一句有火药味的对话切入，或从一个反常瞬间切入（全考场只剩他的笔在响）。若概要指定了"醒来"场景，跳过醒来瞬间，直接写醒之后的第一个行动`);
+  }
+  return issues;
+}
+
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
 export function scanAiPunctuation(text) {
   const s = String(text || '');

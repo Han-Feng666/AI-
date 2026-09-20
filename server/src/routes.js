@@ -15,6 +15,7 @@ import {
   scanTimelineContradiction, scanKinshipTitleConflict, scanSceneElementMismatch,
   scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop, scanDenyReframe,
   scanRhetoricPileup, scanToldEmotion, scanOverBut, scanOminousForeshadow, scanClicheGesture,
+  scanNameGuard, scanOpeningCliche,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
@@ -4584,6 +4585,19 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         structureFixes.push(...scanOverBut(full));
         structureFixes.push(...scanOminousForeshadow(full));
         structureFixes.push(...scanClicheGesture(full));
+
+        // 5a4) 主角名保护 + 开局模板检测（免费正则，模型无关）：
+        //      主角名零出现（陈若辰被写成陈辰安类事故）→ 触发重生成；
+        //      同姓共字变体 → 定向润色统一；开局模板（被X熏醒+硬物+麻木+单光源）→ 触发重生成。
+        const charRows = getCharacters(novel.id);
+        const nameGuard = scanNameGuard(charRows, full);
+        for (const hardIssue of nameGuard.hard) {
+          problems.push({ desc: `角色名保护：${hardIssue}` });
+        }
+        structureFixes.push(...nameGuard.soft);
+        for (const openIssue of scanOpeningCliche(full)) {
+          problems.push({ desc: openIssue });
+        }
 
         // 5b) 跨章口癖固化：最近 3 章正文与本章比对，找出"每章同款"的固化短语
         const priorRows = db.prepare(
