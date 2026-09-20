@@ -271,6 +271,13 @@ onMounted(loadStyleLibrary);
               <div v-if="it.protagonist.golden_finger">金手指：{{ it.protagonist.golden_finger }}</div>
               <div v-if="it.protagonist.personality">性格：{{ it.protagonist.personality }}</div>
             </div>
+            <div v-if="it.protagonist2 && it.protagonist2.name" class="idea-detail-block">
+              <div class="idea-detail-title">第二主角</div>
+              <div>{{ it.protagonist2.name || '' }}<span v-if="it.protagonist2.identity" class="muted">　{{ it.protagonist2.identity }}</span></div>
+              <div v-if="it.protagonist2.golden_finger">能力/优势：{{ it.protagonist2.golden_finger }}</div>
+              <div v-if="it.protagonist2.personality">性格：{{ it.protagonist2.personality }}</div>
+              <div v-if="it.protagonist2.relation">与主角关系：{{ it.protagonist2.relation }}</div>
+            </div>
           </template>
           <div v-if="it.selling_point && it.selling_point.length" class="idea-detail-block">
             <div class="idea-detail-title">核心卖点</div>

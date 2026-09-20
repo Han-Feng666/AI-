@@ -1737,6 +1737,26 @@ export function scanRhythmMonotony(text) {
   return [];
 }
 
+// 空泛抽象描写检测（Vague Abstraction）：单看每处都轻度可容忍、堆起来就是 AI 味
+// 主源的句式家族——"某种说不清的情绪""一股难以言喻的感觉""空气里有种X的味道"
+// "仿佛在诉说着什么"。真人的描写落在具体物上，AI 的描写飘在概念里。
+export function scanVagueAbstraction(text) {
+  const s = String(text || '');
+  if (s.length < 600) return [];
+  const count = (re) => (s.match(re) || []).length;
+  const detail = [];
+  const vagueFeel = count(/(某种|一种)(说不清|说不清道不明|难以言喻|难以形容|无法言说|莫可名状|奇怪|莫名|复杂)的(感觉|情绪|滋味|味道|气息|意味|东西|东西在|情绪在)/g);
+  if (vagueFeel >= 2) detail.push(`空泛感受×${vagueFeel}`);
+  const unspeakable = count(/(无法|难以|不能)(用)?(语言|言语|文字|话语)?(形容|描述|表达|言说)/g);
+  if (unspeakable >= 2) detail.push(`难以言喻×${unspeakable}`);
+  const whisper = count(/(仿佛|像是在)?(诉说|讲述|倾诉|宣告)着(什么|以往|过去|曾经的?[^。！？\n]{0,8})/g);
+  if (whisper >= 2) detail.push(`物在诉说×${whisper}`);
+  const mixture = count(/(混合|交织|夹杂|搅在一起?)(着)?(的)?(味道|气息|声音|气味)/g);
+  if (mixture >= 3) detail.push(`气息交织×${mixture}`);
+  if (!detail.length) return [];
+  return [`空泛抽象描写（${detail.join('、')}）——描写飘在概念里没有落在具体物上（"某种说不清的情绪""仿佛诉说着什么"是 AI 高频空转句）。改法：把感受换算成身体反应和具体物件（不说"一股说不清的情绪"，写"他喉结动了一下，把到嘴边的话咽了回去"），每个"某种/难以言喻"最多留一处，其余删掉直接写动作`];
+}
+
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
 export function scanAiPunctuation(text) {
   const s = String(text || '');

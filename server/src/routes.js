@@ -16,7 +16,7 @@ import {
   scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop, scanDenyReframe,
   scanRhetoricPileup, scanToldEmotion, scanOverBut, scanOminousForeshadow, scanClicheGesture,
   scanNameGuard, scanOpeningCliche, scanPremiseDrift, scanStiffTransition,
-  scanAdjectivePileup, scanRhythmMonotony,
+  scanAdjectivePileup, scanRhythmMonotony, scanVagueAbstraction,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
@@ -1710,6 +1710,23 @@ ${parts.join('\n\n')}
 
   // 男频/女频：目标读者频道，影响主角性别、爽点结构与情感线比重
   const channel = String((req.body || {}).channel || '').trim();
+
+  // 双女主/双男主：双人主角结构，优先级高于频道约束
+  const isDualHeroine = genreList.some((g) => g.includes('双女主'));
+  const isDualHero = genreList.some((g) => g.includes('双男主'));
+  const dualBlock = isDualHeroine
+    ? `\n\n【双女主结构（最高优先级硬约束）】
+- 每个创意必须有两位女性主角（双女主），双人对戏是全书核心：两人的性格、出身、能力、行事风格必须形成鲜明互补或对撞（如一个外放张扬一个内敛深沉、一个守规矩一个捅娄子）。
+- 两人各有独立的动机线与成长弧，剧情在双线交织中推进：既要有并肩站立的信任与默契，也要有立场、观念、利益上的摩擦与分歧。
+- 情感关系（姐妹/知己/搭档/亦敌亦友）是核心卖点之一，关系变化要有具体事件推动，渐进有层次，严禁一见如故的速成塑料情。
+- 严禁把其中一位写成另一个的附属/工具人：两人都要有自己的主意、自己的秘密、自己的高光。
+- 剧情高光优先安排在双人配合或双人对手戏上（联手破局/对峙摊牌/背靠背断后）。`
+    : isDualHero
+      ? `\n\n【双男主结构（最高优先级硬约束）】
+- 每个创意必须有两位男性主角（双男主），双人对戏是全书核心：性格、立场、能力形成鲜明互补或对撞。
+- 两人各有独立动机线与成长弧，双线交织推进，兄弟/对手/搭档关系有具体事件推动，渐进有层次。
+- 严禁工具人化任何一位：两人都要有自己的主意、秘密与高光时刻。`
+      : '';
   const channelBlock = channel === '男频'
     ? `\n\n【目标读者频道：男频（硬性约束）】
 - 所有创意主角必须为男性，叙事以男主视角为核心。
@@ -1754,7 +1771,7 @@ ${bannedKws.length ? `- 用户未选择以下题材元素，严禁作为主题�
 ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM_KEYWORDS.some((k) => g.includes(k))).join('、')}"但未勾选玄幻/修仙/奇幻等玄修题材：金手指必须是纯系统载体（面板/任务/兑换/签到/模拟等），严禁出现"血脉/血脉觉醒/灵根/传承记忆/法宝/契约召唤"等玄幻绑定型设定——历史/架空背景里的金手指只能是系统的，不能靠血统。` : ''}
 - 违反题材贴合的创意视为废稿。`;
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${channelBlock}${styleBlock}${presetBlock}${excludeBlock}${genreConformityBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${presetBlock}${excludeBlock}${genreConformityBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
@@ -1792,6 +1809,7 @@ ${axisBlock}
         hook: String(it.hook || ''),
         logline: String(it.logline || ''),
         protagonist: it.protagonist || {},
+        protagonist2: it.protagonist2 || null,
         selling_point: Array.isArray(it.selling_point) ? it.selling_point : [String(it.selling_point || '')],
         outline_H5: Array.isArray(it.outline_H5) ? it.outline_H5 : [String(it.outline_H5 || '')],
         potential_risk: String(it.potential_risk || '')
@@ -1841,6 +1859,7 @@ ${axisBlock}
         hook: String(it.hook || ''),
         logline: String(it.logline || ''),
         protagonist: it.protagonist || {},
+        protagonist2: it.protagonist2 || null,
         selling_point: Array.isArray(it.selling_point) ? it.selling_point : [String(it.selling_point || '')],
         outline_H5: Array.isArray(it.outline_H5) ? it.outline_H5 : [String(it.outline_H5 || '')],
         potential_risk: String(it.potential_risk || '')
@@ -4661,6 +4680,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         structureFixes.push(...scanStiffTransition(full));
         structureFixes.push(...scanAdjectivePileup(full));
         structureFixes.push(...scanRhythmMonotony(full));
+        structureFixes.push(...scanVagueAbstraction(full));
         for (const openIssue of scanOpeningCliche(full)) {
           problems.push({ desc: openIssue });
         }
