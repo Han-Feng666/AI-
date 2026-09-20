@@ -560,3 +560,121 @@ Entries discovered by the Agent during task execution should follow this format:
   - 产出后告知用户补丁路径（`desktop/release/update-<版本号>.patch.json`），用户在已安装软件「设置→软件增量更新」选择该文件应用即可。
   - 补丁生成后再 commit + push 代码。顺序：改代码 → `build-and-patch.cjs --bump` → commit → push。
   - `scripts/build-and-patch.cjs` 与 `scripts/make-patch.cjs` 的区别：前者是面向 Agent 的一键流程（含版本递增+前端构建），后者是底层工具（仅生成补丁）。日常用前者。
+
+[Project Knowledge Summary]
+- Date: 2026-09-18
+- Context: 用户反馈勾选都市/青春/校园/言情生成的创作方案仍是穿越/系统/召唤/中年内容
+- Category: Troubleshooting & Debugging / Build Methods
+- Instructions:
+  - 题材一致性架构（v1.4.21-1.4.23）：三层注入点必须同步维护——①/ideas 路由 (routes.js ~1670, FANTASY/YOUTH_KEYWORDS 分轨差异化轴) ②PLAN_SKELETON_SYSTEM 边界铁律 (prompts.js ~352) ③buildPlanGenreConformity() (prompts.js, 共享函数) 注入方案生成 userPrompt+骨架系统提示词+修订端点。
+  - 陷阱：PLAN_SKELETON_SYSTEM 曾把"重生/穿越"列为现实向合法元素（"穿越/重生的优势是信息差"），只禁力量体系却放行套模板开局——禁模板与禁力量体系必须分开表述。势力枚举（宗门|王朝|异族）和 ability 字段（特殊能力）都会诱导幻想向，已加现实向注记。
+  - 用户勾选"穿越/重生"题材时 buildPlanGenreConformity 动态放行对应模板（仅信息差优势），禁系统/超凡力量不变。
+  - e2e 测试方案生成：后台起 node server/index.js → POST /api/novels 建书 → POST /api/novels/:id/plan (SSE, 600s 内可能只完成骨架+章节占位, job 后台续跑) → 轮询 GET /api/novels/:id 看 world_view/outline + /characters /factions /chapters 检查超凡词命中。
+  - LLM 配置写库（用户提供的自己的 key）：settings 表 key='llm_config'，字段必须 camelCase (apiKey/baseUrl/model)；模型名查 /models 端点确认（当前 deepseek-v4-flash 全小写）。
+
+[Project Knowledge Summary]
+- Date: 2026-09-18
+- Context: 用户贴出第一章原文反馈AI味浓——品级漂移/条款改口/动作回环/节拍复读逃过全部25类检测
+- Category: Build Methods / Quality Enhancement
+- Instructions:
+  - 章内一致性检测架构（v1.4.24）：lib.js 新增 scanRankDrift（品级漂移→problems重生成）/scanRuleDrift（系统条款降级→problems）/scanBeatEcho（意象体感词根归并计数，单组≥5或双组≥3→structureFixes润色）/scanActionLoop（掐腿/更衣/纸条掏塞×2→structureFixes）。挂入 routes.js 5a3 段，与时间线/称呼检测同级。
+  - 关键陷阱：buildPolishWithIssues 此前对字符串型 issue 读 it.quote/it.problem 等对象字段渲染成空——structureFixes 全线是字符串，定向修复信号一直被静默稀释。已兼容 typeof it==='string' 直出。
+  - CHAPTER_SYSTEM 铁律 22d/22e/22f（数字条款即铁律/单次动作/节拍不重复）+ 交稿自查9b（五项清单）；AI_DETECT_SYSTEM 新增 26-29 类。
+  - 扫描器验证 SOP：用户原章节阳性（全命中）+ 场景化阴性（雨×2/凉×2/深吸一口气×1 必须放行，防误杀健康白描）。scanRuleDrift 的 s.length<200 门槛会拦截短测试样例，测试文本须 ≥200 字。
+
+[Project Knowledge Summary]
+- Date: 2026-09-18
+- Context: 用户第五轮反馈"一个都不认识——不是不认识，是认不全"式自我改口腔漏检
+- Category: Quality Enhancement
+- Instructions:
+  - 否定改口腔（v1.4.25，scanDenyReframe）：破折号改口"X——不是(不)X"、双重否定"不是不X，是Y"、"不是A而是B"密度、"与其说A不如说B"四类句式。触发阈值：改口+双重否定合计≥2 或 对照≥4 或 ≥2.5/千字 或 与其说≥2。只进 structureFixes 定向润色，保留 1 处有信息量改口空间，不触发重生成。
+  - 提示词同步：CHAPTER_SYSTEM 铁律 22g（禁自我改口，全章≤1处）+ AI_DETECT_SYSTEM 第30类。当前检测类别共 30 类。
+  - 测试陷阱（第二次踩）：scanDenyReframe 门槛 400 字，测试样例必须写足长度；bash -e 双引号内嵌反引号模板字符串会被命令替换吞掉，正则调试必须用 .mjs 测试文件。
+
+[Project Knowledge Summary]
+- Date: 2026-09-19
+- Context: 第六轮——用户要求分阶段思考强度 + 继续去AI味 + 修逻辑问题
+- Category: Build Methods / Quality Enhancement
+- Instructions:
+  - 分阶段思考强度（v1.4.26）：llm_config.thinkingTasks = {planning/writing/analysis/polishing: off|low|medium|high|xhigh}，chat() 内 resolveEffort() 按任务取档、回退全局 reasoning。润色类调用 task='polishing'（model_router 无此键，安全回退默认模型）。DeepSeek V4 思考极性 bug 已修（原 low/medium/high 注入 thinking:disabled，现 enabled+reasoning_effort）。UI 在 Settings.vue "思考功能"下拉下方四行。
+  - 修辞类扫描器（scanRhetoricPileup/scanToldEmotion/scanOverBut）：全部进 structureFixes 定向润色。阈值：明喻>4/千字、升华≥3、排比≥3、程度副词>6/千字、情绪直给≥4、转折>5/千字。测试样本必须 ≥600 字符（低于门槛直接短路，已三次踩长度坑）。
+  - 逻辑硬伤：铁律 22h（人物在场）/22i（物品信息来源）/22j（因果链）+ AI_DETECT 31-33 类。这类逻辑错误无法正则检测，全靠生成前铁律约束 + LLM 检测兜底。
+  - 测试方法坑：bash -e 双引号内嵌反引号模板字符串会被命令替换吞掉（表现为样例变空串），Python heredoc 写中文测试文件易混入英文字符；正则/扫描器测试一律用 write 工具写 .mjs 文件或 node --input-type=module heredoc 内联。
+
+[Project Knowledge Summary]
+- Date: 2026-09-19
+- Context: 第七轮体检+治理——用户要求检查前后端并继续去AI味
+- Category: Quality Enhancement / Testing Methods
+- Instructions:
+  - 第七轮扫描器：scanOminousForeshadow（上帝视角剧透腔：他不知道的是/命运齿轮/一切才刚刚开始，≥2触发）、scanClicheGesture（俗套神态：眼神闪动/唇角/眉部/空气凝固/把玩/玩味笑，双类≥2或单类≥5触发）。铁律22k + AI_DETECT 34-35。当前共 11 个专项扫描器 + 35 检测类别。
+  - 体检 SOP：`for f in server/src/*.js; do node --check` 全量语法 → background_terminal 起服务 → curl /api/settings|/api/novels|/api/novels/1/chapters/1|/api/styles 探活 → 后台终端跑 vite build 验前端可构建（约23s）。
+  - 测试样本长度教训（已四次）：600 字门槛下测试阳性样本必须实测 txt.length ≥ 600；触发条件是"组合达标"（如 detail≥2 类），样本需覆盖至少两类各达下限。写完样本先 console.log(length) 再断言。
+
+[Project Knowledge Summary]
+- Date: 2026-09-19
+- Context: 用户反馈设置页看不到新加的四行思考档位——排查发现 v1.4.26 补丁缺新 UI
+- Category: Troubleshooting & Debugging / Build Methods
+- Instructions:
+  - 补丁打包铁律：凡改动 web/src 下任何前端源码，build-and-patch 必须跑完整构建（去掉 --no-build）；--no-build 只允许纯 server 端改动使用。v1.4.26 因此把旧 dist 打进补丁，用户设置页缺新档位。
+  - 排查链路（已验证有效）：git log 查源码提交时间 → grep web/dist/assets/*.js 是否含新 UI 字符串 → python 检查补丁 json 里 Settings chunk content → 确认 index.html 引用的 chunk hash。
+  - 补丁机制事实：applyPatch 按 path 覆盖文件、不校验 fromVersion、旧 chunk 不删除只换引用；全量补丁（不带 --no-build）单包自足可覆盖任意旧版本，碎片场景优先打全量。
+
+[Project Knowledge Summary]
+- Date: 2026-09-20
+- Context: 第八轮（v1.4.29, 15cb7a8）主角名保护+开局模板检测
+- Category: Build Methods
+- Instructions:
+  - 第13/14扫描器 scanNameGuard/scanOpeningCliche 已挂 routes.js 5a4 段；角色表用 role_type 含"主角"筛主角，字段无 is_main
+  - 名字变体检测会贪婪吞字（"陈辰安是"），已做等长前缀裁剪——改这段时保留裁剪逻辑
+  - 开局模板特征要抓语序变体（"快燃尽的油灯"语序与"油灯烧尽"相反）；用户原章 test_chapter1.txt 开局也是模板（被冻醒+硬枕头+油灯），是现成阳性素材
+  - 检测类别已至 37；铁律已至 22m；AI_DETECT_SYSTEM 在 prompts.js ~1255 区域
+
+[Project Knowledge Summary]
+- Date: 2026-09-20
+- Context: 第九轮（v1.4.30, b8d1e40）概要设定缺失检测
+- Category: Build Methods
+- Instructions:
+  - 第15扫描器 scanPremiseDrift(plan, text) 挂 5a4 段，用 existing?.summary 做章级合同（routes.js:3487 的 existing 含 summary 字段）
+  - 要素从属关系：穿越从属于系统（面板兑现即穿越成立，防每章复述穿越的误报）；系统缺席提示会检测正文纸条类物件并给定向话术（用户事故：概要写绑定系统、正文纸条替代）
+  - 已有"AI套路豁免"（conceptExempt/sysExempt ~4528）管正向误报，scanPremiseDrift 管反向缺失，二者互补勿混
+  - 检测类别已至 38；铁律已至 22n
+
+[Project Knowledge Summary]
+- Date: 2026-09-20
+- Context: 第九轮增补（v1.4.31, 39f7f95）唤醒句式开头独立判定
+- Category: Build Methods
+- Instructions:
+  - 模型会"换皮规避"检测：概要/铁律里点名的具体例子（焦味熏醒）被换成同句式变体（公鸡打鸣吵醒）——规则必须锁句式结构（是被…醒的/唤醒动词在开头90字）而非锁唤醒源词汇；铁律 22m 已附公鸡打鸣反例
+  - scanOpeningCliche 现在开头唤醒优先于组合特征判定（根因优先，else-if 结构）
+  - 扫描器阈值口诀：换皮对抗 → 锁结构；组合误报 → 锁组合阈值
+
+[Project Knowledge Summary]
+- Date: 2026-09-20
+- Context: 第九轮增补二（v1.4.32）开局正形四步结构
+- Category: Build Methods
+- Instructions:
+  - 用户贴的好开头样本（秋雨砸青石板+雨幕爬起+乌木笏板+葱油饼老妪）经全扫描器验证零误伤，是"健康开局"基准素材
+  - 铁律 22m 改为"禁令+正形"双段：正形四步（环境动态细节/动作半途切入/物件不对劲带悬念/烟火气具体细节），正向结构与负向禁令缺一不可
+  - prompts.js 中引用用户样本时要抽象成通用例子（乌木笏板→物件不对劲），避免模板化复制到其他小说
+
+[Project Knowledge Summary]
+- Date: 2026-09-20
+- Context: 第十轮（v1.4.33, 3f42255）灵感生成器题材修复+男频女频+生硬过渡
+- Category: Build Methods
+- Instructions:
+  - 灵感生成器在 routes.js /ideas 路由（~1641）；题材贴合块的禁令必须动态生成（用户没选的元素才禁），写死"禁穿越系统"会跟"题材=穿越系统"自相矛盾导致模型漂移
+  - GF_POOL 池子内容即模型输出倾向：池里放"前世记忆/重生"就会给青春文强推重生——池子要跟题材纯净性对齐
+  - 第16扫描器 scanStiffTransition 挂 5a4；门槛 600 字；检测段首标签（时间/视角/转折），同类≥2 或总量≥4 触发
+  - 阈值长度坑第 5 次确认：阴性样本也必须超门槛再验，门槛下 clean 不算真阴性
+  - 男频/女频走 req.body.channel，前端 InspirationGenerator.vue radio 组；改了 web/src 必须完整 vite build（本轮 45.84s）
+  - 检测类别已至 38；铁律已至 22n；9b 自查已至九项
+
+[Project Knowledge Summary]
+- Date: 2026-09-20
+- Context: 第十一轮（v1.4.34, 待填hash）定语堆叠+句长节奏+回溯剧透腔
+- Category: Build Methods
+- Instructions:
+  - 第17/18扫描器 scanAdjectivePileup/scanRhythmMonotony 挂 5a4；门槛 600/1500 字
+  - 句长窗口教训：先实测 AI 输出的句长分布再定窗口（实测均匀句 35-36 字，直觉定的 10-30 窗口全部漏检）
+  - 长度坑第 6/7 次确认：python heredoc 改测试文件的 replace 目标串有 typo 会静默失败，改用 Edit 工具；样本 repeat 计数要算好字数
+  - 检测类别已至 40；铁律 22a-22n；9b 自查十项
