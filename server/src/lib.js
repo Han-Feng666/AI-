@@ -1618,6 +1618,46 @@ export function scanOpeningCliche(text) {
   return issues;
 }
 
+// 概要设定缺失检测（Premise Drift）：本章概要是合同——概要点名的关键设定元素
+// 必须在正文实际出现并生效。最高频事故：概要写"绑定系统"，正文却全程无系统、
+// 无面板、无提示音，主角口袋里凭空多了张纸条，模型把系统偷换成了一件普通物件。
+// 只查"概要要求了但正文没有"，反向（正文多写）归 AI 套路豁免逻辑管。
+// planText 为本章概要；返回 problems 级消息数组。
+export function scanPremiseDrift(planText, text) {
+  const plan = String(planText || '');
+  const s = String(text || '');
+  const issues = [];
+  if (plan.length < 8 || s.length < 500) return issues;
+
+  // 系统出现的判定放宽到载体形态：【叮！】面板、提示音、任务发布都算系统在场
+  const elements = [
+    { label: '系统', kw: /系统/, present: /系统|金手指|面板|【[^】]{1,14}】|提示音|机械音|脑内响起/ },
+    { label: '签到', kw: /签到/, present: /签到/ },
+    { label: '重生', kw: /重生/, present: /重生|上辈子|前世|上一世|重来一次|带着记忆|两世/ },
+    // 穿越要素从属于系统要素：概要同时要求系统且系统已兑现（面板/绑定）时，
+    // 金手指落地即证明穿越前提成立，不再单独要求正文复述穿越（正文无需每章点题）
+    { label: '穿越', kw: /穿越|穿书|魂穿/, present: /穿越|穿书|魂穿|身穿|借尸还魂|夺舍|前世|上辈子|原主|现代|二十一世纪|另一个世界|两世/, subordinateTo: '系统' }
+  ];
+  const labelPassed = new Map();
+  for (const el of elements) {
+    const planHit = el.kw.test(plan);
+    const present = el.present.test(s);
+    labelPassed.set(el.label, present);
+    if (!planHit || present) continue;
+    if (el.subordinateTo && labelPassed.get(el.subordinateTo)) continue;
+    let hint = '';
+    if (el.label === '系统') {
+      if (/纸条|字条|纸片|纸卷/.test(s)) {
+        hint = '正文中出现了纸条类物件——若它是系统的载体，必须让主角明确认出这是系统（看到绑定提示/听到机械音/面板展开）并完成绑定，严禁只写捡到一张来路不明的纸条而不点明系统；若概要未规划纸条，直接删除该物件，按概要写出系统绑定';
+      } else {
+        hint = '概要要求本章出现系统，正文的系统必须实际出现并生效（绑定/发布任务/面板展开任一即可）';
+      }
+    }
+    issues.push(`本章概要明确写了"${el.label}"相关情节，正文却从头到尾没有出现${el.label}——${hint || '概要点名的关键设定不能缺席，必须在正文实际写出'}`);
+  }
+  return issues;
+}
+
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
 export function scanAiPunctuation(text) {
   const s = String(text || '');

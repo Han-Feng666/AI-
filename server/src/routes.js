@@ -15,7 +15,7 @@ import {
   scanTimelineContradiction, scanKinshipTitleConflict, scanSceneElementMismatch,
   scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop, scanDenyReframe,
   scanRhetoricPileup, scanToldEmotion, scanOverBut, scanOminousForeshadow, scanClicheGesture,
-  scanNameGuard, scanOpeningCliche,
+  scanNameGuard, scanOpeningCliche, scanPremiseDrift,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
@@ -4597,6 +4597,9 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         structureFixes.push(...nameGuard.soft);
         for (const openIssue of scanOpeningCliche(full)) {
           problems.push({ desc: openIssue });
+        }
+        for (const premIssue of scanPremiseDrift(existing?.summary || '', full)) {
+          problems.push({ desc: `概要设定缺失：${premIssue}` });
         }
 
         // 5b) 跨章口癖固化：最近 3 章正文与本章比对，找出"每章同款"的固化短语
