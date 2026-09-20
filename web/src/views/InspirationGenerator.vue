@@ -10,6 +10,7 @@ defineOptions({ name: 'InspirationGenerator' });
 const router = useRouter();
 
 const genres = ref(['玄幻']);
+const channel = ref('');
 const stylePresets = ref([]);
 const styleIds = ref([]);
 const styleLibrary = ref([]);
@@ -67,6 +68,7 @@ async function generate() {
   try {
     const data = await api.generateIdeas({
       genres: genres.value,
+      channel: channel.value,
       stylePresets: stylePresets.value,
       styleIds: styleIds.value,
       count: 3,
@@ -185,6 +187,14 @@ onMounted(loadStyleLibrary);
 
     <div class="card idea-config">
       <el-form label-width="110px" label-position="top">
+        <el-form-item label="目标频道">
+          <el-radio-group v-model="channel">
+            <el-radio-button value="">通用</el-radio-button>
+            <el-radio-button value="男频">男频</el-radio-button>
+            <el-radio-button value="女频">女频</el-radio-button>
+          </el-radio-group>
+          <span class="channel-hint">男频侧重成长逆袭主线，女频侧重情感线与女性视角</span>
+        </el-form-item>
         <el-form-item label="选择题材（可多选）">
           <el-checkbox-group v-model="genres" class="check-grid">
             <el-checkbox v-for="g in GENRES" :key="g" :value="g" class="check-item">{{ g }}</el-checkbox>
@@ -522,6 +532,11 @@ onMounted(loadStyleLibrary);
   gap: 14px;
 }
 .gen-hint {
+  font-size: 12.5px;
+  color: #9ca3af;
+}
+.channel-hint {
+  margin-left: 12px;
   font-size: 12.5px;
   color: #9ca3af;
 }

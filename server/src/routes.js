@@ -15,7 +15,7 @@ import {
   scanTimelineContradiction, scanKinshipTitleConflict, scanSceneElementMismatch,
   scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop, scanDenyReframe,
   scanRhetoricPileup, scanToldEmotion, scanOverBut, scanOminousForeshadow, scanClicheGesture,
-  scanNameGuard, scanOpeningCliche, scanPremiseDrift,
+  scanNameGuard, scanOpeningCliche, scanPremiseDrift, scanStiffTransition,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
@@ -1677,7 +1677,7 @@ ${parts.join('\n\n')}
     '末世', '废土', '克苏鲁', '赛博', '蒸汽', '星际', '机甲', '灵气', '御兽', '召唤',
     '炼金', '高武', '异能', '魔幻', '神话', '西幻', '巫师', '洪荒', '诸天', '无敌流',
     '数据流', '规则怪谈', 'SCP', '第四天灾', 'DND', '神魔', '万族', '盗墓', '探险',
-    '诡秘', '志怪', '民俗', '精灵', '骑士', '勇者', '赛博修仙', '掌门流', '幕后流'];
+    '诡秘', '志怪', '民俗', '精灵', '骑士', '勇者', '赛博修仙', '掌门流', '幕后流', '穿越'];
   const YOUTH_KEYWORDS = ['青春', '校园', '纯爱', '甜宠', '暗恋', '虐恋', '破镜重圆', '学霸', '初恋'];
   const isFantasy = genreList.some((g) => FANTASY_KEYWORDS.some((k) => g.includes(k)));
   const isYouth = !isFantasy && genreList.some((g) => YOUTH_KEYWORDS.some((k) => g.includes(k)));
@@ -1687,11 +1687,11 @@ ${parts.join('\n\n')}
     ID_POOL = ['底层草根', '落魄贵族后人', '隐世传人', '现代上班族穿越', '市井游民', '少年天才', '军方武力背景', '商贾之后', '工匠手艺人', '戴罪之身'];
     gfLabel = '金手指类型';
   } else if (isYouth) {
-    GF_POOL = ['被埋没的学业/艺术天赋', '超强共情/人心洞察', '天生的社交感染力', '逆境反弹韧性', '超常细节观察力', '前世记忆/重生信息差', '突出体能/竞技特长', '关键人脉（师长/发小）'];
+    GF_POOL = ['被埋没的学业/艺术天赋', '超强共情/人心洞察', '天生的社交感染力', '逆境反弹韧性', '超常细节观察力', '出众的表达与创作才华', '突出体能/竞技特长', '关键人脉（师长/发小）'];
     ID_POOL = ['高三学生', '大学新生', '转学生', '社恐学生', '才艺特长生', '学霸/尖子生', '问题少年', '留学生', '复读生', '校园风云人物'];
     gfLabel = '核心优势类型';
   } else {
-    GF_POOL = ['前世记忆/信息优势', '被埋没的天赋觉醒', '关键人脉关系网', '超强洞察力/共情', '商业直觉/创业天赋', '突出体能/竞技特长', '家传手艺/特殊技艺', '人格魅力/社交天赋', '逆境反弹韧性', '细节记忆/观察力'];
+    GF_POOL = ['信息差/内幕优势', '被埋没的天赋觉醒', '关键人脉关系网', '超强洞察力/共情', '商业直觉/创业天赋', '突出体能/竞技特长', '家传手艺/特殊技艺', '人格魅力/社交天赋', '逆境反弹韧性', '细节记忆/观察力'];
     ID_POOL = ['刚毕业的大学生', '职场新人', '转行新人', '校园学生', '退役运动员', '回乡的都市人', '社恐青年', '才艺特长生', '自由职业者', '打工攒钱者'];
     gfLabel = '核心优势类型';
   }
@@ -1699,6 +1699,22 @@ ${parts.join('\n\n')}
   const gfSlots = shuffle(GF_POOL).slice(0, ideaCount);
   const idSlots = shuffle(ID_POOL).slice(0, ideaCount);
   const axisBlock = gfSlots.map((gf, i) => `创意${i + 1}：${gfLabel}必须属于「${gf}」，主角初始身份必须是「${idSlots[i]}」`).join('\n');
+
+  // 男频/女频：目标读者频道，影响主角性别、爽点结构与情感线比重
+  const channel = String((req.body || {}).channel || '').trim();
+  const channelBlock = channel === '男频'
+    ? `\n\n【目标读者频道：男频（硬性约束）】
+- 所有创意主角必须为男性，叙事以男主视角为核心。
+- 爽点结构以成长/逆袭/事业/探索/争胜为主线（升级、翻盘、建立功业），感情线为辅——可以有但严禁大篇幅恋爱戏或情感内耗。
+- 女性角色塑造服务剧情与主角成长弧，严禁抢走核心戏份。
+- 节奏明快，钩子直给。`
+    : channel === '女频'
+      ? `\n\n【目标读者频道：女频（硬性约束）】
+- 所有创意主角必须为女性（或双主角且女性视角占主体）。
+- 情感线是核心驱动力：关系张力（心动/试探/误会/拉扯/双向奔赴）与女主自我成长交织推进。
+- 男性角色必须立体有魅力（有自己的目标与弱点），严禁工具人化；严禁把女主写成被动等待拯救的花瓶——她要有自己的主意与行动力。
+- 文笔细腻，重视人物内心与关系细节的刻画。`
+      : '';
 
   // 跨批次去重：把用户已生成过的创意（标题/梗概/金手指）列入禁重清单
   const excluded = (Array.isArray(excludeIdeas) ? excludeIdeas : [])
@@ -1714,14 +1730,22 @@ ${parts.join('\n\n')}
     ? `\n\n【已生成过的创意——本次构思必须与之明显不同（金手指/世界观/核心冲突/主角身份至少3项不同），严禁只换名字或换皮】\n${excluded.map((e, i) => `${i + 1}. ${e}`).join('\n')}`
     : '';
 
-  const genreConformityBlock = isFantasy
-    ? ''
-    : `\n\n【题材贴合硬约束（最高优先级）】
-- 所有创意必须严格属于用户选择的题材范围（${genreList.join('、')}），不得引入用户未选择的超自然/幻想/修仙/系统/穿越等元素。
-- 主角的"${gfLabel}"必须是现实中可能存在的个人优势（天赋/人脉/经验/洞察等），严禁出现系统面板、血脉觉醒、契约召唤、灵气修炼等超自然设定。${isYouth ? '\n- 主角必须是学生或年轻人（高中生/大学生/刚踏入社会的青年），严禁出现中年失业、单亲家长、职场老手等与青春校园题材不符的身份设定。' : ''}
+  // 题材贴合硬约束（动态禁令，幻想/现实两类统一适用）：
+  // 修复：历史+穿越+系统曾被判为"现实类"，生成"严禁穿越/系统元素"的矛盾指令，
+  // 模型两头不讨好直接漂移到玄幻修仙。正确逻辑：用户选了什么就允许什么，
+  // 没选的题材定义元素才进禁令清单。
+  const DEFINING_KEYWORDS = ['玄幻', '修仙', '修真', '仙侠', '系统', '穿越', '重生', '科幻',
+    '星际', '机甲', '末世', '灵气', '修炼', '魔法', '异能', '克苏鲁', '武侠', '仙'];
+  const bannedKws = DEFINING_KEYWORDS.filter(
+    (k) => !genreList.some((g) => g.includes(k) || k.includes(g))
+  );
+  const genreConformityBlock = `\n\n【题材贴合硬约束（最高优先级）】
+- 所有创意必须严格属于用户选择的题材范围（${genreList.join('、')}），genre 字段必须从所选题材中选取或组合（如"历史+穿越+系统"），严禁输出用户未选择的题材。
+${bannedKws.length ? `- 用户未选择以下题材元素，严禁作为主题材或核心设定出现在任何创意中：${bannedKws.join('、')}。` : ''}
+- 主角的"${gfLabel}"必须与所选题材兼容（现实类题材用现实优势，严禁超自然设定；所选题材含系统/穿越/重生时按该设定展开）。${isYouth ? '\n- 主角必须是学生或年轻人（高中生/大学生/刚踏入社会的青年），严禁出现中年失业、单亲家长、职场老手等与青春校园题材不符的身份设定。' : ''}
 - 违反题材贴合的创意视为废稿。`;
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${styleBlock}${presetBlock}${excludeBlock}${genreConformityBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${channelBlock}${styleBlock}${presetBlock}${excludeBlock}${genreConformityBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
@@ -1763,6 +1787,36 @@ ${axisBlock}
         outline_H5: Array.isArray(it.outline_H5) ? it.outline_H5 : [String(it.outline_H5 || '')],
         potential_risk: String(it.potential_risk || '')
       }));
+
+      // 题材门禁（生成后校验）：genre 偏离用户所选题材的创意直接剔除——
+      // prompt 层约束失守时兜底，杜绝"勾历史穿越系统却产出玄幻修仙"的事故
+      const genreAllowed = (g) => {
+        const t = String(g || '');
+        if (!t) return false;
+        // genre 里的每个题材词都必须能在用户所选题材中找到出处
+        const tokens = t.split(/[+、,，/｜|\s]+/).map((x) => x.trim()).filter(Boolean);
+        return tokens.every((tok) => genreList.some((sel) => tok.includes(sel) || sel.includes(tok)));
+      };
+      const before = ideas.length;
+      ideas = ideas.filter((it) => {
+        if (genreAllowed(it.genre)) return true;
+        send({ type: 'status', message: `已剔除偏离所选题材的创意「${it.title}」（题材：${it.genre || '空'}），可点击重新生成补齐` });
+        return false;
+      });
+
+      // 批内去重：金手指 + 主角身份 + logline 前段 任一组合重复即剔除后者
+      const sigs = new Set();
+      ideas = ideas.filter((it) => {
+        const sig = [it.protagonist?.golden_finger || '', it.protagonist?.identity || '', String(it.logline || '').slice(0, 30)]
+          .join('｜');
+        if (sigs.has(sig)) return false;
+        sigs.add(sig);
+        return true;
+      });
+
+      if (before > ideas.length) {
+        send({ type: 'status', message: `剔除 ${before - ideas.length} 个偏题/重复创意，保留 ${ideas.length} 个` });
+      }
       if (ideas.length) return end({ type: 'done', data: { ideas } });
     }
     send({ type: 'status', message: '创意解析失败，将重试一次…' });
@@ -4595,6 +4649,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
           problems.push({ desc: `角色名保护：${hardIssue}` });
         }
         structureFixes.push(...nameGuard.soft);
+        structureFixes.push(...scanStiffTransition(full));
         for (const openIssue of scanOpeningCliche(full)) {
           problems.push({ desc: openIssue });
         }

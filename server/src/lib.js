@@ -1665,6 +1665,45 @@ export function scanPremiseDrift(planText, text) {
   return issues;
 }
 
+// 生硬过渡检测（Stiff Transition）：AI 常用"标签式过渡"搬运剧情——段落开头
+// 直接贴时间/转折标签（"第二天一早""与此同时""然而""与此同时，另一边""不知过了多久"），
+// 场景与情绪靠标签切换而非靠动作与因果自然流动。真人写作的过渡藏在人物的行动里。
+// 只扫段首位置（\n 后的前 12 字），正文中间出现"然而"属正常行文不误报。
+export function scanStiffTransition(text) {
+  const s = String(text || '');
+  if (s.length < 600) return [];
+  const fixes = [];
+  const counts = new Map();
+  // 段首标签模式：时间跳跃标签 / 视角切换标签 / 万能转折标签
+  const LABELS = [
+    { re: /^(第[二三四五六七八九十几][天日个月]+[一早,，]?|翌日|次日|转眼[间之]?|不知过了多久|几个小时?后|半[晌天]后)/, label: '时间标签' },
+    { re: /^(与此同时|与此同时，|另一边[，,]?|与此同时的|镜头切换到)/, label: '视角切换标签' },
+    { re: /^(然而[，,]|然而就在这时|可就在这时|就在这时[，,]|谁知[道]?[，,]|不想[，,])/, label: '万能转折标签' }
+  ];
+  const paras = s.split(/\n+/).map((p) => p.trim()).filter(Boolean);
+  for (const p of paras) {
+    const head = p.slice(0, 14);
+    for (const L of LABELS) {
+      const m = head.match(L.re);
+      if (m) {
+        counts.set(L.label, (counts.get(L.label) || 0) + 1);
+        break;
+      }
+    }
+  }
+  let total = 0;
+  for (const [label, n] of counts) {
+    if (n >= 2) {
+      fixes.push(`过渡生硬：「${label}」开头段落出现 ${n} 次（${label}开头如"与此同时""第二天一早""然而，"）——过渡靠贴标签切换，剧情像幻灯片逐格跳跃。把过渡藏进人物动作里：用人物正在做的事带出时间流逝（"他数到第三遍更声，天还没亮"），用视线/脚步带出场景切换，用上一段的悬念自然引出转折`);
+    }
+    total += n;
+  }
+  if (total >= 4 && !fixes.length) {
+    fixes.push(`过渡生硬：全章有 ${total} 个段落以时间/视角/转折标签开头——过渡全部依赖标签搬运，缺乏动作与因果的自然衔接。减少标签式开头，让人物行动与场景细节承担过渡`);
+  }
+  return fixes;
+}
+
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
 export function scanAiPunctuation(text) {
   const s = String(text || '');
