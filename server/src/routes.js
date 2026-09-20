@@ -16,6 +16,7 @@ import {
   scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop, scanDenyReframe,
   scanRhetoricPileup, scanToldEmotion, scanOverBut, scanOminousForeshadow, scanClicheGesture,
   scanNameGuard, scanOpeningCliche, scanPremiseDrift, scanStiffTransition,
+  scanAdjectivePileup, scanRhythmMonotony,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
@@ -4650,6 +4651,8 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         }
         structureFixes.push(...nameGuard.soft);
         structureFixes.push(...scanStiffTransition(full));
+        structureFixes.push(...scanAdjectivePileup(full));
+        structureFixes.push(...scanRhythmMonotony(full));
         for (const openIssue of scanOpeningCliche(full)) {
           problems.push({ desc: openIssue });
         }

@@ -1501,7 +1501,7 @@ export function scanOminousForeshadow(text) {
   const s = String(text || '');
   if (s.length < 600) return [];
   const issues = [];
-  const hits = s.match(/(他|她|它|他们)?(还)?不知道的是|此时的?[^。！？\n]{1,10}(还|并)?不知道|更(不会|不曾)(想到|知道|料到)|万万没有想到|命运(?:的)?(?:齿轮|车轮|罗盘)(?:开始|缓缓|悄悄)?(转动|滚动|转向)?|一切(?:才)?刚刚开始|故事(?:要)?(?:得)?从[^。！？\n]{1,12}说起|(?:这|那)是(?:后话|后来[^。]{0,6}的事)了/g) || [];
+  const hits = s.match(/(他|她|它|他们)?(还)?不知道的是|此时的?[^。！？\n]{1,10}(还|并)?不知道|更(不会|不曾)(想到|知道|料到)|万万没有想到|命运(?:的)?(?:齿轮|车轮|罗盘)(?:开始|缓缓|悄悄)?(转动|滚动|转向)?|一切(?:才)?刚刚开始|故事(?:要)?(?:得)?从[^。！？\n]{1,12}说起|(?:这|那)是(?:后话|后来[^。]{0,6}的事)了|多年(?:以)?后[^。！？\n]{0,12}(?:他|她|才|回|仍|再|常|记得|想起|依然)|后来[^。！？\n]{0,8}才(?:知道|明白|懂|反应过来|发现)|(?:那|当)时(?:的)?(?:他|她|他们)?(?:还)?(?:不|未)(?:明白|知道|意识到|发觉)/g) || [];
   if (hits.length >= 2) {
     issues.push(`上帝视角剧透腔×${hits.length}（如"${hits.slice(0, 3).join('"、"')}"）——"他不知道的是""命运齿轮""一切才刚刚开始"是叙述者跳出故事替读者剧透，全知视角的陈词滥调。视角必须钉在当前场景人物身上：他不知道的事就别写，悬念靠场景内的信息差自然形成。请删除这些剧透句，改用场景内具体动作或对话收尾`);
   }
@@ -1702,6 +1702,39 @@ export function scanStiffTransition(text) {
     fixes.push(`过渡生硬：全章有 ${total} 个段落以时间/视角/转折标签开头——过渡全部依赖标签搬运，缺乏动作与因果的自然衔接。减少标签式开头，让人物行动与场景细节承担过渡`);
   }
   return fixes;
+}
+
+// 定语堆叠检测（Adjective Pileup）：AI 爱给名词串三层"的"字定语——
+// "陈旧的、泛黄的、写满批注的纸张""冰冷的、坚硬的、带着铁锈味的地面"。
+// 真人写作一次最多堆两层，三层以上是模型在凑描写密度。
+export function scanAdjectivePileup(text) {
+  const s = String(text || '');
+  if (s.length < 600) return [];
+  const fixes = [];
+  const hits = s.match(/[^，。！？、\n]{1,8}的、[^，。！？、\n]{1,8}的、[^，。！？、\n]{1,8}的[^，。！？\n]{0,6}/g) || [];
+  if (hits.length >= 2) {
+    fixes.push(`定语堆叠×${hits.length}（如"${hits[0]}"）——连排三个"X的"定语是 AI 凑描写密度的典型手法，真人极少这样写。每个名词最多保留一层最有信息量的定语，其余靠动作与环境带出（"地面泛着铁锈味"而不是"冰冷的、坚硬的、带着铁锈味的地面"）`);
+  }
+  return fixes;
+}
+
+// 句长节奏单一检测（Rhythm Monotony）：AI 生成的句子长度高度均匀（全在 10-30 字），
+// 通篇没有短句 punch，读起来像念稿——这是"文笔生硬"的深层原因之一。
+// 真人写作长短交错：长句铺陈后跟一个三五字的短句收力（"他没接话。""雨停了。"）。
+export function scanRhythmMonotony(text) {
+  const s = String(text || '');
+  if (s.length < 1500) return [];
+  const sentences = s.split(/[。！？…]/).map((x) => x.trim()).filter((x) => x.length >= 2);
+  if (sentences.length < 30) return [];
+  // 中长句窗口 8-45 字：AI 的均匀句普遍落在此区间（实测多为 30-40 字）
+  const mid = sentences.filter((x) => x.length >= 8 && x.length <= 45).length;
+  const short = sentences.filter((x) => x.length <= 7).length;
+  const midRatio = mid / sentences.length;
+  const shortRatio = short / sentences.length;
+  if (midRatio >= 0.8 && shortRatio < 0.05) {
+    return [`句长节奏单一：${Math.round(midRatio * 100)}% 的句子都在 10-30 字区间，全章短句（≤7 字）不足 ${Math.round(shortRatio * 100)}%——句子长度均匀是 AI 念稿感的主因，真人写作长短交错、该收力时用短句。请在情绪转折/动作收束/段落收尾处加入短句（"他没接话。""刀落了。""雨，停了。"），让节奏有呼吸`];
+  }
+  return [];
 }
 
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
