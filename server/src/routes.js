@@ -1,5 +1,5 @@
 import express from 'express';
-import { db, touchNovel, setSetting, getSetting } from './db.js';
+import { db, touchNovel, setSetting, getSetting, dataDir } from './db.js';
 import {
   countWords, getLLMConfig, getNovel, getCharacters, getFactions, getRelationships,
   getChapters, getChapter, getMaxChapterIndex, buildHistorySummaries, shouldAutoCompress,
@@ -1842,26 +1842,48 @@ ${axisBlock}
       }
       if (ideas.length) return end({ type: 'done', data: { ideas } });
     }
-    send({ type: 'status', message: '创意解析失败，将重试一次…' });
+    send({ type: 'status', message: '创意解析失败，正在尝试自动修复…' });
 
-    // 容错：重试一次解析（模型返回了文本但没有规整 JSON 时补个兜底）
-    const retry = extractArray(full.replace(/[\n\r]+/g, '\n'));
-    if (Array.isArray(retry) && retry.length && Array.isArray(retry[0]) && retry[0].length > 0 && retry[0][0] && typeof retry[0][0] === 'object' && retry[0][0].title) {
-      const arr = retry[0];
-      const ideas2 = arr.map((it, i) => ({
-        id: `idea-${Date.now()}-${i}`,
-        title: String(it.title || `创意${i + 1}`),
-        genre: String(it.genre || ''),
-        hook: String(it.hook || ''),
-        logline: String(it.logline || ''),
-        protagonist: it.protagonist || {},
-        protagonist2: it.protagonist2 || null,
-        selling_point: Array.isArray(it.selling_point) ? it.selling_point : [String(it.selling_point || '')],
-        outline_H5: Array.isArray(it.outline_H5) ? it.outline_H5 : [String(it.outline_H5 || '')],
-        potential_risk: String(it.potential_risk || '')
-      }));
-      return end({ type: 'done', data: { ideas: ideas2 } });
-    }
+    // 最终兜底：让模型把坏输出修成合法 JSON——解析失败最常见原因是字符串内裸换行/
+    // 尾逗号/引号错配，多层正则自愈覆盖不了所有形态，LLM 自修复召回率远高于正则。
+    try {
+      const repairRes = await chat({
+        config,
+        task: 'planning',
+        messages: [
+          { role: 'system', content: '你是 JSON 修复器。用户给你的内容本应是小说创意的 JSON 数组，但存在格式错误无法解析。请将其修复为合法 JSON 数组。只输出 JSON 数组本身，禁止任何解释、前后缀或代码块标记。完整保留全部创意内容与字段，禁止改写、删减或新增创意。' },
+          { role: 'user', content: String(full).slice(0, 14000) }
+        ],
+        maxTokens: maxOut,
+        timeout: 180000
+      });
+      const repaired = extractArray(repairRes?.content || '');
+      if (Array.isArray(repaired) && repaired.length && repaired[0] && typeof repaired[0] === 'object' && !Array.isArray(repaired[0])) {
+        const ideas3 = repaired.map((it, i) => ({
+          id: `idea-${Date.now()}-${i}`,
+          title: String(it.title || `创意${i + 1}`),
+          genre: String(it.genre || ''),
+          hook: String(it.hook || ''),
+          logline: String(it.logline || ''),
+          protagonist: it.protagonist || {},
+          protagonist2: it.protagonist2 || null,
+          selling_point: Array.isArray(it.selling_point) ? it.selling_point : [String(it.selling_point || '')],
+          outline_H5: Array.isArray(it.outline_H5) ? it.outline_H5 : [String(it.outline_H5 || '')],
+          potential_risk: String(it.potential_risk || '')
+        }));
+        send({ type: 'status', message: '自动修复成功' });
+        return end({ type: 'done', data: { ideas: ideas3 } });
+      }
+    } catch { /* 修复失败继续走错误提示 */ }
+
+    // 诊断留痕：把无法解析的原始输出落盘，便于排查具体模型/形态问题
+    try {
+      const fsMod = await import('node:fs');
+      const pathMod = await import('node:path');
+      const logPath = pathMod.join(dataDir, 'idea_parse_failures.log');
+      const stamp = new Date().toISOString();
+      fsMod.appendFileSync(logPath, `\n[${stamp}] len=${String(full || '').length}\nHEAD: ${String(full || '').slice(0, 800).replace(/\n/g, '\\n')}\nTAIL: ${String(full || '').slice(-400).replace(/\n/g, '\\n')}\n`);
+    } catch { /* 日志失败不阻塞 */ }
 
     return end({ type: 'error', message: '创意生成失败：模型返回内容无法解析，请重试。' });
   } catch (e) {

@@ -5,10 +5,11 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 桌面模式通过 NOVEL_DATA_DIR 把数据库放到用户数据目录（安装目录不可写）
-const dataDir = process.env.NOVEL_DATA_DIR || path.join(__dirname, 'data');
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+export const dataDir = process.env.NOVEL_DATA_DIR || path.join(__dirname, 'data');
+const dataDirResolved = dataDir;
+if (!fs.existsSync(dataDirResolved)) fs.mkdirSync(dataDirResolved, { recursive: true });
 
-const dbPath = path.join(dataDir, 'novel-studio.db');
+const dbPath = path.join(dataDirResolved, 'novel-studio.db');
 export const db = new DatabaseSync(dbPath);
 
 db.exec('PRAGMA journal_mode = WAL;');

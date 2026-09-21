@@ -1644,6 +1644,28 @@ export function extractJson(text) {
       return JSON.parse(norm.replace(/'([^']*)'(?=\s*[:,}\]])/g, '"$1"'));
     } catch { return null; }
   };
+  // 尾逗号清理：模型最常见坏习惯之一（JSON.parse 直接拒绝）
+  const noTrailing = (x) => x.replace(/,\s*([\]}])/g, '$1').replace(/,\s*,/g, ',');
+  // 字符串内裸控制符转义：模型把 logline 等长字段写成多行时，
+  // JSON 规范严禁字符串内出现原始换行/制表符，JSON.parse 报"Bad control character"
+  const escapeCtrl = (x) => {
+    let out = '', inStr = false, esc = false;
+    for (const ch of x) {
+      if (inStr) {
+        if (esc) { esc = false; out += ch; continue; }
+        if (ch === '\\') { esc = true; out += ch; continue; }
+        if (ch === '"') { inStr = false; out += ch; continue; }
+        if (ch === '\n') { out += '\\n'; continue; }
+        if (ch === '\r') { out += ''; continue; }
+        if (ch === '\t') { out += '\\t'; continue; }
+        out += ch;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      out += ch;
+    }
+    return out;
+  };
   const tryVariants = (s) => {
     // fixInnerQuotes/fixQuotePairs 必须在中文逗号转换之前执行（中文逗号作为值内引号的边界标记）
     const innerFixed = fixInnerQuotes(s);
@@ -1662,6 +1684,11 @@ export function extractJson(text) {
     candidates.push(noComment(norm(innerFixed)));
     candidates.push(tryRelaxed(noComment(norm(s))));
     candidates.push(tryRelaxed(noComment(norm(innerFixed))));
+    // 尾逗号 + 裸控制符修复（多行字符串/尾逗号是弱模型最高频坏格式）
+    candidates.push(norm(escapeCtrl(noTrailing(s))));
+    candidates.push(norm(escapeCtrl(noTrailing(innerFixed))));
+    candidates.push(norm(escapeCtrl(noTrailing(noComment(innerFixed)))));
+    candidates.push(tryRelaxed(norm(escapeCtrl(noTrailing(innerFixed)))));
     for (const c of candidates) {
       if (!c) continue;
       // tryRelaxed 返回的已是解析对象，直接返回
