@@ -17,6 +17,7 @@ import {
   scanRhetoricPileup, scanToldEmotion, scanOverBut, scanOminousForeshadow, scanClicheGesture,
   scanNameGuard, scanOpeningCliche, scanPremiseDrift, scanStiffTransition,
   scanAdjectivePileup, scanRhythmMonotony, scanVagueAbstraction,
+  scanPersonaDrift,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
@@ -40,6 +41,7 @@ import {
   CHAT_SYSTEM, COMPRESS_SYSTEM, COMPRESS_UPDATE_SYSTEM,
   FORESHADOW_ANALYZE_SYSTEM, AI_DETECT_SYSTEM, KEY_MOMENTS_SYSTEM, PLAN_ADVANCE_SYSTEM, STAGE_SUMMARY_SYSTEM, CHARACTER_CONSISTENCY_SYSTEM,
   FACT_EXTRACT_SYSTEM, CHAR_CHANGE_EXTRACT_SYSTEM, FORESHADOW_RECALL_PREDICT_SYSTEM, TIMELINE_EXTRACT_SYSTEM, HIERARCHICAL_SUMMARY_SYSTEM,
+  PERSONA_DRIFT_CHECK_SYSTEM,
   CHARACTER_VOICE_EXTRACT_SYSTEM, PLOT_CONSISTENCY_CHECK_SYSTEM, NOVEL_CONSTITUTION_BUILD_SYSTEM,
   CHAPTER_BEAT_SYSTEM, PLAN_BEATS_SYSTEM, WRITING_QUALITY_SYSTEM, WRITING_ELEVATE_SYSTEM, AUTO_SUMMARY_SYSTEM, STORY_READABILITY_SYSTEM, STYLE_LEARN_APPLY_SYSTEM, NAMEGEN_SYSTEM,
   ARC_PLAN_SYSTEM, WORLD_EXPAND_SYSTEM, EMOTION_CURVE_SYSTEM,
@@ -71,7 +73,7 @@ import {
   getOverdueForeshadowings, setExpectedRecall,
   detectStyleDrift, saveTimelineEvent, formatTimelineSummary,
   saveCharacterVoice, getCharacterVoices, formatCharacterVoices,
-  getConstitution, buildConstitution, checkPlotConsistency,
+  getConstitution, buildConstitution, checkPlotConsistency, checkMemoryConsistency,
   upsertStoryLogEntry, removeStoryLogEntry, buildStoryLogBlock
 } from './memory.js';
 import { storeChunks, retrieveRelevant, formatRagBlock } from './rag.js';
@@ -3747,9 +3749,15 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       ? `【前情阶段摘要（更早章节的长效记忆浓缩，供把握历史走向；创作时须与之一致，可自然延续其局势）】\n${formatStageMemories(stageMemoriesBefore, 3)}`
       : '';
 
-    // 角色档案：性格核心与言行习惯，创作时必须保持，防角色性格突变
-    const profileBlock = formatCharacterProfiles(getCharacterProfiles(novel.id))
-      ? `【角色档案（性格核心与说话风格，创作时必须保持，不得让角色性格突变、言行前后矛盾）】\n${formatCharacterProfiles(getCharacterProfiles(novel.id))}`
+    // 角色档案：性格核心与言行习惯，创作时必须保持，防角色性格突变。
+    // 主角排最前 + 3500 字截断：超长连载配角档案会不断累积，无上限会挤占主角档案的上下文权重
+    const profileItems = getCharacterProfiles(novel.id);
+    const protagNames = new Set(characters.filter((c) => c.role_type === '主角').map((c) => c.name));
+    profileItems.sort((a, b) => (protagNames.has(b.char_name) ? 1 : 0) - (protagNames.has(a.char_name) ? 1 : 0));
+    let profileText = formatCharacterProfiles(profileItems);
+    if (profileText.length > 3500) profileText = profileText.slice(0, 3500);
+    const profileBlock = profileText
+      ? `【角色档案（性格核心与说话风格，创作时必须保持，不得让角色性格突变、言行前后矛盾）】\n${profileText}`
       : '';
 
     // P0-P3 增强记忆块：分层摘要树 + 结构化事实 + 角色时间线 + 故事时间线 + 逾期伏笔 + 文笔漂移
@@ -3958,8 +3966,20 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         ? '\n【本章为重新生成——本章是全书第一章，请基于剧情大纲重新创作故事开篇，只写开篇引子/初始场景/主角登场，不得引入中后期剧情、势力、角色或冲突，不得从上一章结尾续写（因为前面没有任何章节）】'
         : `\n【本章为续写——请紧接上一章结尾续写本章，本章第一句必须是上一章最后一句话的自然延续。不要重新介绍场景/人物/设定，直接从上一章结尾的瞬间接续。本章剧情以大纲概要为准，但开场必须承接上一章结尾的悬念/动作/对话。】`)
       : '';
-    const ch1Note = idx === 1 && mode === 'regenerate'
-      ? '\n【开篇铁律——第一章必须从具体场景/动作切入，直接用画面开篇，不要铺世界观、不要抒情、不要主角独白】\n- 禁止模板化开篇：不得写"主角死亡后眼前一黑/再睁眼/加班猝死/胸痛/过劳死"等AI默认穿越模板，用灵感中描述的具体死亡方式开篇\n- 开篇前两句必须建立空间感：在哪里、什么时间、光线/温度/声音/气味——用1-2个感官细节把读者放进场景，然后再让角色动起来\n- 穿越过程只占一两句话的过渡，不得大段描写穿越前的现代生活细节、死亡过程、查看手机电量等套路内容\n- 开篇前50字内必须出现主角名字和具体的动作/处境，不得用"他"指代到底'
+    // 第一章开局路线轮换：每本书每次生成交替指定不同切入路径，打散"每本书都同款开局"的模板分布。
+    // 配合 scanOpeningCliche（禁止唤醒模板）形成"指定路线 + 禁止套路"的双向挤压。
+    const OPENING_ROUTES = [
+      { name: '动作中途', desc: '从主角正在做的一件事做到一半时开场——读者直接看见进行中的动作，再顺着动作带出他在哪、处境如何' },
+      { name: '对话中途', desc: '以一句正在进行的对话开场（有火药味或有信息量），说话人是谁随后自然带出，背景信息藏在对话缝隙里' },
+      { name: '反常细节', desc: '从一个"不对劲"的具体细节开场——眼前的东西少了一样/多了一样/不该出现的出现了，让读者先起疑，再跟主角一起查明' },
+      { name: '声音先至', desc: '以一个具体的声音开场（喊声/爆炸声/敲门声/机器响/动物叫），先闻其声再见其人，声源牵出场景' },
+      { name: '物件特写', desc: '以一件对主角有意义的物件特写开场，物件暗示处境或来历，再由物件牵引出人与事' },
+      { name: '体感先行', desc: '以一个身体感受开场（冷/疼/饿/烫/晕/耳鸣），感受先于解释，让读者先共情再看清处境' }
+    ];
+    const openingRoute = OPENING_ROUTES[Math.floor(Math.random() * OPENING_ROUTES.length)];
+    // 开篇铁律对第一章首次生成与重新生成都生效（此前只在 regenerate 生效，首次生成是模板重灾区）
+    const ch1Note = idx === 1
+      ? `\n【开篇铁律——第一章必须从具体场景/动作切入，直接用画面开篇，不要铺世界观、不要抒情、不要主角独白】\n- 本章指定开局路线【${openingRoute.name}】：${openingRoute.desc}\n- 禁止模板化开篇：不得写"主角死亡后眼前一黑/再睁眼/加班猝死/胸痛/过劳死"等AI默认穿越模板，用灵感中描述的具体死亡方式开篇\n- 开篇前两句必须建立空间感：在哪里、什么时间、光线/温度/声音/气味——用1-2个感官细节把读者放进场景，然后再让角色动起来\n- 穿越过程只占一两句话的过渡，不得大段描写穿越前的现代生活细节、死亡过程、查看手机电量等套路内容\n- 开篇前50字内必须出现主角名字和具体的动作/处境，不得用"他"指代到底`
       : '';
 
     // 开局出场白名单：前3章严禁中后期角色登场，防止初稿就让反派/主角团提前出场
@@ -4467,6 +4487,25 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         } catch { /* 校验失败不阻塞 */ }
       }
 
+      // 3b) 记忆一致性校验（正文 vs 记忆库：硬事实/角色档案/状态快照/剧情日志/时间线）。
+      //     checkPlotConsistency 查"章内逻辑"，这里查"跨章记忆"——超长连载防记忆错乱的专用闸。
+      //     high 级矛盾触发重生成，medium 级转定向润色提示。
+      if (problems.length === 0 && idx > 2) {
+        try {
+          const memCheck = await checkMemoryConsistency(novel.id, idx, full, config);
+          const highConflicts = (memCheck.conflicts || []).filter((c) => c.severity === 'high');
+          const midConflicts = (memCheck.conflicts || []).filter((c) => c.severity === 'medium');
+          if (highConflicts.length) {
+            const lines = highConflicts.slice(0, 5).map((c) => `【${c.type || '记忆'}】${c.description || ''}${c.text ? `（正文："${String(c.text).slice(0, 40)}"）` : ''}`).join('；');
+            problems.push({ desc: `与已确立事实矛盾（记忆库校验）：${lines}` });
+          } else if (midConflicts.length) {
+            for (const c of midConflicts.slice(0, 3)) {
+              structureFixes.push(`与记忆库记录疑似矛盾：${c.description || ''}${c.memory ? `（记忆库：${String(c.memory).slice(0, 60)}）` : ''}——请核对前文设定，以最新正典事实为准修正本章表述`);
+            }
+          }
+        } catch { /* 记忆校验失败不阻塞 */ }
+      }
+
       // 4) 行为逻辑规则检查（轻量级，不调 LLM，用正则匹配常见行为逻辑矛盾）
       try {
         const behaviorIssues = [];
@@ -4666,6 +4705,39 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         //      主角名零出现（陈若辰被写成陈辰安类事故）→ 触发重生成；
         //      同姓共字变体 → 定向润色统一；开局模板（被X熏醒+硬物+麻木+单光源）→ 触发重生成。
         const charRows = getCharacters(novel.id);
+        // 5a5) 跨章人格漂移（免费正则，模型无关）：档案性格 vs 正文相反断言。
+        //      定性表述（"天生外向"）或 ≥3 处相反 → 触发重生成；单处 → 定向润色核对。
+        //      超长连载防"几百章后主角性格悄悄变了"的核心防线；LLM 复核判真伪后再执行。
+        {
+          const personaHits = scanPersonaDrift(charRows, getCharacterProfiles(novel.id), full);
+          if (personaHits.hard.length) {
+            let drifted = false;
+            try {
+              const pdRes = await chat({
+                config,
+                task: 'analysis',
+                wantsJson: true,
+                messages: [
+                  { role: 'system', content: PERSONA_DRIFT_CHECK_SYSTEM },
+                  { role: 'user', content: `【角色档案】\n${formatCharacterProfiles(getCharacterProfiles(novel.id)) || getCharacters(novel.id).map((c) => `- ${c.name}（${c.role_type}）：${c.personality || ''}`).join('\n') || '（暂无）'}\n\n【正则系统标记的可疑点】\n${personaHits.hard.join('\n')}\n\n【本章正文】\n${sampleText(full, 6000)}` }
+                ],
+                maxTokens: 600
+              });
+              const pd = extractJson(pdRes.content) || {};
+              drifted = !!pd.drifting;
+            } catch { /* 复核失败时保守放行（宁可漏报不误伤角色弧线） */ }
+            if (drifted) {
+              for (const h of personaHits.hard) {
+                problems.push({ desc: `人格漂移：${h}` });
+              }
+            } else {
+              structureFixes.push(...personaHits.soft);
+            }
+          } else {
+            structureFixes.push(...personaHits.soft);
+          }
+        }
+
         const nameGuard = scanNameGuard(charRows, full);
         for (const hardIssue of nameGuard.hard) {
           problems.push({ desc: `角色名保护：${hardIssue}` });
@@ -5180,8 +5252,8 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
       } catch { /* 风格重锚定失败不阻塞 */ }
     }
 
-    // 角色档案更新：每 10 章基于最近剧情维护角色一致性，防性格突变
-    if (idx % 10 === 0) {
+    // 角色档案更新：第 1 章即建档（尽早锚定人格基线），此后每 10 章维护，防性格突变
+    if (idx === 1 || idx % 10 === 0) {
       try {
         send({ type: 'status', message: '正在更新角色档案…' });
         const profChapters = getRecentChapters(novel.id, 5);

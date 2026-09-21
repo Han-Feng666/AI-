@@ -2,7 +2,7 @@ import { db } from './db.js';
 import { chat } from './llm.js';
 import { estimateTokens } from './lib.js';
 import { readStoryLogFile, writeStoryLogFile } from './storage.js';
-import { NOVEL_CONSTITUTION_BUILD_SYSTEM, PLOT_CONSISTENCY_CHECK_SYSTEM, extractJson } from './prompts.js';
+import { NOVEL_CONSTITUTION_BUILD_SYSTEM, PLOT_CONSISTENCY_CHECK_SYSTEM, MEMORY_CONSISTENCY_CHECK_SYSTEM, extractJson } from './prompts.js';
 
 // ====================================================================
 // P0-P3 长篇记忆基础设施
@@ -459,6 +459,72 @@ export async function checkPlotConsistency(novelId, chapterIdx, chapterText, con
 function extractJsonSafe(text) {
   // 委托 prompts.extractJson：其已覆盖 think 标签剥离/围栏/截断自愈/引号修复等全部健壮性逻辑
   return extractJson(text);
+}
+
+// ---------- 记忆一致性校验（正文 vs 记忆库） ----------
+// checkPlotConsistency 是"章内逻辑"审查（因果/时空/常理），本函数是"跨章记忆"审查：
+// 把硬事实库/角色档案/角色状态快照/剧情日志/时间线五路记忆与本章正文对照，
+// 拦截超长连载的记忆错乱（设定参数被改、断腿健步如飞、关系阶段跳变）。
+export async function checkMemoryConsistency(novelId, chapterIdx, chapterText, config) {
+  const novel = db.prepare('SELECT title, genre FROM novels WHERE id = ?').get(novelId);
+  if (!novel) return { conflicts: [], overall: 'consistent' };
+  const s = String(chapterText || '');
+  if (s.length < 500) return { conflicts: [], overall: 'consistent' };
+
+  const facts = getActiveFacts(novelId, chapterIdx).slice(-40);
+  const profiles = db.prepare('SELECT char_name, profile FROM novel_character_profiles WHERE novel_id = ?').all(novelId).slice(0, 12);
+  const states = db.prepare('SELECT chapter_index, states FROM character_states WHERE novel_id = ? AND chapter_index < ? ORDER BY chapter_index DESC LIMIT 1').get(novelId, chapterIdx);
+  const storyLog = buildStoryLogBlock(novel, chapterIdx, 2500);
+  const timeline = formatTimelineSummary(novelId, chapterIdx);
+
+  const factBlock = facts.length
+    ? facts.map((f) => `- ${f.subject_name}.${f.fact_key} = ${f.fact_value}（第${f.chapter_index}章确立）`).join('\n')
+    : '';
+  const profileBlock = profiles.length ? profiles.map((p) => `- ${p.char_name}：${p.profile}`).join('\n') : '';
+  let stateBlock = '';
+  if (states) {
+    try {
+      const list = JSON.parse(states.states);
+      if (Array.isArray(list) && list.length) {
+        stateBlock = list.map((x) => `- ${x.name}：${x.changes || ''}`).join('\n') + `\n（截至第${states.chapter_index}章末）`;
+      }
+    } catch { /* 忽略解析失败 */ }
+  }
+  if (!factBlock && !profileBlock && !stateBlock && !storyLog && !timeline) {
+    // 记忆库全空（前 1-2 章）无可对照，直接放行
+    return { conflicts: [], overall: 'consistent' };
+  }
+
+  const r = await chat({
+    config,
+    task: 'analysis',
+    messages: [
+      { role: 'system', content: MEMORY_CONSISTENCY_CHECK_SYSTEM },
+      { role: 'user', content: `【作品】《${novel.title}》${novel.genre || ''}\n【本章】第${chapterIdx}章\n\n【硬事实库（前文已确立的设定参数）】\n${factBlock || '（暂无）'}\n\n【角色档案（性格核心）】\n${profileBlock || '（暂无）'}\n\n【角色当前状态快照】\n${stateBlock || '（暂无）'}\n\n【剧情日志（已发生剧情）】\n${storyLog || '（暂无）'}\n\n【故事时间线】\n${timeline || '（暂无）'}\n\n【本章正文（第${chapterIdx}章）】\n${sampleChapterForCheck(s)}` }
+    ],
+    maxTokens: 1500
+  }).catch(() => null);
+
+  const result = extractJsonSafe(r?.content) || {};
+  return {
+    conflicts: Array.isArray(result.conflicts) ? result.conflicts.filter((c) => c && c.description) : [],
+    overall: result.overall || 'consistent'
+  };
+}
+
+// 记忆校验正文抽样：开头 2000 + 中段抽样 + 结尾 800，控制 token 同时覆盖全章
+function sampleChapterForCheck(text) {
+  const total = text.length;
+  if (total <= 3500) return text;
+  const midCount = 2;
+  const midLen = 900;
+  const pieces = [text.slice(0, 2000)];
+  for (let i = 0; i < midCount; i++) {
+    const start = Math.floor(((i + 0.5) / midCount) * (total - 2800)) + 1400;
+    pieces.push(text.slice(start, start + midLen));
+  }
+  pieces.push(text.slice(-800));
+  return pieces.join('\n\n……（中略）……\n\n');
 }
 
 // ---------- 全书剧情日志：每章一行确定性剧情档案（防失忆/防剧情漂移） ----------

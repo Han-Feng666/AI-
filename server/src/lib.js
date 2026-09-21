@@ -1592,6 +1592,79 @@ export function scanNameGuard(characters, text) {
   return { hard, soft };
 }
 
+// 跨章人格漂移检测（Persona Drift）：超长连载最致命的一致性事故——主角性格大变。
+// 以角色档案/初始设定中确立的性格特质为锚，检测正文中把"相反特质"定性给该角色的断言
+// （档案写"内向"，正文却写"陈默天生外向"）。带转折/扮演/成长缓冲词的放过（角色弧线合法）。
+// characters 为 DB 角色行（name/role_type/personality），profiles 为角色档案行（char_name/profile）。
+// 返回 { hard, soft }：hard（定性表述或 ≥3 处相反）触发重生成，single clean hit 进定向润色。
+const TRAIT_OPPOSITES = [
+  { trait: '内向', re: /(外向|自来熟|见谁都熟|八面玲珑)/ },
+  { trait: '胆小', re: /(胆大包天|天不怕地不怕|无所畏惧|浑身是胆)/ },
+  { trait: '谨慎', re: /(鲁莽|莽撞|冲动行事|不计后果)/ },
+  { trait: '冲动', re: /(三思而后行|滴水不漏|沉稳老练)/ },
+  { trait: '沉默寡言', re: /(话痨|滔滔不绝|喋喋不休)/ },
+  { trait: '健谈', re: /(惜字如金|金口难开|一言不发)/ },
+  { trait: '冷漠', re: /(古道热肠|热心肠|待人热络)/ },
+  { trait: '热情', re: /(冷若冰霜|拒人千里|不近人情)/ },
+  { trait: '温柔', re: /(暴躁易怒|一点就着|动辄发怒)/ },
+  { trait: '暴躁', re: /(好脾气|从不发火|和颜悦色|温声细语)/ },
+  { trait: '自卑', re: /(自负|目中无人|自视甚高)/ },
+  { trait: '自负', re: /(自惭形秽|抬不起头)/ },
+  { trait: '善良', re: /(心狠手辣|狠辣无情|草菅人命)/ },
+  { trait: '心狠手辣', re: /(菩萨心肠|心慈手软)/ },
+  { trait: '节俭', re: /(一掷千金|挥金如土|大手大脚)/ },
+  { trait: '木讷', re: /(油嘴滑舌|巧舌如簧|能说会道)/ },
+  { trait: '花言巧语', re: /(笨嘴拙舌|讷于言|嘴笨)/ }
+];
+// 转变/扮演/成长缓冲：出现即视为合法的角色弧线或伪装，放过
+const TRAIT_GUARD_RE = /(装作|假装|佯装|伪装|扮演|演戏|故意|强迫自己|努力|学着|试图|开始变得|变得|渐渐|越来越|不再|一改|褪去|收敛|性格大变|像换了个人|从前|曾经|以前|当年|原本|过去(的|他|她)|如今|现在(的|他|她)|跟(以前|过去|从前)|和(以前|过去|从前)|与(以前|过去|从前)|不同)/;
+
+export function scanPersonaDrift(characters, profiles, text) {
+  const s = String(text || '');
+  const hard = [];
+  const soft = [];
+  if (s.length < 800) return { hard, soft };
+  const list = (Array.isArray(characters) ? characters : []).filter((c) => c && c.name);
+  if (!list.length) return { hard, soft };
+  const profileMap = new Map((Array.isArray(profiles) ? profiles : []).map((p) => [String(p.char_name), String(p.profile || '')]));
+  // 只查主角与建档角色（最多 6 人），避免长尾配角误伤
+  const targets = list.filter((c) => String(c.role_type || '').includes('主角'));
+  for (const name of profileMap.keys()) {
+    if (targets.length >= 6) break;
+    if (!targets.some((t) => t.name === name)) {
+      const row = list.find((c) => c.name === name);
+      if (row) targets.push(row);
+    }
+  }
+  for (const c of targets.slice(0, 6)) {
+    const name = String(c.name).trim();
+    if (name.length < 2 || !s.includes(name)) continue;
+    const anchor = `${profileMap.get(name) || ''} ${c.personality || ''}`;
+    // 相反特质断言计数：正文把相反特质"定性"给该角色的次数
+    let clean = 0, emph = 0;
+    for (const { trait, re } of TRAIT_OPPOSITES) {
+      // 档案/设定未确立该特质 → 不构成漂移
+      if (!anchor.includes(trait)) continue;
+      for (const m of s.matchAll(new RegExp(re.source, 'g'))) {
+        const ctx = s.slice(Math.max(0, m.index - 60), m.index + m[0].length + 40);
+        if (!ctx.includes(name)) continue;
+        if (TRAIT_GUARD_RE.test(ctx)) continue;
+        clean++;
+        if (/(天生|生性|向来|一贯|一向|从来|素来|性格|本性)/.test(ctx)) emph++;
+        if (clean + emph >= 4) break;
+      }
+      if (clean + emph >= 4) break;
+    }
+    const who = String(c.role_type || '').includes('主角') ? '主角' : '角色';
+    if (emph >= 1 || clean >= 3) {
+      hard.push(`${who}"${name}"疑似性格突变：档案确立的核心特质与正文断言直接相反（命中 ${clean + emph} 处相反描写${emph ? '，含"天生/向来/性格"式定性表述' : ''}）——核心性格是全书铁律，不得无故反转。若剧情确需性格转变，必须有明确事件推动并写出过程；否则按档案性格改写相关段落`);
+    } else if (clean >= 1) {
+      soft.push(`正文中"${name}"出现了 ${clean} 处与其档案性格相反的言行倾向——请核对是否人设漂移：非剧情安排的请按档案性格改写；确属成长弧线的请补转变契机`);
+    }
+  }
+  return { hard, soft };
+}
+
 // 开局模板检测（Opening Cliche）：LLM 生成第一章的默认开局模板——
 // "X是被一股焦味熏醒的。他趴在硬邦邦的桌面上，脸贴着一堆泛黄的纸页，左胳膊麻得
 // 没了知觉。屋里黑沉沉的，只有窗纸透着点青白的光，案头一盏烛台早烧尽了……那股子
