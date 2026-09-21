@@ -18,6 +18,10 @@ const styleLibsLoading = ref(false);
 const generating = ref(false);
 const statusText = ref('');
 const ideas = ref([]);
+// 用户种子想法：给 AI 一个出发点（可空——空则纯按题材自由发挥）
+const seedIdea = ref('');
+// 每批创意数量：2-6 个（数量越多单个创意细节越薄，默认 3 平衡质量与选择面）
+const ideaCount = ref(3);
 // 跨批次去重：累积所有已生成创意的签名（标题/梗概/金手指），下次生成时传给后端排除
 const historyIdeas = ref([]);
 const selectedId = ref(null);
@@ -71,7 +75,8 @@ async function generate() {
       channel: channel.value,
       stylePresets: stylePresets.value,
       styleIds: styleIds.value,
-      count: 3,
+      count: ideaCount.value,
+      seed: seedIdea.value.trim(),
       excludeIdeas: historyIdeas.value
     }, {
       onStatus: (m) => { statusText.value = m; },
@@ -187,6 +192,16 @@ onMounted(loadStyleLibrary);
 
     <div class="card idea-config">
       <el-form label-width="110px" label-position="top">
+        <el-form-item label="我的想法（可选）">
+          <el-input
+            v-model="seedIdea"
+            type="textarea"
+            :rows="2"
+            maxlength="500"
+            show-word-limit
+            placeholder="想让故事围绕什么展开？一句话即可，如：'一个能听见物品最后一句话的旧货店老板'。留空则由 AI 自由发挥"
+          />
+        </el-form-item>
         <el-form-item label="目标频道">
           <el-radio-group v-model="channel">
             <el-radio-button value="">通用</el-radio-button>
@@ -231,8 +246,19 @@ onMounted(loadStyleLibrary);
              <el-button v-if="historyIdeas.length" size="large" text @click="historyIdeas = []" :disabled="generating">
                清空去重记录（{{ historyIdeas.length }}）
              </el-button>
-             <span class="gen-hint">每次生成 3 个创意，已生成过的会自动避开，直到你满意为止</span>
+             <span class="gen-hint">已生成过的会自动避开，直到你满意为止</span>
            </div>
+          <div class="count-row">
+            <span class="count-label">每批数量</span>
+            <el-radio-group v-model="ideaCount" size="small" :disabled="generating">
+              <el-radio-button :value="2">2 个</el-radio-button>
+              <el-radio-button :value="3">3 个</el-radio-button>
+              <el-radio-button :value="4">4 个</el-radio-button>
+              <el-radio-button :value="5">5 个</el-radio-button>
+              <el-radio-button :value="6">6 个</el-radio-button>
+            </el-radio-group>
+            <span class="count-hint">数量越多，单个创意的细节越薄</span>
+          </div>
           <div v-if="generating" class="idea-progress">
             <el-progress :percentage="99" :stroke-width="6" :show-text="false" :indeterminate="true" :duration="3" />
             <span class="idea-progress-text">{{ statusText || 'AI 正在构思创意…' }}</span>
@@ -539,6 +565,20 @@ onMounted(loadStyleLibrary);
   gap: 14px;
 }
 .gen-hint {
+  font-size: 12.5px;
+  color: #9ca3af;
+}
+.count-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.count-label {
+  font-size: 13px;
+  color: #374151;
+}
+.count-hint {
   font-size: 12.5px;
   color: #9ca3af;
 }

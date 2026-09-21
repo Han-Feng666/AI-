@@ -1645,12 +1645,13 @@ router.post('/novels/import-txt/preview', (req, res) => {
 // 灵感生成器：无灵感时按「题材 + 风格」批量产出多个小说创意大纲供浏览挑选
 router.post('/ideas', async (req, res) => {
   const { genres = [], stylePresets = [], styleIds = [], count = 3, excludeIdeas = [] } = req.body || {};
+  const seed = String((req.body || {}).seed || '').trim().slice(0, 500);
   const { config, error } = requireLLM();
   if (error) return res.status(400).json({ error: error.message });
 
   const genreList = (Array.isArray(genres) ? genres : []).map((g) => String(g).trim()).filter(Boolean);
   if (!genreList.length) return res.status(400).json({ error: '请至少选择一个小说题材' });
-  const ideaCount = Math.min(3, Math.max(2, Number(count) || 3));
+  const ideaCount = Math.min(6, Math.max(2, Number(count) || 3));
 
   const { ctrl, send, end } = startSSE(req, res);
   send({ type: 'status', message: `正在根据题材与风格构思 ${ideaCount} 个创意…` });
@@ -1768,7 +1769,33 @@ ${bannedKws.length ? `- 用户未选择以下题材元素，严禁作为主题�
 ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM_KEYWORDS.some((k) => g.includes(k))).join('、')}"但未勾选玄幻/修仙/奇幻等玄修题材：金手指必须是纯系统载体（面板/任务/兑换/签到/模拟等），严禁出现"血脉/血脉觉醒/灵根/传承记忆/法宝/契约召唤"等玄幻绑定型设定——历史/架空背景里的金手指只能是系统的，不能靠血统。` : ''}
 - 违反题材贴合的创意视为废稿。`;
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${presetBlock}${excludeBlock}${genreConformityBlock}
+  // 换皮对抗：每批次随机抽 3 条"反套路禁令"注入，强制创意脱离 AI 默认套路分布
+  const ANTI_TROPE_POOL = [
+    '主角开局不得是"底层废物被人看不起"的处境（受气赘婿/废柴弟子/被退婚的窝囊婿都算），必须从"有基本体面或主动权"的位置出发',
+    '金手指不得是"面板/属性/等级"形态，必须是非数值化的（一件具体物件、一种感官异能、一段可消耗的关系）',
+    '世界观切入不得从"大陆/王国/宗门"的宏观设定开始，必须从一个具体的行业/职业/生意切入',
+    '反派不得是"嚣张跋扈的富二代/长辈/长老"，必须有体面的身份和正当得近乎可怜的动机',
+    '开局冲突不得发生在"当众受辱"场景（退婚宴/比武台/宗门大比都算），必须发生在无人围观的私人时刻',
+    '主角的核心目标不得是"变强/复仇/证明自己"，必须是一个具体的、有限的、可完成的执念（找到一个人/赎回一件东西/守住一个承诺）',
+    '故事不得以"捡到宝物/得到传承/被高人看中"作为转折起点，转折必须由主角自己做的一件小事引发',
+    '重要配角中必须有一位与主角立场对立但惺惺相惜的对手型人物，且此人在前五章就要出场',
+    '感情线（若有）不得从"英雄救美/一见钟情/指腹为婚"开始，两人的初次交集必须充满误算或尴尬',
+    '故事不得发生在"宗门/学院/家族"三大经典组织内，必须发生在组织外的边缘地带（边境/底层/灰色地带）'
+  ];
+  const antiTrope = ANTI_TROPE_POOL.map((v, i) => [Math.random(), i, v])
+    .sort((a, b) => a[0] - b[0]).slice(0, 3).map(([, , v]) => v);
+  const antiTropeBlock = `\n\n【本批反套路禁令（最高优先级，违反任何一条该创意即废稿）】
+以下禁令是本批随机抽取的，目的是逼出反套路的创意：
+${antiTrope.map((v, i) => `${i + 1}. ${v}`).join('\n')}`;
+
+  const seedBlock = seed
+    ? `\n\n【用户核心想法（最高优先级）】
+用户对这次创意有一个想法或方向要求，必须以此为出发点构思（在它的基础上展开差异化，严禁忽略或偏离）：
+「${seed}」
+注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
+    : '';
+
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${seedBlock}${antiTropeBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
