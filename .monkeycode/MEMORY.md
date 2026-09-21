@@ -706,3 +706,23 @@ Entries discovered by the Agent during task execution should follow this format:
   - 用户不要双男主题材（已从 GENRES/dualBlock/IDEAS_SYSTEM 全部移除）；双女主保留
   - 双女主感情线按用户明确要求：感情文（含百合向爱情线）与羁绊文（姐妹/知己/搭档/亦敌亦友）都允许，由创意风格决定
   - web/dist 在 gitignore 中，commit 时不要 add web/dist（会被拦截导致整个 commit 失败）；dist 由 build-and-patch 脚本打进补丁
+
+[Project Knowledge Summary]
+- Date: 2026-09-21
+- Context: 第十三轮（v1.4.40）超长篇一致性三防线
+- Category: Build Methods
+- Instructions:
+  - 长篇一致性防线分层：正则扫描器（免费，挂结构扫描段）→ LLM 复核确认真伪 → problems 重生成 / structureFixes 定向润色；LLM 校验只在 problems 空时跑（避免重复调用叠加成本）
+  - scanPersonaDrift 契约：锚点=角色档案 profile+personality，未确立的特质不判漂移（防误伤）；TRAIT_GUARD_RE 转变/扮演词豁免角色弧线；门槛 800 字；只查主角+建档角色前 6 人
+  - 记忆校验 checkMemoryConsistency 是独立函数（非增强 checkPlotConsistency）：章内逻辑与跨章记忆分开审，severity high→重生成、medium→structureFixes；记忆库全空（前1-2章）直接放行
+  - 开篇去模板化组合拳：ch1Note 开篇铁律对 idx===1 首次生成也生效 + 6 路随机开局路线注入（动作中途/对话中途/反常细节/声音先至/物件特写/体感先行）+ scanOpeningCliche 禁止唤醒模板
+  - 角色档案超长篇保护：profileBlock 主角优先排序+3500 字截断；第 1 章即建档（idx===1 || idx%10===0）；formatFactsBlock 上限待下轮补
+
+[Project Knowledge Summary]
+- Date: 2026-09-21
+- Context: 第十四轮（v1.4.41）事实库预算截断
+- Category: Build Methods
+- Instructions:
+  - formatFactsBlock(novelId, currentIdx, budget=4200)：角色组（character:）永远优先，其余按组内最新章号降序；超预算省略整组并注明"另有 N 组较早设定未逐条列出"；首组超预算时截断保留防空块
+  - 测试隔离 DB 用 NOVEL_DATA_DIR 环境变量重定向到 /tmp/opencode/r14data（db.js:8 支持），测试建小说直接 db.prepare INSERT INTO novels（db.js 无 createNovel 辅助函数）
+  - 截断类测试数据要按预算密度放大（4200 字预算需 ~120 条长事实才能触发截断），否则断言永不触发
