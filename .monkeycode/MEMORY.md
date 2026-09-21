@@ -736,3 +736,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - extractJson 自愈层清单（改前先核对别重复加）：think 标签剥离/围栏剥离/中文逗号/单引号键/内层引号/引号配对/注释剥离/截断自愈/尾逗号(v1.4.42)/裸控制符转义(v1.4.42)
   - 解析类任务兜底策略：正则自愈失败后用 LLM 自修复（模型修自己的坏输出）比正则补丁召回率高；ideas 路由已用此模式（1 次修复调用）
   - 测试解析器用 /tmp/opencode/test_round15.mjs 的形态样本（尾逗号/多行字符串/截断+换行/转义不破坏）
+
+[Project Knowledge Summary]
+- Date: 2026-09-21
+- Context: 第十六轮（v1.4.43）文笔扫描器盲区补齐
+- Category: Build Methods
+- Instructions:
+  - 加新扫描器前先 grep '^export function scan' server/src/lib.js 盘点存量（本轮 49→53 个），避免重复造轮子
+  - 章级特征（章尾钩子）扫章尾切片并按硬伤（problems）处理——章尾是下章门面；全文级套话（生理反应/伪精确）走 structureFixes 定向润色
+  - 阈值定式沿用：单处可容忍（真人也有惯用语），同类 ≥3 处或跨类合计超限才报；测试要有"阴性样本也过门槛"用例（T7 多类各 1 次不报）
+  - 扫描器挂载点：routes.js 5a 段（scanStiffTransition 附近），结构类进 structureFixes、硬伤进 problems
