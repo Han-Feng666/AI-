@@ -726,3 +726,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - formatFactsBlock(novelId, currentIdx, budget=4200)：角色组（character:）永远优先，其余按组内最新章号降序；超预算省略整组并注明"另有 N 组较早设定未逐条列出"；首组超预算时截断保留防空块
   - 测试隔离 DB 用 NOVEL_DATA_DIR 环境变量重定向到 /tmp/opencode/r14data（db.js:8 支持），测试建小说直接 db.prepare INSERT INTO novels（db.js 无 createNovel 辅助函数）
   - 截断类测试数据要按预算密度放大（4200 字预算需 ~120 条长事实才能触发截断），否则断言永不触发
+
+[Project Knowledge Summary]
+- Date: 2026-09-21
+- Context: 第十五轮（v1.4.42）灵感生成解析失败自愈
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - "模型返回内容无法解析"类报错排查链：先看 tryVariants 覆盖面（尾逗号/字符串内裸换行是最常见模型坏格式）→ 端到端 curl /api/ideas 复现 → 解析最终失败时查 data/idea_parse_failures.log（头800+尾400 字符留痕）
+  - extractJson 自愈层清单（改前先核对别重复加）：think 标签剥离/围栏剥离/中文逗号/单引号键/内层引号/引号配对/注释剥离/截断自愈/尾逗号(v1.4.42)/裸控制符转义(v1.4.42)
+  - 解析类任务兜底策略：正则自愈失败后用 LLM 自修复（模型修自己的坏输出）比正则补丁召回率高；ideas 路由已用此模式（1 次修复调用）
+  - 测试解析器用 /tmp/opencode/test_round15.mjs 的形态样本（尾逗号/多行字符串/截断+换行/转义不破坏）
