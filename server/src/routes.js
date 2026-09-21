@@ -17,6 +17,7 @@ import {
   scanRhetoricPileup, scanToldEmotion, scanOverBut, scanOminousForeshadow, scanClicheGesture,
   scanNameGuard, scanOpeningCliche, scanPremiseDrift, scanStiffTransition,
   scanAdjectivePileup, scanRhythmMonotony, scanVagueAbstraction,
+  scanEndingHookCliche, scanBodyReactionCliche, scanDoubleSimile, scanFakePrecision,
   scanPersonaDrift,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   normalizeLLMConfig, estimateTokens,
@@ -4769,6 +4770,13 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         structureFixes.push(...scanAdjectivePileup(full));
         structureFixes.push(...scanRhythmMonotony(full));
         structureFixes.push(...scanVagueAbstraction(full));
+        structureFixes.push(...scanBodyReactionCliche(full));
+        structureFixes.push(...scanDoubleSimile(full));
+        structureFixes.push(...scanFakePrecision(full));
+        for (const hookIssue of scanEndingHookCliche(full)) {
+          // 章尾是下章门面：模板钩子按硬伤处理，触发重生成
+          problems.push({ desc: hookIssue });
+        }
         for (const openIssue of scanOpeningCliche(full)) {
           problems.push({ desc: openIssue });
         }
