@@ -746,3 +746,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - 章级特征（章尾钩子）扫章尾切片并按硬伤（problems）处理——章尾是下章门面；全文级套话（生理反应/伪精确）走 structureFixes 定向润色
   - 阈值定式沿用：单处可容忍（真人也有惯用语），同类 ≥3 处或跨类合计超限才报；测试要有"阴性样本也过门槛"用例（T7 多类各 1 次不报）
   - 扫描器挂载点：routes.js 5a 段（scanStiffTransition 附近），结构类进 structureFixes、硬伤进 problems
+
+[Project Knowledge Summary]
+- Date: 2026-09-21
+- Context: 第十七轮（v1.4.44）灵感生成器增强
+- Category: Build Methods
+- Instructions:
+  - 灵感生成器三层差异化机制：差异化轴（金手指+身份槽位随机分配）→ 跨批去重（historyIdeas 签名排除）→ 反套路禁令（ANTI_TROPE_POOL 每批随机 3 条，锁"套路结构"而非具体词汇）
+  - 用户种子想法（seed）定位是"种子而非枷锁"：围绕它做 N 个角度展开，仍须满足彼此差异化铁律
+  - 前端构建铁律执行记录：web/src 改动 → cd web && npm run build（vite，约 18s）→ build-and-patch --bump（不带 --no-build）
+  - /api/ideas 为 SSE 流式端点，端到端测试用 curl -N -X POST 抓 "type":"done" 判成功
