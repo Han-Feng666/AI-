@@ -191,17 +191,50 @@ export function checkFactConflicts(novelId, newFacts, chapterIdx) {
   return conflicts;
 }
 
-export function formatFactsBlock(novelId, currentIdx = null) {
+// 事实库块预算截断：超长连载（数百章）事实持续累积，无上限会挤占生成上下文。
+// 截断策略：角色事实（character）优先 → 其余按组内最新章号降序（越近确立越可能与当章相关）
+// → 超预算省略并注明规模，防模型误以为"没有更多设定"；首组无条件保留，保证事实块永不为空。
+export function formatFactsBlock(novelId, currentIdx = null, budget = 4200) {
   const facts = getActiveFacts(novelId, currentIdx);
   if (!facts.length) return '';
-  const grouped = {};
+  const grouped = new Map();
   for (const f of facts) {
     const k = `${f.subject_type}:${f.subject_name}`;
-    if (!grouped[k]) grouped[k] = [];
-    grouped[k].push(`${f.fact_key}=${f.fact_value}（第${f.chapter_index}章确立）`);
+    if (!grouped.has(k)) grouped.set(k, []);
+    grouped.get(k).push(f);
   }
-  const lines = Object.entries(grouped).map(([k, items]) => `- ${k}：${items.join('；')}`);
-  return lines.join('\n');
+  const groups = [...grouped.entries()].map(([k, items]) => ({
+    key: k,
+    items,
+    lastChapter: Math.max(...items.map((f) => f.chapter_index))
+  }));
+  groups.sort((a, b) => {
+    const pa = a.key.startsWith('character:') ? 0 : 1;
+    const pb = b.key.startsWith('character:') ? 0 : 1;
+    if (pa !== pb) return pa - pb;
+    return b.lastChapter - a.lastChapter;
+  });
+  const lines = [];
+  let used = 0, omitted = 0;
+  for (const [i, g] of groups.entries()) {
+    const items = g.items.slice().sort((a, b) => a.chapter_index - b.chapter_index)
+      .map((f) => `${f.fact_key}=${f.fact_value}（第${f.chapter_index}章确立）`);
+    const line = `- ${g.key}：${items.join('；')}`;
+    if (i === 0 && line.length > budget) {
+      lines.push(line.slice(0, budget));
+      used = budget;
+      omitted++;
+      continue;
+    }
+    if (used + line.length > budget) { omitted++; continue; }
+    lines.push(line);
+    used += line.length + 1;
+  }
+  if (!lines.length) return '';
+  const capNote = omitted > 0
+    ? `\n（另有 ${omitted} 组较早设定未逐条列出，引用更早设定时以剧情日志与阶段摘要为准，保持一致）`
+    : '';
+  return lines.join('\n') + capNote;
 }
 
 // ---------- P1-2: 角色时间线 ----------
