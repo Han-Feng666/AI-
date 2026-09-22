@@ -667,7 +667,7 @@ function isTimeoutError(e) {
  * @param {object} opts.sse { send }
  * @returns {Promise<Array>} 各块成功解析的分析结果
  */
-async function analyzeChunksRateLimited({ config, ctrl, chunks, buildUserMessage, sse }) {
+async function analyzeChunksRateLimited({ config, ctrl, chunks, buildUserMessage, sse, onChunkDone }) {
   const signal = ctrl?.signal;
   const sleepWithSignal = (ms) => new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(Object.assign(new Error('AbortError'), { name: 'AbortError' }));
@@ -677,75 +677,78 @@ async function analyzeChunksRateLimited({ config, ctrl, chunks, buildUserMessage
       signal.addEventListener('abort', onAbort, { once: true });
     }
   });
-  const partialResults = [];
+  // v1.4.54：动态 worker pool 替代批次屏障——完成一块立即取下一块，
+  // 不再因 1 块退避拖累整批。结果按原始 chunkIndex 保序。
   const concurrency = 5;
+  const results = new Array(chunks.length).fill(null);
   let totalDone = 0;
+  let nextIdx = 0;
+  let aborted = false;
   const report = () => sse.send({
     type: 'progress',
     progress: 5 + Math.round((totalDone / chunks.length) * 70),
     message: `正在分析（${totalDone}/${chunks.length} 块）…`
   });
 
-  for (let batchStart = 0; batchStart < chunks.length; batchStart += concurrency) {
-    const batch = chunks.slice(batchStart, Math.min(batchStart + concurrency, chunks.length));
-    const tasks = batch.map((chunk, idx) =>
-      (async () => {
-        const chunkIndex = batchStart + idx;
-        for (let attempt = 1; attempt <= 4; attempt++) {
-          try {
-            await rateLimitAcquire(signal);
-            const r = await runLLMStream(config, [
-              { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
-              { role: 'user', content: buildUserMessage(chunk, chunkIndex) }
-            ], {
-              ctrl,
-              maxTokens: 1500,
-              streamIdleTimeout: 600000
-            });
-            if (r?.content) {
-              const parsed = extractJson(r.content);
-              if (parsed) {
-                totalDone++;
-                report();
-                return parsed;
-              }
-              // JSON 解析失败，还有重试次数则重试
-              if (attempt < 4) {
-                sse.send({ type: 'status', message: `分析返回格式异常，正在重试（第 ${attempt} 次）…` });
-                continue;
-              }
+  async function processChunk(chunkIndex) {
+    const chunk = chunks[chunkIndex];
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      if (aborted) return;
+      try {
+        await rateLimitAcquire(signal);
+        const r = await runLLMStream(config, [
+          { role: 'system', content: PER_CHUNK_ANALYSIS_SYSTEM },
+          { role: 'user', content: buildUserMessage(chunk, chunkIndex) }
+        ], {
+          ctrl,
+          maxTokens: 1500,
+          streamIdleTimeout: 600000
+        });
+        if (r?.content) {
+          const parsed = extractJson(r.content);
+          if (parsed) {
+            results[chunkIndex] = parsed;
+            totalDone++;
+            report();
+            // v1.4.54：每块分析完成即回调，供管线增量落盘
+            if (typeof onChunkDone === 'function') {
+              try { onChunkDone(chunkIndex, parsed); } catch { /* 回调失败不影响分析 */ }
             }
-            return null;
-          } catch (e) {
-            if (ctrl?.signal?.aborted) throw new Error('AbortError');
-            if (isRateLimitError(e) && attempt < 4) {
-              onRateLimited(e.retryAfter);
-              sse.send({ type: 'status', message: `分析请求触发限流，已降低速率并在冷却后自动重试（第 ${attempt} 次）…` });
-              continue;
-            }
-            if (isTimeoutError(e) && attempt < 3) {
-              await sleepWithSignal(Math.pow(2, attempt) * 3000);
-              continue;
-            }
-            // 非可重试错误：该块跳过，不计入 totalDone
-            return null;
+            return;
+          }
+          if (attempt < 4) {
+            sse.send({ type: 'status', message: `分析返回格式异常，正在重试（第 ${attempt} 次）…` });
+            continue;
           }
         }
-        // 4 次重试用尽仍失败：该块跳过，不计入 totalDone
-        return null;
-      })()
-    );
-
-    const results = await Promise.allSettled(tasks);
-    for (const result of results) {
-      if (result.status === 'rejected') {
-        if (result.reason?.message === 'AbortError') throw result.reason;
-        continue;
+        return;
+      } catch (e) {
+        if (ctrl?.signal?.aborted) { aborted = true; return; }
+        if (isRateLimitError(e) && attempt < 4) {
+          onRateLimited(e.retryAfter);
+          sse.send({ type: 'status', message: `分析请求触发限流，已降低速率并在冷却后自动重试（第 ${attempt} 次）…` });
+          continue;
+        }
+        if (isTimeoutError(e) && attempt < 3) {
+          await sleepWithSignal(Math.pow(2, attempt) * 3000);
+          continue;
+        }
+        return;
       }
-      if (result.value) partialResults.push(result.value);
     }
   }
-  return partialResults;
+
+  async function worker() {
+    while (nextIdx < chunks.length && !aborted) {
+      const idx = nextIdx++;
+      await processChunk(idx);
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, chunks.length) }, () => worker());
+  await Promise.allSettled(workers);
+  if (aborted) throw new Error('AbortError');
+  // 过滤掉失败的块（null），只保留成功的
+  return results.filter(Boolean);
 }
 
 /**
@@ -1069,19 +1072,26 @@ function buildNovelVoiceAnchor(novel, excludeIdx, maxChars = 1200) {
 /**
  * 样本切片批量打标（风格库 / 知识库共用），限速 + 失败容错。
  * 每批 5 片请求 LLM 输出场景标签；失败的片保留规则预分类结果。
+ * v1.4.54：串行 for 改为动态 worker pool（concurrency=5），预计 5x 提速
  * @returns {Promise<{tagged:number, failed:number}>}
  */
 async function tagSlicesRateLimited({ config, ctrl, slices, sse }) {
   resetLimiter();
   const BATCH = 5;
+  const concurrency = 5;
+  const batches = [];
+  for (let i = 0; i < slices.length; i += BATCH) {
+    batches.push(slices.slice(i, i + BATCH));
+  }
   let tagged = 0;
   let failed = 0;
-  for (let i = 0; i < slices.length; i += BATCH) {
-    if (ctrl?.signal?.aborted) break;
-    const batch = slices.slice(i, i + BATCH);
+  let done = 0;
+
+  async function processBatch(batch) {
     const user = batch.map((s, j) => `[片段${j}]（${s.text.length} 字）\n${s.text.slice(0, 1200)}`).join('\n\n');
-    let batchTagged = 0;
+    let batchTagged = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
+      if (ctrl?.signal?.aborted) break;
       try {
         await rateLimitAcquire(ctrl?.signal);
         const r = await runLLMStream(config, [
@@ -1097,8 +1107,8 @@ async function tagSlicesRateLimited({ config, ctrl, slices, sse }) {
               ? item.scene_tags.map((t) => String(t).trim()).filter((t) => SCENE_TAGS.includes(t)).slice(0, 3)
               : [];
             batch[idx].scene_tags = tags.length ? tags : preClassify(batch[idx].text);
-            batchTagged++;
           }
+          batchTagged = true;
         }
         break;
       } catch (e) {
@@ -1120,11 +1130,22 @@ async function tagSlicesRateLimited({ config, ctrl, slices, sse }) {
         failed++;
       }
     }
+    done += batch.length;
     if (slices.length > BATCH) {
-      const done = Math.min(i + BATCH, slices.length);
       sse?.send?.({ type: 'status', message: `样本打标中（${done}/${slices.length} 片）…` });
     }
   }
+
+  // 动态 worker pool：完成一批立即取下一批，无批次屏障
+  let nextIdx = 0;
+  async function worker() {
+    while (nextIdx < batches.length) {
+      if (ctrl?.signal?.aborted) break;
+      const idx = nextIdx++;
+      await processBatch(batches[idx]);
+    }
+  }
+  await Promise.allSettled(Array.from({ length: concurrency }, () => worker()));
   return { tagged, failed };
 }
 

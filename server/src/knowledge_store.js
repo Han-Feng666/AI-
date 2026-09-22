@@ -72,7 +72,7 @@ export function clearSamples(corpusId) {
 }
 
 export function updateSampleTags(corpusId, sliceIndex, sceneTags) {
-  db.prepare('UPDATE knowledge_samples SET scene_tags = ? WHERE corpus_id = ? AND slice_index = ?')
+  db.prepare('UPDATE knowledge_samples SET scene_tags = ? WHERE corpus_id = ? AND chunk_index = ?')
     .run(JSON.stringify(sceneTags || []), corpusId, sliceIndex);
 }
 
