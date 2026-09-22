@@ -848,3 +848,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 系统奖励的超凡能力也算跑偏："签到得死者残影视角"=通灵，加'残影视角/亡者视角'词
   - 命名与开局是软质量问题：IDEAS_SYSTEM 加主角命名要求（禁土味谐音梗，实锤点名赵大勺/陆大有）+ 强事件开局要求（被迫立刻行动，禁迷茫/找吃食/安顿开场）
   - 测试素材：/tmp/opencode/test_round25.mjs（三实锤命中 3 + 合法系统不误报 4 + 非系统不跑白名单 1 + 词表/函数/调用断言 7 + 命名开局断言 4 + 回归 3）
+
+[Project Knowledge Summary]
+- Date: 2026-09-22
+- Context: 第二十七轮（v1.4.53）风格库/知识库/灵感生成器三模块增强（用户要求"继续增强优化"三大核心模块）
+- Category: Build Methods|Troubleshooting & Debugging
+- Instructions:
+  - 知识库拼写 bug 教训：offline_learn.js 的 `repliclicable_techniques`（多了 li）与 prompts.js 的 `replicable_techniques` 不一致——离线学习后"技法"维度在 formatKnowledgeBlock 注入时直接丢失（parsed.replicable_techniques 为 undefined）；同类 bug 要检查所有分析字段名在离线引擎/LLM提示词/注入函数三处是否一致
+  - 分块分析与最终综合维度必须对齐：PER_CHUNK_ANALYSIS_SYSTEM 原有 6 维但 FINAL_SYNTHESIS_SYSTEM 要求 8 维，综合时 LLM 在"编"缺失维度而非"综合"已有信息——分块分析维度必须覆盖最终综合的全部字段
+  - DNA 维度扩充定式：离线引擎 analyzeStyleStats 已算 19 维但 DNA_DIMS 只取了 10 维——感官词频/时间过渡词/认知词/省略号/句长方差这些直接影响文风感知的维度被浪费；DNA_DIMS 扩到 16 维后 compareDNA 偏差检测更精准
+  - formatDNABlock 增强原则：从平铺数值改为分组指导（语感/对话/感官/节奏/标点），每维附带判断标准（如"感官词低于5/千字时文风偏抽象"），让模型不只看到数字还能理解含义
+  - 灵感生成器联动定式：/ideas 路由已接受 styleIds 参数注入 analysis 文本——增强为同时注入 formatDNABlock(mergeDNA(dnas))；知识库用 getKnowledgeByGenres(genreList, 3) 按题材自动匹配（无需用户手动关联），只注入 plot_patterns/scene_patterns/character_craft/replicable_techniques 四维（非全量，避免 prompt 膨胀）
+  - 测试素材：/tmp/opencode/test_round26.mjs（拼写修复 5 + 维度对齐 6 + DNA 扩充 6 + formatDNABlock 6 + 润色指令 5 + 灵感联动 8 + 回归 4 = 40 断言）
