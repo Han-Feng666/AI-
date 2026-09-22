@@ -791,3 +791,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 截断自愈会救回"只有 title"的半成品对象：调用方须过滤关键字段双缺的残缺项（ideas 场景=hook/logline 双缺剔除）
   - maxOut 缩放定式：数组型大输出按元素数缩放（ideas=ideaCount*2200 封顶 16384），用户显式 maxTokens 原样透传；8192 下限对 6 创意不够用
   - 测试素材：/tmp/opencode/test_round19.mjs（前缀截断/围栏截断/深层截断/think 截断/切片顺序/maxOut 公式 17 用例）
+
+[Project Knowledge Summary]
+- Date: 2026-09-22
+- Context: 第二十一轮（v1.4.48）方案题材矩阵精细化（用户实锤：勾历史穿越架空，产出神秘老商人超自然金手指+高学历不懂学问剧情）
+- Category: Build Methods
+- Instructions:
+  - 题材标签分两类：真超凡（玄幻/仙侠/灵异——世界观本身超凡）vs 机制型（穿越/重生/系统——剧情机制，世界观仍现实向）；"幻想向放行"开关只认真超凡（hasTrueFantasyTag），机制型组合必须进精细约束矩阵
+  - isFantasyGenre（含穿越/重生/系统）与 hasTrueFantasyTag 语义不同并存：前者保持原调用方语义，后者用于约束放行判断；"历史+穿越"整体放行会让超自然金手指漏出
+  - 穿越+无系统+无玄幻的载体锁定话术：优势必须落在现代知识/技能/记忆/信息差且知识边界写实（懂什么不懂什么为什么懂）；神秘人物/残魂/器物有灵/神秘力量交换点名禁止（实锤案例写进 prompt 效果最好）
+  - 设定与行为硬矛盾（高学历却不懂学问）无法正则检测：用 LLM 复核（PLAN_COHERENCE_CHECK_SYSTEM），判定纪律要写清豁免条款（穿越者对环境陌生不算矛盾、偏科生疏不算矛盾），宁放行不误伤；复核失败静默放行不阻塞主流程
+  - LLM 复核接入重试链路的模式：violations（正则）+ coherenceIssues（LLM）合并成一个 allIssues 列表，重试提示词按实际问题动态生成；重试后再复核，问题数减少才采纳
+  - 测试素材：/tmp/opencode/test_round20.mjs（hasTrueFantasyTag 7 用例 + 约束矩阵 9 用例 + prompt 在位 3 用例）
