@@ -779,3 +779,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 灵感页 FANTASY_KEYWORDS 与方案层 PLAN_FANTASY_KEYWORDS 语义不同勿合并：灵感页=超凡金手指池开关（穿越/重生/系统故意排除走专门分支），方案层=现实向约束放行名单；合并会让"历史+穿越"塞血脉觉醒池
   - 门禁剔除后全空必须短路 return error：掉进"解析失败→LLM修复"路径会把刚剔除的违规创意原样解析回来
   - 校验器测试定式：实锤事故案例必须命中 + 合法系统创意（面板/签到/模拟器）不误报 + fantasyOk 跳过 + 逗号短句边界（"摸到断簪，看见"间隔集须允许逗号）
+
+[Project Knowledge Summary]
+- Date: 2026-09-22
+- Context: 第二十轮（v1.4.47）灵感解析失败加固（用户实锤：生成等很久后报"内容无法解析"）
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - "模型返回内容无法解析"排查链升级：先查 data/idea_parse_failures.log 失败形态 → extractJson 盲区核对（前缀+截断组合曾漏救）→ 解析类失败现在有三层兜底：正则自愈/截断修复 → 自动重试一次主生成 → LLM 修复器（输入 16000 字符，提示词含"截断只保留完整元素"）
+  - extractJson 截断修复必须先剥前缀：模型输出"以下是创意：\n[…"被截断时，含前缀修复后仍无法 parse——先 search(/[\[{]/) 定位 JSON 起点
+  - 切片顺序定式：对象/数组切片按 JSON 起点类型选优先级（[ 在 { 前则数组优先）——固定顺序会让"前后缀+数组"切出单元素对象、让"前缀+骨架对象"切出内层 characters 数组
+  - 截断自愈会救回"只有 title"的半成品对象：调用方须过滤关键字段双缺的残缺项（ideas 场景=hook/logline 双缺剔除）
+  - maxOut 缩放定式：数组型大输出按元素数缩放（ideas=ideaCount*2200 封顶 16384），用户显式 maxTokens 原样透传；8192 下限对 6 创意不够用
+  - 测试素材：/tmp/opencode/test_round19.mjs（前缀截断/围栏截断/深层截断/think 截断/切片顺序/maxOut 公式 17 用例）
