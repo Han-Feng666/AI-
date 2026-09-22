@@ -836,3 +836,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 系统+穿越时身份槽位必须换"穿越者来历"措辞池（现代上班族/工程师/历史教师穿越者等），古代身份措辞槽位（基层小吏/市井游民）会被模型结合成"穿越成基层小吏"的魂穿语法
   - 玄幻+穿越保持豁免：transmigrationBlock 不注入（魂穿/夺舍在玄幻世界观是常见合法设定，由灵感自行声明）
   - 回归测试集按轮拆分：/tmp/opencode/test_round7.mjs ~ test_round24.mjs 逐个跑；round21/22 断言随代码演进更新过（条件表达式、池子结构）
+
+[Project Knowledge Summary]
+- Date: 2026-09-22
+- Context: 第二十六轮（v1.4.52）系统题材白名单兜底+预演残影词+命名开局要求（用户实锤三条：一页万金手记具现/先知先饿脑内推演/签到见尸死者残影视角，且名字难听+开局无聊）
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 黑名单追词永远追不全（模型造新词绕过），系统题材必须黑名单+白名单双轨：SYSTEM_FORM_TOKENS（面板/界面/任务/积分/签到/商城/兑换/弹窗/等级/属性/模拟器等）——isSystem 时金手指字段无任一形态词=载体偷换（"能力系统化"新形态④：超凡能力冠名"系统"）
+  - detectIdeaCarrierDrift 加第三参 isSystem，isSystem=true 时跑白名单兜底；非系统题材（isSystem=false）不跑白名单（现代知识类金手指合法）
+  - 词表收紧教训：'预演...走向'误报合法模拟器系统（"以面板预演政策走向"=系统功能），改为只匹配'预演(未来|祸|灾|死)'；"脑内推演"单独加词拦脑内形态
+  - 系统奖励的超凡能力也算跑偏："签到得死者残影视角"=通灵，加'残影视角/亡者视角'词
+  - 命名与开局是软质量问题：IDEAS_SYSTEM 加主角命名要求（禁土味谐音梗，实锤点名赵大勺/陆大有）+ 强事件开局要求（被迫立刻行动，禁迷茫/找吃食/安顿开场）
+  - 测试素材：/tmp/opencode/test_round25.mjs（三实锤命中 3 + 合法系统不误报 4 + 非系统不跑白名单 1 + 词表/函数/调用断言 7 + 命名开局断言 4 + 回归 3）
