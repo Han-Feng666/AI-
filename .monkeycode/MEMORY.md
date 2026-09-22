@@ -803,3 +803,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 设定与行为硬矛盾（高学历却不懂学问）无法正则检测：用 LLM 复核（PLAN_COHERENCE_CHECK_SYSTEM），判定纪律要写清豁免条款（穿越者对环境陌生不算矛盾、偏科生疏不算矛盾），宁放行不误伤；复核失败静默放行不阻塞主流程
   - LLM 复核接入重试链路的模式：violations（正则）+ coherenceIssues（LLM）合并成一个 allIssues 列表，重试提示词按实际问题动态生成；重试后再复核，问题数减少才采纳
   - 测试素材：/tmp/opencode/test_round20.mjs（hasTrueFantasyTag 7 用例 + 约束矩阵 9 用例 + prompt 在位 3 用例）
+
+[Project Knowledge Summary]
+- Date: 2026-09-22
+- Context: 第二十二/二十三轮（v1.4.49）穿越灵感身份自由化（用户两轮实锤：底层打工+魂穿原主+遗留关系绑架）
+- Category: Build Methods
+- Instructions:
+  - 用户明确指令（生成内容硬底线）：穿越=身穿（禁魂穿/附身/夺舍/穿成原主）；开局孤家寡人无家人朋友；身份不要固定——可白手起家随剧情发展获得地位；严禁开局给人打工；严禁现代职业直译成古代同类营生（运动员→纤夫式一一对应）
+  - 槽位措辞陷阱：身份槽位写"穿越成X"会引导模型写成魂穿（实锤：槽位"穿越成纤夫"→"身体是原主的"）；预设具体身份槽位会把创意框死（底层身份槽位→清一色打工故事）——穿越分支身份已完全放开，硬底线用约束块管，差异化靠金手指轴+反套路+批内去重
+  - 反套路禁令矫枉过正教训：'目标必须是具体的有限的执念（找到一个人/赎回一件东西）'被模型字面执行成"还半贯钱/送木匣/赎银簪"流水账——禁令必须加下限（执念挂大阴影或硬期限），否则模型会滑向另一个极端
+  - "轻松日常"风格的看点定义要显式给出：错位与机智的喜剧张力；不给定义模型会理解成无冲突日常琐事
+  - 灵感页现役约束块：genreConformityBlock（题材贴合）+ transmigrationBlock（穿越形态）+ antiTropeBlock（反套路）+ 载体门禁（!isFantasy 时扫 MYSTICAL_CARRIER_RE）
+  - 测试素材：/tmp/opencode/test_round22.mjs（身份自由化 21 用例）
