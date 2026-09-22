@@ -50,7 +50,7 @@ import {
   IDEAS_SYSTEM,
   buildNovelContext, buildChapterSystem, buildPolishSystem,
   buildPolishWithIssues, buildPlotFixSystem, buildElevateSystem, extractJson, extractArray, buildReviseSystem,
-getGenreGuide, getGenreGuides, buildPlanGenreConformity
+getGenreGuide, getGenreGuides, buildPlanGenreConformity, buildAntiTropeBlock
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
@@ -1769,24 +1769,9 @@ ${bannedKws.length ? `- 用户未选择以下题材元素，严禁作为主题�
 ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM_KEYWORDS.some((k) => g.includes(k))).join('、')}"但未勾选玄幻/修仙/奇幻等玄修题材：金手指必须是纯系统载体（面板/任务/兑换/签到/模拟等），严禁出现"血脉/血脉觉醒/灵根/传承记忆/法宝/契约召唤"等玄幻绑定型设定——历史/架空背景里的金手指只能是系统的，不能靠血统。` : ''}
 - 违反题材贴合的创意视为废稿。`;
 
-  // 换皮对抗：每批次随机抽 3 条"反套路禁令"注入，强制创意脱离 AI 默认套路分布
-  const ANTI_TROPE_POOL = [
-    '主角开局不得是"底层废物被人看不起"的处境（受气赘婿/废柴弟子/被退婚的窝囊婿都算），必须从"有基本体面或主动权"的位置出发',
-    '金手指不得是"面板/属性/等级"形态，必须是非数值化的（一件具体物件、一种感官异能、一段可消耗的关系）',
-    '世界观切入不得从"大陆/王国/宗门"的宏观设定开始，必须从一个具体的行业/职业/生意切入',
-    '反派不得是"嚣张跋扈的富二代/长辈/长老"，必须有体面的身份和正当得近乎可怜的动机',
-    '开局冲突不得发生在"当众受辱"场景（退婚宴/比武台/宗门大比都算），必须发生在无人围观的私人时刻',
-    '主角的核心目标不得是"变强/复仇/证明自己"，必须是一个具体的、有限的、可完成的执念（找到一个人/赎回一件东西/守住一个承诺）',
-    '故事不得以"捡到宝物/得到传承/被高人看中"作为转折起点，转折必须由主角自己做的一件小事引发',
-    '重要配角中必须有一位与主角立场对立但惺惺相惜的对手型人物，且此人在前五章就要出场',
-    '感情线（若有）不得从"英雄救美/一见钟情/指腹为婚"开始，两人的初次交集必须充满误算或尴尬',
-    '故事不得发生在"宗门/学院/家族"三大经典组织内，必须发生在组织外的边缘地带（边境/底层/灰色地带）'
-  ];
-  const antiTrope = ANTI_TROPE_POOL.map((v, i) => [Math.random(), i, v])
-    .sort((a, b) => a[0] - b[0]).slice(0, 3).map(([, , v]) => v);
-  const antiTropeBlock = `\n\n【本批反套路禁令（最高优先级，违反任何一条该创意即废稿）】
-以下禁令是本批随机抽取的，目的是逼出反套路的创意：
-${antiTrope.map((v, i) => `${i + 1}. ${v}`).join('\n')}`;
+  // 换皮对抗：每批随机抽 3 条"反套路禁令"注入（共享池见 prompts.js ANTI_TROPE_POOL），
+  // 强制创意脱离 AI 默认套路分布；方案层（/novels/:id/plan）同样注入，防"创意反套路、方案又套路回去"
+  const antiTropeBlock = buildAntiTropeBlock();
 
   const seedBlock = seed
     ? `\n\n【用户核心想法（最高优先级）】
@@ -2331,7 +2316,7 @@ const userPrompt = `${conceptRule}
  
  【严禁止凭空编造——灵感唯一性铁律】
  用户灵感是本作唯一真相来源。灵感中未提及的情节（如被家族打死、被嘲讽退婚、获得系统等），严禁在方案中自行添加。禁止套用网文默认模板（如"废物嫡子""退婚打脸""签到系统""新手礼包"等）。主角开局处境必须严格按灵感描述，不得额外添加恩怨/家族/机缘设定。
- 
+ ${buildAntiTropeBlock()}
  请输出创作方案骨架 JSON。`;
 
   if (presets.length) {
@@ -2560,7 +2545,7 @@ ${parts.join('\n\n')}
       const violations = detectConceptViolations(conceptText, skeleton);
       if (violations.length) {
         send({ type: `status`, message: `骨架与灵感冲突：${violations.join('；')}，正在按灵感重生成…` });
-        const retryPrompt = userPrompt + `\n\n【强制修正】上一次骨架违反了灵感：${violations.join('；')}。请严格按灵感重写，主角必须是身穿且无家人，不得写魂穿/夺舍/原身/家族废物嫡子。`;
+        const retryPrompt = userPrompt + `\n\n【强制修正】上一次骨架违反了灵感：${violations.join('；')}。请严格按灵感重写方案，灵感中写明的设定（物件/能力/职业/组织/人物处境）必须原样保留，灵感未提及的情节严禁添加。`;
         const retry = await jsonFrom(
           [
             { role: 'system', content: trimmedSys },
