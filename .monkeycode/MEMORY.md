@@ -767,3 +767,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 违规重试提示词必须按实际 violations 动态生成，禁止硬编码特定约束（原"必须身穿且无家人"对无此约束的灵感是错误指令）
   - AI_DETECT_SYSTEM 现为 45 类，与 lib.js 53 个扫描器对应；加扫描器后须同步补检测类别，两边不同步会导致 LLM 审查漏检
   - 测试集：/tmp/opencode/test_round17.mjs（题材分类 25 用例 + seed loss 5 用例 + 反套路块 4 用例）；round7-16 全部可回归且当前全绿
+
+[Project Knowledge Summary]
+- Date: 2026-09-22
+- Context: 第十九轮（v1.4.46）灵感载体跑偏修复（用户实锤：勾历史架空穿越系统，产出通感溯源/先祖残魂）
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 题材跑偏的隐蔽形态：模型"保留功能、偷换载体"——信息溯源系统→摸物通感、任务系统→先祖残魂发任务；genre 字段照抄合规标签，标签门禁（genreAllowed）查不出内容偷换
+  - 禁令分层口诀升级：锁具体词汇（血脉/灵根/法宝）→ 模型造新词绕过；锁载体结构（系统必须有面板/提示音/任务列表等界面化形态）才有效
+  - 三种偷换形态实锤：①感官异能化（系统→身体感官）②残魂寄宿化（系统→亡魂/先祖充当）③器物灵性化（系统代价→草木枯荣/器物损耗灵性）；MYSTICAL_CARRIER_RE 按这五类载体特征词扫描
+  - 灵感页 FANTASY_KEYWORDS 与方案层 PLAN_FANTASY_KEYWORDS 语义不同勿合并：灵感页=超凡金手指池开关（穿越/重生/系统故意排除走专门分支），方案层=现实向约束放行名单；合并会让"历史+穿越"塞血脉觉醒池
+  - 门禁剔除后全空必须短路 return error：掉进"解析失败→LLM修复"路径会把刚剔除的违规创意原样解析回来
+  - 校验器测试定式：实锤事故案例必须命中 + 合法系统创意（面板/签到/模拟器）不误报 + fantasyOk 跳过 + 逗号短句边界（"摸到断簪，看见"间隔集须允许逗号）
