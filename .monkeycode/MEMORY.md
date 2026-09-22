@@ -815,3 +815,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - "轻松日常"风格的看点定义要显式给出：错位与机智的喜剧张力；不给定义模型会理解成无冲突日常琐事
   - 灵感页现役约束块：genreConformityBlock（题材贴合）+ transmigrationBlock（穿越形态）+ antiTropeBlock（反套路）+ 载体门禁（!isFantasy 时扫 MYSTICAL_CARRIER_RE）
   - 测试素材：/tmp/opencode/test_round22.mjs（身份自由化 21 用例）
+
+[Project Knowledge Summary]
+- Date: 2026-09-22
+- Context: 第二十四轮（v1.4.50）灵异载体词表扩充（用户实测：历史架空系统穿越仍生成阴差/风水/命格类创意）
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 载体门禁黑名单词表永远列不全（模型会造新词），必须黑名单+白名单双轨：MYSTICAL_CARRIER_RE 扩到 60+ 词（含灵异/民俗形态：阴差/城隍/地府/出马仙/狐仙/邪祟/风水局/命格/业力等）+ prompt 层"世界观本底白名单"（世界是纯现实的，唯一超凡元素=系统本身）
+  - "命格/八字"这类词在系统文里作为系统参数出现也算玄学越界（命格系统=把玄学引入世界观），词表已收；比喻性用法（"地府般的矿道"）会误报，属可接受代价（剔除+提示可重新生成）
+  - 纯现实向题材（系统/穿越/都市等）统一走载体门禁（!isFantasy 条件）；勾了玄幻/灵异/修仙类则 fantasyOk 跳过
+  - 测试素材：/tmp/opencode/test_round23.mjs（灵异词命中 8 + 合法系统不误报 4 + 边界 2 + 白名单断言 4 + 跳过回归 1）
