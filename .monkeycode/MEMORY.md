@@ -756,3 +756,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - 用户种子想法（seed）定位是"种子而非枷锁"：围绕它做 N 个角度展开，仍须满足彼此差异化铁律
   - 前端构建铁律执行记录：web/src 改动 → cd web && npm run build（vite，约 18s）→ build-and-patch --bump（不带 --no-build）
   - /api/ideas 为 SSE 流式端点，端到端测试用 curl -N -X POST 抓 "type":"done" 判成功
+
+[Project Knowledge Summary]
+- Date: 2026-09-22
+- Context: 第十八轮（v1.4.45）方案层同质化防线
+- Category: Build Methods
+- Instructions:
+  - 反套路机制分层复用：ANTI_TROPE_POOL/buildAntiTropeBlock 抽在 prompts.js 作为单一来源，/ideas 与 /novels/:id/plan 共用（防"创意反套路、方案又套路回去"）
+  - 灵感种子保真校验（detectSeedLoss）：提取灵感中引号强调短语 + "能/会/可以+动词短语"能力描述，方案中全部丢失即触发重写；命中判定用 4 字滑窗容错（模型会部分复述原短语）；灵感 <20 字跳过（不误报）；挂在 detectConceptViolations 尾部，自动获得骨架重试链路
+  - 违规重试提示词必须按实际 violations 动态生成，禁止硬编码特定约束（原"必须身穿且无家人"对无此约束的灵感是错误指令）
+  - AI_DETECT_SYSTEM 现为 45 类，与 lib.js 53 个扫描器对应；加扫描器后须同步补检测类别，两边不同步会导致 LLM 审查漏检
+  - 测试集：/tmp/opencode/test_round17.mjs（题材分类 25 用例 + seed loss 5 用例 + 反套路块 4 用例）；round7-16 全部可回归且当前全绿
