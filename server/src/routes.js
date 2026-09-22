@@ -37,6 +37,7 @@ import {
   NOVEL_PLAN_SYSTEM, PLAN_SKELETON_SYSTEM, PLAN_CHAPTERS_SYSTEM, PLAN_REVISE_SYSTEM,
   buildConceptFidelityRule, detectConceptViolations, analyzeConceptConstraints,
   CONCEPT_FAMILY_CHECK_SYSTEM, ADVANCE_CHECK_SYSTEM, CHARACTER_STATE_SYSTEM, OPENING_JUDGE_SYSTEM, KIN_RE, detectKinMentions,
+  PLAN_COHERENCE_CHECK_SYSTEM,
   CHAPTER_SYSTEM, CHAPTER_TITLE_SYSTEM,
   CHAPTER_SUMMARY_SYSTEM, POLISH_SYSTEM, STYLE_ANALYZE_SYSTEM,
   CHAT_SYSTEM, COMPRESS_SYSTEM, COMPRESS_UPDATE_SYSTEM,
@@ -231,6 +232,40 @@ async function runFamilyViolationCheck(config, concept, full, kinMatches) {
   });
   const j = extractJson(r.content) || {};
   return { violating: !!j.violating, evidence: String(j.evidence || ''), reason: String(j.reason || '') };
+}
+
+// 方案逻辑自洽复核：设定与行为硬矛盾检测（高学历却不懂学问/工程师不会本行）。
+// 输入截取主角+主要角色设定与前 8 章概要（~4000 字符），失败静默放行（宁放行不误伤）
+async function checkPlanCoherence(skeleton, send, config) {
+  try {
+    const chars = Array.isArray(skeleton?.characters) ? skeleton.characters : [];
+    const charBlock = chars.slice(0, 6).map((c) =>
+      `- ${c.name || '?'}（${c.role_type || '角色'}）：${[c.background, c.description, c.ability, c.personality].filter(Boolean).join('；')}`
+    ).join('\n').slice(0, 2200);
+    const chapters = Array.isArray(skeleton?.chapters) ? skeleton.chapters : [];
+    const chapBlock = chapters.slice(0, 8).map((c) =>
+      `第${c.chapter_index || '?'}章 ${c.title || ''}：${c.summary || ''}`
+    ).join('\n').slice(0, 2600);
+    if (!charBlock || !chapBlock) return [];
+    const r = await chat({
+      config,
+      task: 'analysis',
+      wantsJson: true,
+      messages: [
+        { role: 'system', content: PLAN_COHERENCE_CHECK_SYSTEM },
+        { role: 'user', content: `【角色设定】\n${charBlock}\n\n【前几章剧情概要】\n${chapBlock}\n\n请检查设定与行为是否存在硬矛盾。` }
+      ],
+      maxTokens: 600
+    });
+    const j = extractJson(r.content) || {};
+    const issues = Array.isArray(j.issues) ? j.issues : [];
+    return issues
+      .map((it) => `设定与剧情矛盾（${String(it.reason || '').slice(0, 60)}：${String(it.evidence || '').slice(0, 120)}）`)
+      .filter((s) => s.length > 12)
+      .slice(0, 3);
+  } catch {
+    return [];
+  }
 }
 
 // 开局章节快进检测：前3章正文若已把后续章节的剧情写完（把三章的量塞进一章），判定为节奏事故
@@ -2364,7 +2399,7 @@ const userPrompt = `${conceptRule}
  ${referenceNotes ? `\n同类小说参考（借鉴其题材套路与节奏，但不要抄袭情节）：\n${referenceNotes}` : ''}
   ${novel.meme_elements ? `\n【网络梗/元素要求】本书需要融入以下网络梗或趣味元素：${novel.meme_elements}。请在剧情、对话或角色设定中自然融入这些元素，让小说更具网感和趣味性。梗的使用要自然不生硬，可以化用、变体，不要生搬硬套。` : ''}
 
-【题材边界强调】所选类型为：${genre || novel.genre || '未指定'}。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等超凡标签，则本书为现实向，力量体系只能是武功谋略，严禁把"学习/修炼"写成玄幻修仙境界（灵气、金丹、元婴、御剑等等一概禁止），严禁掺入血脉觉醒、灵根、传承记忆等玄幻绑定型设定；意外死亡穿越也不是获得超凡能力的理由。${/系统|金手指|数据流/.test(genre || novel.genre || '') ? '用户已勾选系统题材：系统/面板/任务等金手指机制按所选设定展开（纯系统载体，严禁掺血脉/灵根/法宝等玄幻元素）。' : ''}
+【题材边界强调】所选类型为：${genre || novel.genre || '未指定'}。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等超凡标签，则本书为现实向，力量体系只能是武功谋略，严禁把"学习/修炼"写成玄幻修仙境界（灵气、金丹、元婴、御剑等等一概禁止），严禁掺入血脉觉醒、灵根、传承记忆等玄幻绑定型设定；意外死亡穿越也不是获得超凡能力的理由。${/系统|金手指|数据流/.test(genre || novel.genre || '') ? '用户已勾选系统题材：系统/面板/任务等金手指机制按所选设定展开（纯系统载体，严禁掺血脉/灵根/法宝等玄幻元素）。' : /穿越|重生/.test(genre || novel.genre || '') ? '用户勾选了穿越/重生但未勾选系统与玄幻题材：主角的全部优势必须落在现代人知识/技能/记忆/信息差上，且知识边界要写实（懂什么、不懂什么、为什么懂）。严禁出现神秘人物/神秘老人/残魂/器物有灵/神秘力量交换等超自然载体——"神秘老商人帮主角、每帮一次老去一岁"这类设定就是超自然载体，属于废稿。' : ''}
  ${buildPlanGenreConformity(genre || novel.genre || '')}
  
  【严禁止凭空编造——灵感唯一性铁律】
@@ -2594,11 +2629,14 @@ ${parts.join('\n\n')}
       { cap: skeletonMaxOut }
     );
     // 概念忠实度校验：骨架若违反灵感（身穿写成魂穿 / 没家人写成家族废物），重试一次
+    // 逻辑自洽复核：设定与行为硬矛盾（高学历却不懂学问/工程师不会本行）一并进重试链路
     if (skeleton) {
       const violations = detectConceptViolations(conceptText, skeleton);
-      if (violations.length) {
-        send({ type: `status`, message: `骨架与灵感冲突：${violations.join('；')}，正在按灵感重生成…` });
-        const retryPrompt = userPrompt + `\n\n【强制修正】上一次骨架违反了灵感：${violations.join('；')}。请严格按灵感重写方案，灵感中写明的设定（物件/能力/职业/组织/人物处境）必须原样保留，灵感未提及的情节严禁添加。`;
+      const coherenceIssues = await checkPlanCoherence(skeleton, send, config);
+      const allIssues = [...violations, ...coherenceIssues];
+      if (allIssues.length) {
+        send({ type: `status`, message: `骨架问题：${allIssues.join('；')}，正在按灵感重生成…` });
+        const retryPrompt = userPrompt + `\n\n【强制修正】上一次骨架存在以下问题：${allIssues.join('；')}。请严格按灵感重写方案，灵感中写明的设定（物件/能力/职业/组织/人物处境）必须原样保留，灵感未提及的情节严禁添加。角色设定与剧情行为必须自洽：角色的学识/技能/职业背景与其展现的能力必须匹配，穿越者的知识边界要写实（懂什么、不懂什么、为什么懂）。`;
         const retry = await jsonFrom(
           [
             { role: 'system', content: trimmedSys },
@@ -2610,7 +2648,8 @@ ${parts.join('\n\n')}
         );
         if (retry) {
           const retryViolations = detectConceptViolations(conceptText, retry);
-          if (retryViolations.length < violations.length) {
+          const retryCoherence = await checkPlanCoherence(retry, send, config);
+          if (retryViolations.length + retryCoherence.length < allIssues.length) {
             skeleton = retry;
             send({ type: 'status', message: '骨架已按灵感修正。' });
           }

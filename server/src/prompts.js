@@ -176,6 +176,27 @@ export const CONCEPT_FAMILY_CHECK_SYSTEM = `你是小说概念忠实度审核员
 只输出 JSON，不要其他文字：
 {"violating": true/false, "evidence": "违规处最关键的一句原文引用（不违规则为空字符串）", "reason": "一句话判定理由"}`;
 
+// 方案逻辑自洽审查：方案骨架的角色设定与其展现的行为/剧情必须自洽——
+// "高学历大学生只会考试不懂学问""工程师出身却不会基础修理"这类设定与行为矛盾
+// 是方案层最常见的逻辑事故（模型套模板时把人设和剧情写脱节）。
+// 只审"设定说 A、剧情做 B"的硬矛盾，剧情好坏/创意优劣不在此列。
+export const PLAN_COHERENCE_CHECK_SYSTEM = `你是小说方案逻辑审查员。给你"主角与主要角色设定"和"前几章剧情概要"，只检查一类问题：设定与行为的硬矛盾——设定里明确写了的能力/学识/职业/身份，在剧情里被违反或形同虚设。
+
+典型矛盾形态：
+1. 学识矛盾：设定"名校高材生/学霸/资深工程师"，剧情里却"不懂基础学问/看不懂账本/连常识性问题都不会"——高学历可以偏科、可以缺乏某领域经验，但"只会考试完全不懂学问"与高学历设定直接矛盾；
+2. 技能矛盾：设定"前工程师/老医生/资深刑警"，剧情里却对本身专业的基础操作一无所知，或要外行教他本行常识；
+3. 身份矛盾：设定"富商/官员之后"，剧情里却对行业规矩/家族处境一无所知且无解释（穿越/失忆等设定可豁免——若设定明确写了穿越者对古代规则陌生，这不算矛盾）；
+4. 年龄/经历矛盾：设定"从业十年的老手"，剧情行为却是入行新手的水平。
+
+判定纪律：
+- 只报"设定与剧情直接冲突"的硬矛盾，且能引用两边的原文证据（设定一句+剧情一句）；
+- 偏科、生疏、谨慎、缺乏经验这类合理弱点不算矛盾；
+- 穿越者/失忆者对环境陌生是设定允许的，不算矛盾；
+- 拿不准时 issues 留空（宁放行不误伤）。
+
+只输出 JSON，不要其他文字：
+{"issues": [{"evidence": "设定原文与剧情原文的对比（各引一句）", "reason": "一句话说明矛盾"}]}`;
+
 // 开局章节快进检测：正文若已把后续章节的剧情写完（把三章的量塞进一章），判定为节奏事故
 export const ADVANCE_CHECK_SYSTEM = `你是小说节奏审核员。连载小说每章只应推进该章概要规划的剧情。你将看到"本章序号与全书章数"、"本章剧情概要"、"后续章节概要"和"正文抽样（开头/中段/结尾）"。判定 advanced=true 须满足：正文抽样中出现的事件能在"后续章节概要"中找到对应——即把后面章节规划的核心事件提前演完了。典型形态：一章之内连续完成"突破境界→拜师→击败大敌→进入新地图"等多个本应分布在不同章节的里程碑；或中段就发生了第N+1、N+2章概要里的事件，结尾只是换个场景继续。
 
@@ -1062,6 +1083,20 @@ export function isFantasyGenre(genre = '') {
   return list.some((g) => PLAN_FANTASY_KEYWORDS.some((k) => g.includes(k)));
 }
 
+// 真超凡题材判断：只认玄幻/仙侠/灵异等"世界观本身就是超凡"的标签。
+// 与 isFantasyGenre 的区别：穿越/重生/系统是"剧情机制"而非超凡世界观——
+// "历史+穿越"的世界观仍是现实向古代，金手指载体必须受现实向约束。
+// 曾因 isFantasyGenre 含'穿越'导致"历史 穿越 架空"整体放行，
+// 生成"神秘老商人用人情换商业突破（每用一次老去一岁）"这类超自然金手指。
+const TRUE_FANTASY_KEYWORDS = PLAN_FANTASY_KEYWORDS.filter(
+  (k) => !['穿越', '重生', '系统', '时间旅行', '平行宇宙'].includes(k)
+);
+
+export function hasTrueFantasyTag(genre = '') {
+  const list = String(genre || '').split(/[/、,，\s]+/).map((s) => s.trim()).filter(Boolean);
+  return list.some((g) => TRUE_FANTASY_KEYWORDS.some((k) => g.includes(k)));
+}
+
 export function isYouthGenre(genre = '') {
   if (isFantasyGenre(genre)) return false;
   const list = String(genre || '').split(/[/、,，\s]+/).map((s) => s.trim()).filter(Boolean);
@@ -1071,10 +1106,11 @@ export function isYouthGenre(genre = '') {
 // 创作方案题材贴合硬约束：现实向题材严禁穿越/重生/系统/召唤/契约等套模板设定。
 // 与 /ideas 的 genreConformityBlock 同源（动态禁令）：用户明确勾选的模板（穿越/重生/系统/金手指）
 // 从禁单中放行，其余超自然设定照禁——避免"题材勾了系统、方案又禁系统"的矛盾指令。
-// 幻觉/纯粹的超凡题材返回空串不做限制。
+// 真超凡题材（玄幻/仙侠/灵异等）返回空串不做限制；"历史+穿越"这类机制型组合
+// 必须进入精细矩阵约束金手指载体（穿越≠超凡，神秘人物/残魂/器物有灵照禁）。
 export function buildPlanGenreConformity(genre = '') {
   const g = String(genre || '').trim();
-  if (!g || isFantasyGenre(g)) return '';
+  if (!g || hasTrueFantasyTag(g)) return '';
   const isYouth = isYouthGenre(g);
   const tokens = String(g).split(/[/、,，+\s]+/).map((s) => s.trim()).filter(Boolean);
   const has = (re) => tokens.some((t) => re.test(t));
@@ -1088,6 +1124,9 @@ export function buildPlanGenreConformity(genre = '') {
   const notes = [];
   if (allowsRebirth) {
     notes.push('用户已选择穿越/重生题材：允许"穿越/重生到过去"这一前提，主角优势以信息差与现代知识为主；但严禁借此获得超凡力量（若同时勾选系统，则按系统规则展开而非靠穿越本身变强）。');
+    if (!allowsSystem) {
+      notes.push('金手指载体锁定：未勾选系统/玄幻时，穿越者的全部优势必须落在"现代人知识/技能/记忆/信息差"上（懂历史走向、会基础数理化、知道商业模式、有成年人心智与执行力），且知识边界要写实——现代知识在古代有落地成本，不是张口就来的金句。严禁把优势写成超自然载体：神秘人物/神秘老人/残魂/器物有灵/体质异变/神秘力量交换/预知梦/前世仙缘等一律禁止——"神秘老商人帮主角、每帮一次老去一岁"这类设定就是超自然载体，属于废稿。');
+    }
   }
   if (allowsSystem) {
     notes.push('用户已选择系统题材：允许系统/面板/任务等金手指机制作为核心设定。但背景非玄幻/修仙时，系统载体必须是纯系统化设定（属性面板/任务/兑换/签到/模拟等），严禁掺入血脉觉醒、灵根、传承记忆、御剑法宝、灵气修炼等玄幻绑定型设定。');
