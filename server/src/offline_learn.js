@@ -428,6 +428,36 @@ function analyzeChapterStructure(text) {
 }
 
 /**
+ * 从原文摘录 3 段代表性句段作为范文（供 concrete_examples 字段，与 LLM 分析对齐）
+ * 策略：句长接近平均值的句子中，优先选含感官/情绪/动作词的
+ */
+function extractRepresentativeQuotes(text, sentences, avgLen) {
+  if (!sentences?.length) return [];
+  // 句长接近平均值的候选集（±50%范围内），按接近度排序
+  const candidates = sentences
+    .map((s) => ({ text: s, len: countChars(s), dist: Math.abs(countChars(s) - avgLen) }))
+    .filter((c) => c.len >= 15 && c.len <= 80)
+    .sort((a, b) => a.dist - b.dist)
+    .slice(0, 30);
+  // 在候选中优先选含感官/情绪/动作词的
+  const scored = candidates.map((c) => {
+    let score = 0;
+    for (const ch of '看望盯凝视听闻声响叫喊吼走跑跳打抓砍刺笑哭怒惊惧喜悲愁忧叹怔愣') {
+      if (c.text.includes(ch)) score++;
+    }
+    return { ...c, score };
+  }).sort((a, b) => b.score - a.score || a.dist - b.dist);
+  // 去重：避免摘录过于相似的句子
+  const picked = [];
+  for (const s of scored) {
+    if (picked.length >= 3) break;
+    if (picked.some((p) => p.text.slice(0, 8) === s.text.slice(0, 8))) continue;
+    picked.push(s);
+  }
+  return picked.map((p) => p.text.trim());
+}
+
+/**
  * 离线分析小说文本，输出结构化风格报告（增强版）
  */
 export function offlineAnalyzeStyle(text) {
@@ -483,11 +513,17 @@ export function offlineAnalyzeStyle(text) {
       (charVoices.length ? `提取到${charVoices.length}个角色的对话风格：${charVoices.map((c) => `${c.name}(${c.style})`).join('，')}。` : '') +
       (wordPatterns.perThousand.action > 15 ? '动作描写丰富，画面感强。' : '') +
       (wordPatterns.perThousand.emotion > 12 ? '情绪描写密集，注重角色内心。' : ''),
-    repliclicable_techniques: styleFeatures.slice(0, 3).join('；') + '。' +
+    // 从原文摘录 3 段代表句段作为范文（与 LLM 分析的 concrete_examples 字段对齐）
+    concrete_examples: extractRepresentativeQuotes(clean, sentences, sentLen.avg),
+    replicable_techniques: styleFeatures.slice(0, 3).join('；') + '。' +
       `标点使用习惯：逗号${punct.perThousand.comma}/千字、句号${punct.perThousand.period}/千字。` +
       `高频三字词：${topTrigrams.slice(0, 5).map((t) => t.word).join('、')}。` +
       `词汇丰富度：${vocabRichness.uniqueRatio}%（去重字符占比）。` +
       `动作词频${wordPatterns.perThousand.action}/千字，情绪词频${wordPatterns.perThousand.emotion}/千字。`,
+    scene_patterns: `章节结构：${chapterStruct.structure}，` +
+      `开头常用${{dialogue:'对话切入',short_hook:'短句钩子',scene_setting:'场景铺陈',action_hook:'动作切入',narrative:'叙述切入'}[chapterStruct.openingType] || '叙述'}，` +
+      `结尾常用${{dialogue_end:'对话收尾',ellipsis_end:'省略号留白',question_end:'问句悬念',short_end:'短句收束',narrative_end:'叙述收尾'}[chapterStruct.closingType] || '叙述'}。` +
+      (emotionCurve.dominantEmotion !== 'unknown' ? `情绪走向以${{positive:'积极',negative:'消极',tension:'紧张',calm:'平静'}[emotionCurve.dominantEmotion]}为主，波动幅度${emotionCurve.emotionalRange > 30 ? '大（适合高潮密集型）' : '小（适合日常缓推型）'}。` : ''),
     _meta: {
       total_chars: countChars(clean),
       sentence_count: sentences.length,

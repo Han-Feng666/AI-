@@ -2186,16 +2186,20 @@ export const KNOWLEDGE_LEARN_SYSTEM = `你是一位资深小说编辑和写作�
 - 只输出 JSON，不要加任何解释或前后缀`;
 
 // 分块分析 prompt：每段文本的快速分析，用于多段合并
+// 维度与 FINAL_SYNTHESIS_SYSTEM / KNOWLEDGE_LEARN_SYSTEM 完全对齐，
+// 避免综合时 LLM "编"缺失维度而非"综合"已有信息
 export const PER_CHUNK_ANALYSIS_SYSTEM = `你是一位资深小说编辑。请分析以下小说片段，提取该片段的写作风格和叙事特征。
 
 输出 JSON 对象（每个字段 1-2 句话，只输出 JSON）：
 {
   "writing_style": "本段文笔特征：叙述视角、语言风格、描写方式",
   "plot_patterns": "本段剧情推进方式：冲突设置、悬念手法",
-  "character_craft": "本段人物塑造手法：出场方式、性格刻画",
+  "logic_rules": "本段逻辑规律：行为动机合理性、因果链衔接方式",
   "worldview": "本段世界观展现：设定呈现方式、信息密度",
-  "dialogue_style": "本段对话风格：口语化程度、潜台词密度",
-  "description_preference": "本段描写偏好：感官维度、细节密度"
+  "character_craft": "本段人物塑造手法：出场方式、性格刻画",
+  "scene_patterns": "本段场景模式：是什么类型的场景（对峙/追逃/密谋/独白/群戏等），核心冲突和情绪走向",
+  "replicable_techniques": "本段最值得学习的 1-2 个技法（如'用环境暗示心理''对话中埋伏笔'）",
+  "concrete_examples": "从本段摘录 1-2 个最能代表写作特点的句段（每段不超过 80 字），原样保留"
 }`;
 
 // 多段分析结果综合合成 prompt
@@ -2204,6 +2208,7 @@ export const FINAL_SYNTHESIS_SYSTEM = `你是资深小说编辑和写作分析�
 要求：
 - 综合所有片段的信息，不要遗漏任何片段中提到的独特特征
 - 合并相似的观察，保留不同片段中的差异点
+- concrete_examples 从各片段的摘录中精选 3 个最有代表性的（去重、不重复同一段落）
 - 输出格式必须符合以下 JSON 结构，每个字段 2-4 句话，要具体可操作
 
 {

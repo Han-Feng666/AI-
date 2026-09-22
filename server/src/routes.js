@@ -1696,11 +1696,40 @@ router.post('/ideas', async (req, res) => {
   let styleBlock = '';
   if (styles.length) {
     const parts = styles.map((s, i) => `风格${i + 1}《${s.name}》：\n${s.analysis || ''}`);
+    // v1.4.53：注入风格 DNA 量化指标，让创意贴合用户期望的文风（句长/对话密度/感官密度等）
+    const dnas = styles
+      .map((s) => { try { return s.style_dna ? JSON.parse(s.style_dna) : null; } catch { return null; } })
+      .filter(Boolean);
+    const dnaBlock = dnas.length ? formatDNABlock(mergeDNA(dnas)) : '';
     styleBlock = `\n\n【写作风格参考】
 已选 ${styles.length} 位作者的写作风格：
-${parts.join('\n\n')}
+${parts.join('\n\n')}${dnaBlock ? '\n\n' + dnaBlock : ''}
 
 要求：构思的故事方向、主角气质与叙述基调向这些风格靠拢。`;
+  }
+
+  // v1.4.53：按题材自动匹配知识学习库——注入已学作品的写作经验摘要
+  // （剧情套路/场景模式/人物手法等），让创意参考同类优秀作品的经验
+  const knowledgeCorpora = getKnowledgeByGenres(genreList, 3);
+  let knowledgeBlock = '';
+  if (knowledgeCorpora.length) {
+    const blocks = knowledgeCorpora.map((r, i) => {
+      let analysis = r.analysis || '';
+      try {
+        const parsed = JSON.parse(analysis);
+        if (parsed && typeof parsed === 'object') {
+          const parts = [];
+          if (parsed.plot_patterns) parts.push(`剧情套路：${parsed.plot_patterns}`);
+          if (parsed.scene_patterns) parts.push(`场景模式：${parsed.scene_patterns}`);
+          if (parsed.character_craft) parts.push(`人物手法：${parsed.character_craft}`);
+          if (parsed.replicable_techniques) parts.push(`可学技法：${parsed.replicable_techniques}`);
+          analysis = parts.join('\n');
+        }
+      } catch { /* analysis 本身就是纯文本 */ }
+      return `参考${i + 1}《${r.title}》（${r.genre}，${r.total_words}字）\n${analysis}`;
+    });
+    knowledgeBlock = `\n\n【同类优秀作品写作经验参考（借鉴其套路与技法，禁止照搬人物/情节）】
+${blocks.join('\n\n')}`;
   }
 
   const presets = (Array.isArray(stylePresets) ? stylePresets : [])
@@ -1869,7 +1898,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${seedBlock}${antiTropeBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${seedBlock}${antiTropeBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}

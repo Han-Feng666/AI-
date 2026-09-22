@@ -9,16 +9,23 @@ import { analyzeStyleStats } from './offline_learn.js';
  */
 
 export const DNA_DIMS = [
-  { key: 'avg_sentence_length', label: '平均句长', weight: 0.2, unit: '字', relative: true },
-  { key: 'short_sentence_ratio', label: '短句占比', weight: 0.1, unit: '%', relative: false },
-  { key: 'long_sentence_ratio', label: '长句占比', weight: 0.1, unit: '%', relative: false },
-  { key: 'dialogue_ratio', label: '对话占比', weight: 0.2, unit: '%', relative: false },
-  { key: 'avg_paragraph_length', label: '段落均长', weight: 0.15, unit: '字', relative: true },
-  { key: 'comma_period_ratio', label: '逗句比', weight: 0.05, unit: '', relative: true },
-  { key: 'exclaim_per_1k', label: '感叹号/千字', weight: 0.05, unit: '', relative: false },
-  { key: 'question_per_1k', label: '问号/千字', weight: 0.05, unit: '', relative: false },
-  { key: 'action_words_per_1k', label: '动作词/千字', weight: 0.05, unit: '', relative: true },
-  { key: 'emotion_words_per_1k', label: '情绪词/千字', weight: 0.05, unit: '', relative: true }
+  { key: 'avg_sentence_length', label: '平均句长', weight: 0.15, unit: '字', relative: true },
+  { key: 'short_sentence_ratio', label: '短句占比', weight: 0.08, unit: '%', relative: false },
+  { key: 'long_sentence_ratio', label: '长句占比', weight: 0.08, unit: '%', relative: false },
+  { key: 'dialogue_ratio', label: '对话占比', weight: 0.15, unit: '%', relative: false },
+  { key: 'avg_paragraph_length', label: '段落均长', weight: 0.10, unit: '字', relative: true },
+  { key: 'comma_period_ratio', label: '逗句比', weight: 0.04, unit: '', relative: true },
+  { key: 'exclaim_per_1k', label: '感叹号/千字', weight: 0.04, unit: '', relative: false },
+  { key: 'question_per_1k', label: '问号/千字', weight: 0.04, unit: '', relative: false },
+  { key: 'action_words_per_1k', label: '动作词/千字', weight: 0.04, unit: '', relative: true },
+  { key: 'emotion_words_per_1k', label: '情绪词/千字', weight: 0.04, unit: '', relative: true },
+  // v1.4.53 扩充：离线引擎已算但 DNA 未用的维度
+  { key: 'sense_visual_per_1k', label: '视觉词/千字', weight: 0.04, unit: '', relative: true },
+  { key: 'sense_auditory_per_1k', label: '听觉词/千字', weight: 0.04, unit: '', relative: true },
+  { key: 'time_words_per_1k', label: '时间过渡词/千字', weight: 0.04, unit: '', relative: true },
+  { key: 'cognition_words_per_1k', label: '认知词/千字', weight: 0.04, unit: '', relative: true },
+  { key: 'ellipsis_per_1k', label: '省略号/千字', weight: 0.03, unit: '', relative: false },
+  { key: 'sentence_variance', label: '句长方差', weight: 0.03, unit: '', relative: true }
 ];
 
 export function computeStyleDNA(text) {
@@ -88,6 +95,7 @@ export function compareDNA(target, actual) {
 
 /**
  * 紧凑注入块：让模型知道目标文风的量化指标
+ * v1.4.53 增强：按"语感/对话/节奏/感官/标点"分组，更有指导性
  */
 export function formatDNABlock(dna) {
   if (!dna || typeof dna !== 'object') return '';
@@ -97,17 +105,18 @@ export function formatDNABlock(dna) {
   };
   const paceMap = { fast: '段落短促节奏快', medium: '段落节奏适中', slow: '段落绵长节奏缓' };
   const lines = [
-    `平均句长${t('avg_sentence_length', 1)}字（短句占比${t('short_sentence_ratio')}%、长句占比${t('long_sentence_ratio')}%），`,
-    `对话占正文${t('dialogue_ratio')}%，段落平均${t('avg_paragraph_length')}字（${paceMap[dna.paragraph_pace] || ''}），`,
-    `逗句比${t('comma_period_ratio', 1)}:1，感叹号${t('exclaim_per_1k')}/千字、问号${t('question_per_1k')}/千字，`,
-    `动作词${t('action_words_per_1k')}/千字、情绪词${t('emotion_words_per_1k')}/千字。`
+    `[语感] 平均句长${t('avg_sentence_length', 1)}字（短句<10字占比${t('short_sentence_ratio')}%、长句>50字占比${t('long_sentence_ratio')}%），句长方差${t('sentence_variance')}——方差大=长短交错有节奏感，方差小=句式统一。`,
+    `[对话] 对话占正文${t('dialogue_ratio')}%，段落平均${t('avg_paragraph_length')}字（${paceMap[dna.paragraph_pace] || ''}）。`,
+    `[感官] 视觉词${t('sense_visual_per_1k')}/千字、听觉词${t('sense_auditory_per_1k')}/千字——感官词密度决定画面感，目标值低于5/千字时文风偏抽象，高于15/千字时画面感强。`,
+    `[节奏] 动作词${t('action_words_per_1k')}/千字、情绪词${t('emotion_words_per_1k')}/千字、时间过渡词${t('time_words_per_1k')}/千字、认知词${t('cognition_words_per_1k')}/千字——时间过渡词高=节奏紧凑，认知词高=内心戏密集。`,
+    `[标点] 逗句比${t('comma_period_ratio', 1)}:1，感叹号${t('exclaim_per_1k')}/千字、问号${t('question_per_1k')}/千字、省略号${t('ellipsis_per_1k')}/千字——感叹号高=情绪外放，省略号高=含蓄留白。`
   ];
   if (Array.isArray(dna.top_bigrams) && dna.top_bigrams.length) {
-    lines.push(`高频词：${dna.top_bigrams.slice(0, 8).join('、')}。`);
+    lines.push(`[高频词] ${dna.top_bigrams.slice(0, 8).join('、')}。`);
   }
   return `【目标文风量化指标（本作风格 DNA，写作时按这些数值控制语感）】
 ${lines.join('\n')}
-写作后请自查：句子长短、对话密度、段落节奏应向上述数值靠拢。`;
+写作后请自查：句子长短、对话密度、段落节奏、感官密度、标点习惯应向上述数值靠拢。`;
 }
 
 /**
@@ -130,6 +139,12 @@ export function buildDNAPolishInstructions(comparison) {
     else if (d.dim === 'avg_paragraph_length') action = direction === '偏高' ? '把大段落拆小' : '合并零碎段落，充实描写';
     else if (d.dim === 'short_sentence_ratio') action = direction === '偏高' ? '减少超短句' : '适当增加短句制造节奏';
     else if (d.dim === 'long_sentence_ratio') action = direction === '偏高' ? '减少超长句' : '允许少量长句铺陈';
+    else if (d.dim === 'sense_visual_per_1k') action = direction === '偏高' ? '减少视觉描写，改用对话或心理推进' : '增加视觉细节（看/望/凝视/打量）';
+    else if (d.dim === 'sense_auditory_per_1k') action = direction === '偏高' ? '减少听觉描写' : '增加听觉细节（声响/轰鸣/低语）';
+    else if (d.dim === 'time_words_per_1k') action = direction === '偏高' ? '减少时间过渡词，用场景跳转替代' : '增加时间过渡词衔接场景';
+    else if (d.dim === 'cognition_words_per_1k') action = direction === '偏高' ? '减少内心独白，改为行动展现' : '增加内心活动（想/回忆/意识到）';
+    else if (d.dim === 'ellipsis_per_1k') action = direction === '偏高' ? '减少省略号，改为明确叙述' : '适当用省略号制造留白';
+    else if (d.dim === 'sentence_variance') action = direction === '偏高' ? '句长差异过大，适当统一句式' : '长短句差异不够，增加长短交错';
     else action = `向目标值调整`;
     return `- ${d.label}${direction}（${delta}）：${action}`;
   });
