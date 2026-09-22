@@ -1951,13 +1951,15 @@ ${axisBlock}
       // 载体门禁（生成后校验）：genre 标签合规但金手指内容跑偏——
       // 所有现实向世界观（系统/穿越/纯现实，未勾玄幻/灵异）都查玄幻载体：
       // "通感溯源/先祖残魂/器物有灵/神秘老人"等超自然载体直接剔除。
-      // genre 标签照抄合规词查不出内容偷换，必须扫正文特征（MYSTICAL_CARRIER_RE）
+      // genre 标签照抄合规词查不出内容偷换，必须扫正文特征（MYSTICAL_CARRIER_RE）。
+      // 系统题材额外跑白名单兜底（detectIdeaCarrierDrift 第三参 isSystem）：
+      // 金手指无任何系统形态词（面板/任务/积分/签到等）= "能力系统化"偷换，剔除。
       if (!isFantasy) {
         const beforeCarrier = ideas.length;
         ideas = ideas.filter((it) => {
-          const hits = detectIdeaCarrierDrift(it, false);
+          const hits = detectIdeaCarrierDrift(it, false, isSystem);
           if (!hits.length) return true;
-          send({ type: 'status', message: `已剔除金手指载体跑偏的创意「${it.title}」（出现玄幻载体：${hits.join('、')}），可点击重新生成补齐` });
+          send({ type: 'status', message: `已剔除金手指载体跑偏的创意「${it.title}」（${hits.join('、')}），可点击重新生成补齐` });
           return false;
         });
         if (ideas.length < beforeCarrier) {
