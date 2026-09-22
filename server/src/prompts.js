@@ -1835,8 +1835,12 @@ export function extractJson(text) {
   };
 
   // 截断自愈：JSON 未闭合（被 maxTokens/网络截断）时，丢弃尾部不完整片段并补齐闭合，救回已输出部分
+  // 前置剥离：模型常输出"以下是创意：\n[…"或未闭合的 ```json 围栏——前缀文字若不剥掉，
+  // 截断修复补齐括号后整段仍无法 JSON.parse（此组合曾导致灵感生成解析失败）
   if (!t.endsWith('}') && !t.endsWith(']')) {
-    const repaired = tryRepairTruncated(t);
+    const jsonStart = t.search(/[\[{]/);
+    const body = jsonStart > 0 ? t.slice(jsonStart) : t;
+    const repaired = tryRepairTruncated(body);
     if (repaired) {
       const v = tryVariants(repaired);
       if (v) return v;
@@ -1847,21 +1851,36 @@ export function extractJson(text) {
     const v = tryVariants(t);
     if (v) return v;
   }
-  // 对象切片
-  const objStart = t.indexOf('{');
-  const objEnd = t.lastIndexOf('}');
-  if (objStart !== -1 && objEnd > objStart) {
-    const slice = t.slice(objStart, objEnd + 1);
-    const v = tryVariants(slice);
-    if (v) return v;
-  }
-  // 数组切片
-  const arrStart = t.indexOf('[');
-  const arrEnd = t.lastIndexOf(']');
-  if (arrStart !== -1 && arrEnd > arrStart) {
-    const slice = t.slice(arrStart, arrEnd + 1);
-    const v = tryVariants(slice);
-    if (v) return v;
+  // 对象/数组切片：按 JSON 起点类型选优先级——文本同时含 [ 和 { 时（如带前后缀的
+  // "好的！[...]"），切片若选错形态会切出内层片段返回错误结构：
+  // 数组场景（创意/概要）误切出单元素对象，对象场景（骨架）误切出 characters 内层数组
+  {
+    const arrStart = t.indexOf('[');
+    const objStart = t.indexOf('{');
+    const arrFirst = arrStart !== -1 && (objStart === -1 || arrStart < objStart);
+    const tryArraySlice = () => {
+      const arrEnd = t.lastIndexOf(']');
+      if (arrStart !== -1 && arrEnd > arrStart) {
+        const v = tryVariants(t.slice(arrStart, arrEnd + 1));
+        if (v) return v;
+      }
+      return null;
+    };
+    const tryObjectSlice = () => {
+      const objEnd = t.lastIndexOf('}');
+      if (objStart !== -1 && objEnd > objStart) {
+        const v = tryVariants(t.slice(objStart, objEnd + 1));
+        if (v) return v;
+      }
+      return null;
+    };
+    if (arrFirst) {
+      const v = tryArraySlice() ?? tryObjectSlice();
+      if (v) return v;
+    } else {
+      const v = tryObjectSlice() ?? tryArraySlice();
+      if (v) return v;
+    }
   }
   // 多对象逐个提取：针对文本中有多个不连续 {…} 块（如前缀+对象+后缀）
   const objRegex = /\{[^{}]*\}/g;

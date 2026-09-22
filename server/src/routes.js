@@ -1799,29 +1799,48 @@ ${axisBlock}
 请一次构思 ${ideaCount} 个彼此完全不同的小说创意，输出 JSON 数组。`;
 
   try {
-    const maxOut = Math.max(8192, Number(config.maxTokens) || 8192);
+    // maxOut 按创意数缩放：6 个创意含 outline_H5 五章要点，8192 tokens 易截断
+    // （截断 JSON 修复虽能救回部分创意，但整批完整输出才是正途）；
+    // 缩放项封顶 16384，用户显式配置的 maxTokens 原样透传（取三者最大值）
+    const maxOut = Math.max(8192, Math.min(16384, ideaCount * 2200), Number(config.maxTokens) || 0);
     let full = '';
-    if (config?.forceNonStreaming) {
-      const r = await chat({ config, messages: [
-        { role: 'system', content: IDEAS_SYSTEM },
-        { role: 'user', content: userPrompt }
-      ], maxTokens: maxOut, timeout: 300000 });
-      full = r?.content || '';
-    } else {
-      await runLLMStream(config, [
-        { role: 'system', content: IDEAS_SYSTEM },
-        { role: 'user', content: userPrompt }
-      ], {
-        ctrl,
-        task: 'planning',
-        maxTokens: maxOut,
-        onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
-      });
+    let ideas = null;
+    // 生成+解析自动重试：模型偶发输出坏格式（前缀文字/半截 JSON/引号错配），
+    // 正则自愈+截断修复覆盖不了全部形态；直接重发一次比让用户手动点"重新生成"体验好
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      full = '';
+      if (config?.forceNonStreaming) {
+        const r = await chat({ config, messages: [
+          { role: 'system', content: IDEAS_SYSTEM },
+          { role: 'user', content: userPrompt }
+        ], maxTokens: maxOut, timeout: 300000 });
+        full = r?.content || '';
+      } else {
+        await runLLMStream(config, [
+          { role: 'system', content: IDEAS_SYSTEM },
+          { role: 'user', content: userPrompt }
+        ], {
+          ctrl,
+          task: 'planning',
+          maxTokens: maxOut,
+          onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
+        });
+      }
+      send({ type: 'status', message: '创意构思完成，正在解析…' });
+      ideas = extractArray(full);
+      if (Array.isArray(ideas) && ideas.length) break;
+      if (attempt === 1) {
+        send({ type: 'status', message: '输出内容解析失败，正在自动重试一次…' });
+      }
     }
-    send({ type: 'status', message: '创意构思完成，正在解析…' });
-
-    let ideas = extractArray(full);
     if (Array.isArray(ideas)) {
+      // 残缺创意过滤：截断自愈会救回"只有 title"的半成品对象（截断点前的最后半截），
+      // hook/logline 双缺的创意对用户无意义，剔除并提示重新生成补齐
+      const beforeSalvage = ideas.length;
+      ideas = ideas.filter((it) => String(it.hook || '').trim() || String(it.logline || '').trim());
+      if (ideas.length < beforeSalvage) {
+        send({ type: 'status', message: `剔除 ${beforeSalvage - ideas.length} 个内容残缺的半成品创意` });
+      }
       ideas = ideas.map((it, i) => ({
         id: `idea-${Date.now()}-${i}`,
         title: String(it.title || `创意${i + 1}`),
@@ -1891,13 +1910,15 @@ ${axisBlock}
 
     // 最终兜底：让模型把坏输出修成合法 JSON——解析失败最常见原因是字符串内裸换行/
     // 尾逗号/引号错配，多层正则自愈覆盖不了所有形态，LLM 自修复召回率远高于正则。
+    // 输入若被 maxTokens 截断，先告知修复器"只保留完整元素"——否则修复器会顺着
+    // 不完整尾部编造或输出同样截断的结果
     try {
       const repairRes = await chat({
         config,
         task: 'planning',
         messages: [
-          { role: 'system', content: '你是 JSON 修复器。用户给你的内容本应是小说创意的 JSON 数组，但存在格式错误无法解析。请将其修复为合法 JSON 数组。只输出 JSON 数组本身，禁止任何解释、前后缀或代码块标记。完整保留全部创意内容与字段，禁止改写、删减或新增创意。' },
-          { role: 'user', content: String(full).slice(0, 14000) }
+          { role: 'system', content: '你是 JSON 修复器。用户给你的内容本应是小说创意的 JSON 数组，但存在格式错误无法解析。请将其修复为合法 JSON 数组。只输出 JSON 数组本身，禁止任何解释、前后缀或代码块标记。完整保留全部创意内容与字段，禁止改写、删减或新增创意。若输入内容在结尾处被截断（最后一个元素不完整），只保留之前完整的元素并补齐数组闭合，禁止编造或补写缺失的内容。' },
+          { role: 'user', content: String(full).slice(0, 16000) }
         ],
         maxTokens: maxOut,
         timeout: 180000
