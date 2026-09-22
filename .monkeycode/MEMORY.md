@@ -825,3 +825,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - "命格/八字"这类词在系统文里作为系统参数出现也算玄学越界（命格系统=把玄学引入世界观），词表已收；比喻性用法（"地府般的矿道"）会误报，属可接受代价（剔除+提示可重新生成）
   - 纯现实向题材（系统/穿越/都市等）统一走载体门禁（!isFantasy 条件）；勾了玄幻/灵异/修仙类则 fantasyOk 跳过
   - 测试素材：/tmp/opencode/test_round23.mjs（灵异词命中 8 + 合法系统不误报 4 + 边界 2 + 白名单断言 4 + 跳过回归 1）
+
+[Project Knowledge Summary]
+- Date: 2026-09-22
+- Context: 第二十五轮（v1.4.51）梦境/预知载体词表扩充 + 系统+穿越组合注入穿越形态约束（用户实锤：勾穿越系统历史架空生成"三更判官"——梦中审案看命运走向的金手指 + 主角"清河县刑房书吏"根本没穿越）
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 梦境/预知类是超凡载体的独立形态，词表已补：托梦/梦审/梦中(过堂|审|推演|摊开)/三更梦/预知(梦|未来|祸)/命运(走向|推演|改写)/推演(命运|死劫|祸福)；"丢记忆"作为代价不拦（可以是合法系统代价），拦梦境载体锚点
+  - 重大缺口教训：transmigrationBlock 原条件是 isTransmigration（=!isSystem && !isFantasy && 穿越），勾"穿越+系统"走 isSystem 分支时穿越形态约束整块不注入 → 生成"本地人小吏被推上位"的没穿越故事；已扩展为 (isTransmigration || (isSystem && hasTrans))
+  - 系统+穿越时身份槽位必须换"穿越者来历"措辞池（现代上班族/工程师/历史教师穿越者等），古代身份措辞槽位（基层小吏/市井游民）会被模型结合成"穿越成基层小吏"的魂穿语法
+  - 玄幻+穿越保持豁免：transmigrationBlock 不注入（魂穿/夺舍在玄幻世界观是常见合法设定，由灵感自行声明）
+  - 回归测试集按轮拆分：/tmp/opencode/test_round7.mjs ~ test_round24.mjs 逐个跑；round21/22 断言随代码演进更新过（条件表达式、池子结构）
