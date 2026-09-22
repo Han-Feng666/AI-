@@ -50,7 +50,8 @@ import {
   IDEAS_SYSTEM,
   buildNovelContext, buildChapterSystem, buildPolishSystem,
   buildPolishWithIssues, buildPlotFixSystem, buildElevateSystem, extractJson, extractArray, buildReviseSystem,
-getGenreGuide, getGenreGuides, buildPlanGenreConformity, buildAntiTropeBlock
+getGenreGuide, getGenreGuides, buildPlanGenreConformity, buildAntiTropeBlock,
+  detectIdeaCarrierDrift
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
@@ -1678,11 +1679,14 @@ ${parts.join('\n\n')}
   // 按题材类型分轨：幻想类（玄幻/修仙/科幻等）用超自然金手指池，
   // 现实类（都市/言情/校园/职场等）用现实优势池，避免给青春校园文塞"系统面板/契约召唤"
   // 现实类内部再按子题材细分：青春/校园用学生身份池，杜绝"中年失业男人写进青春文"
+  // 注意：此表与方案层 PLAN_FANTASY_KEYWORDS 语义不同——这里是"超凡金手指池"开关
+  // （'穿越/重生/系统'有专门分支或走现实池，故意排除），只是普通超凡标签的并集
   const FANTASY_KEYWORDS = ['玄幻', '仙侠', '奇幻', '修真', '修仙', '科幻', '系统流', '无限流',
-    '末世', '废土', '克苏鲁', '赛博', '蒸汽', '星际', '机甲', '灵气', '御兽', '召唤',
-    '炼金', '高武', '异能', '魔幻', '神话', '西幻', '巫师', '洪荒', '诸天', '无敌流',
-    '数据流', '规则怪谈', 'SCP', '第四天灾', 'DND', '神魔', '万族', '盗墓', '探险',
-    '诡秘', '志怪', '民俗', '精灵', '骑士', '勇者', '赛博修仙', '掌门流', '幕后流'];
+    '末世', '废土', '克苏鲁', '克系', '赛博', '蒸汽', '星际', '机甲', '灵气', '灵气复苏', '御兽', '召唤',
+    '炼金', '高武', '异能', '异人', '超凡', '魔幻', '神话', '西幻', '巫师', '洪荒', '诸天', '无敌流',
+    '数据流', '规则怪谈', '怪谈', 'SCP', '第四天灾', 'DND', '神魔', '万族', '盗墓', '探险',
+    '诡秘', '志怪', '民俗', '灵异', '精灵', '骑士', '勇者', '赛博修仙', '掌门流', '幕后流',
+    '末日', '位面', '诡异', '丧尸', '辐射', '异变', '龙族', '兽人'];
   const SYSTEM_KEYWORDS = ['系统流', '系统', '数据流', '无敌流', '诸天', '签到'];
   const YOUTH_KEYWORDS = ['青春', '校园', '纯爱', '甜宠', '暗恋', '虐恋', '破镜重圆', '学霸', '初恋'];
   const isFantasy = genreList.some((g) => FANTASY_KEYWORDS.some((k) => g.includes(k)));
@@ -1710,7 +1714,9 @@ ${parts.join('\n\n')}
   const shuffle = (arr) => arr.map((v) => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
   const gfSlots = shuffle(GF_POOL).slice(0, ideaCount);
   const idSlots = shuffle(ID_POOL).slice(0, ideaCount);
-  const axisBlock = gfSlots.map((gf, i) => `创意${i + 1}：${gfLabel}必须属于「${gf}」，主角初始身份必须是「${idSlots[i]}」`).join('\n');
+  // isSystem 时槽位行内联载体锁定：功能名在槽位里，模型最易在"怎么实现"上偷换载体
+  const gfSlotNote = isSystem && !isFantasy ? '（载体必须是系统界面：面板/提示音/任务列表/兑换，严禁写成身体异能或器物灵性）' : '';
+  const axisBlock = gfSlots.map((gf, i) => `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}，主角初始身份必须是「${idSlots[i]}」`).join('\n');
 
   // 男频/女频：目标读者频道，影响主角性别、爽点结构与情感线比重
   const channel = String((req.body || {}).channel || '').trim();
@@ -1766,7 +1772,12 @@ ${parts.join('\n\n')}
 - 所有创意必须严格属于用户选择的题材范围（${genreList.join('、')}），genre 字段必须从所选题材中选取或组合（如"历史+穿越+系统"），严禁输出用户未选择的题材。
 ${bannedKws.length ? `- 用户未选择以下题材元素，严禁作为主题材或核心设定出现在任何创意中：${bannedKws.join('、')}。` : ''}
 - 主角的"${gfLabel}"必须与所选题材兼容（现实类题材用现实优势，严禁超自然设定；所选题材含系统/穿越/重生时按该设定展开）。${isYouth ? '\n- 主角必须是学生或年轻人（高中生/大学生/刚踏入社会的青年），严禁出现中年失业、单亲家长、职场老手等与青春校园题材不符的身份设定。' : ''}
-${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM_KEYWORDS.some((k) => g.includes(k))).join('、')}"但未勾选玄幻/修仙/奇幻等玄修题材：金手指必须是纯系统载体（面板/任务/兑换/签到/模拟等），严禁出现"血脉/血脉觉醒/灵根/传承记忆/法宝/契约召唤"等玄幻绑定型设定——历史/架空背景里的金手指只能是系统的，不能靠血统。` : ''}
+${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM_KEYWORDS.some((k) => g.includes(k))).join('、')}"但未勾选玄幻/修仙/奇幻等玄修题材：金手指必须是纯系统载体（面板/任务/兑换/签到/模拟等），严禁出现"血脉/血脉觉醒/灵根/传承记忆/法宝/契约召唤"等玄幻绑定型设定——历史/架空背景里的金手指只能是系统的，不能靠血统。
+- 金手指载体形态锁定（比词汇禁令更重要）：金手指在故事里必须表现为一个可交互的"系统"——有面板/提示音/任务列表/积分/兑换界面这类"像操作软件一样"的结构，主角能看见它的字、点它的选项。
+- 严禁"保留功能、偷换载体"的三种偷换形态（违反即废稿）：
+  ① 感官异能化：把"信息溯源系统"歪成"摸旧物重历感官记忆的通感能力"——溯源功能必须做成系统界面（屏幕显示线索/任务指引），严禁变成主角的身体感官；
+  ② 残魂寄宿化：把"任务发布系统"歪成"先祖残魂发任务/器物里住着灵魂"——任务来源必须是系统本身（机械音/面板弹窗），严禁任何亡魂/先祖/精怪充当系统；
+  ③ 器物灵性化：把"签到/商城系统"歪成"老物件有灵性/玉佩吸生机做交换"——代价必须是系统规则（扣积分/掉评价），严禁写成器物损耗灵性、草木枯荣这类玄幻代价。` : ''}
 - 违反题材贴合的创意视为废稿。`;
 
   // 换皮对抗：每批随机抽 3 条"反套路禁令"注入（共享池见 prompts.js ANTI_TROPE_POOL），
@@ -1840,6 +1851,22 @@ ${axisBlock}
         return false;
       });
 
+      // 载体门禁（生成后校验）：genre 标签合规但金手指内容跑偏——
+      // 勾"系统"未勾玄幻时，"通感溯源/先祖残魂/器物有灵"等玄幻载体直接剔除。
+      // genre 标签照抄合规词查不出内容偷换，必须扫正文特征（MYSTICAL_CARRIER_RE）
+      if (isSystem && !isFantasy) {
+        const beforeCarrier = ideas.length;
+        ideas = ideas.filter((it) => {
+          const hits = detectIdeaCarrierDrift(it, false);
+          if (!hits.length) return true;
+          send({ type: 'status', message: `已剔除金手指载体跑偏的创意「${it.title}」（出现玄幻载体：${hits.join('、')}），可点击重新生成补齐` });
+          return false;
+        });
+        if (ideas.length < beforeCarrier) {
+          send({ type: 'status', message: '提示：勾选"系统"题材时金手指只会以系统面板/任务/兑换形式出现，玄幻载体（残魂/通感/器物有灵）已自动剔除' });
+        }
+      }
+
       // 批内去重：金手指 + 主角身份 + logline 前段 任一组合重复即剔除后者
       const sigs = new Set();
       ideas = ideas.filter((it) => {
@@ -1852,6 +1879,11 @@ ${axisBlock}
 
       if (before > ideas.length) {
         send({ type: 'status', message: `剔除 ${before - ideas.length} 个偏题/重复创意，保留 ${ideas.length} 个` });
+      }
+      // 全部被门禁剔除时必须短路返回：掉进下方"解析失败→LLM修复"路径会把
+      // 刚被剔除的违规创意原样解析回来，门禁形同虚设
+      if (Array.isArray(ideas) && before > 0 && ideas.length === 0) {
+        return end({ type: 'error', message: '生成的创意全部偏离所选题材（或金手指载体跑偏），已自动拦截。请点击"重新生成"再试——多次跑偏可在想法框里补充一句方向约束。' });
       }
       if (ideas.length) return end({ type: 'done', data: { ideas } });
     }

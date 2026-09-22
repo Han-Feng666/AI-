@@ -2636,3 +2636,38 @@ export const IDEAS_SYSTEM = `你是中文长篇小说创意总监，深谙当前
     "potential_risk": "该创意当前市场风险（如题材热度、同质化点）"
   }
 ]`;
+
+// 灵感载体跑偏校验：勾选"系统"题材但未勾玄幻/灵异类时，金手指载体必须是
+// 可交互的系统界面。模型最常见的偷换形态是"保留功能、偷换载体"——
+// 把"信息溯源系统"歪成"摸旧物重历记忆的通感异能"、把"任务系统"歪成
+// "先祖残魂发任务"。禁具体词汇锁不住（模型会造新词），必须锁载体特征：
+// 残魂寄宿/感官异能/器物有灵/血脉觉醒/灵气修仙 五类玄幻载体的标志性表述。
+export const MYSTICAL_CARRIER_RE = new RegExp([
+  '残魂', '亡魂', '魂魄', '英灵', '残识', '神识', '附体', '附身', '夺舍',
+  '先祖[^，。；、]{0,4}(残|魂|显|附)', '祖宗[^，。；、]{0,4}(残|魂|显|附)',
+  '通感', '摸[^。；！？\n]{0,6}(看见|看到|听到|重历|浮现|读取)', '触碰[^，。；、]{0,6}(记忆|过往|过去)',
+  '物体[^，。；、]{0,6}(说话|低语|记忆|倾诉)', '旧物[^，。；、]{0,6}(记忆|说话|重现)',
+  '器物有灵', '器灵', '物灵', '老(树|槐|宅|宅子)[^，。；、]{0,4}(生机|显灵|成精|有灵)',
+  '血脉觉醒', '血脉之力', '血脉[^，。；、]{0,2}觉醒', '血脉传承', '灵根', '灵气', '灵韵',
+  '功德', '气运', '气数', '天眼', '阴阳眼', '通灵', '开光', '开窍',
+  '感知[^，。；、]{0,4}(情绪|记忆|过往)', '感应到[^，。；、]{0,6}(情绪|记忆|过往|前世)'
+].join('|'), 'g');
+
+// 返回创意中载体跑偏的证据片段；空数组=合规。
+// fantasyOk=true（用户勾了玄幻/灵异/修仙类题材）时跳过校验——残魂灵气是合法设定。
+export function detectIdeaCarrierDrift(idea, fantasyOk = false) {
+  if (fantasyOk) return [];
+  const text = [
+    idea?.protagonist?.golden_finger,
+    idea?.protagonist2?.golden_finger,
+    idea?.hook,
+    idea?.logline,
+    ...(Array.isArray(idea?.outline_H5) ? idea.outline_H5 : [])
+  ].filter(Boolean).join('\n');
+  const hits = [];
+  for (const m of String(text).matchAll(MYSTICAL_CARRIER_RE)) {
+    if (!hits.includes(m[0])) hits.push(m[0]);
+    if (hits.length >= 4) break;
+  }
+  return hits;
+}
