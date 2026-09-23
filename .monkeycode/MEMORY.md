@@ -860,3 +860,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - formatDNABlock 增强原则：从平铺数值改为分组指导（语感/对话/感官/节奏/标点），每维附带判断标准（如"感官词低于5/千字时文风偏抽象"），让模型不只看到数字还能理解含义
   - 灵感生成器联动定式：/ideas 路由已接受 styleIds 参数注入 analysis 文本——增强为同时注入 formatDNABlock(mergeDNA(dnas))；知识库用 getKnowledgeByGenres(genreList, 3) 按题材自动匹配（无需用户手动关联），只注入 plot_patterns/scene_patterns/character_craft/replicable_techniques 四维（非全量，避免 prompt 膨胀）
   - 测试素材：/tmp/opencode/test_round26.mjs（拼写修复 5 + 维度对齐 6 + DNA 扩充 6 + formatDNABlock 6 + 润色指令 5 + 灵感联动 8 + 回归 4 = 40 断言）
+
+[Project Knowledge Summary]
+- Date: 2026-09-22
+- Context: 第二十八轮（v1.4.54, 9c3ce63）批量分析动态 worker pool 并发提速 + 知识样本标签写回列名存量 bug 修复
+- Category: Build Methods|Troubleshooting & Debugging
+- Instructions:
+  - analyzeChunksRateLimited 批次屏障改动态 worker pool：原 for 循环按 concurrency 切批 + Promise.allSettled 批内并发（批间串行屏障），单块退避会拖累整批等待；改为 nextIdx 游标 + `while(nextIdx<chunks.length) { idx=nextIdx++; await processChunk(idx) }` 的 worker 函数 + `Array.from({length:Math.min(concurrency,chunks.length)},()=>worker())` 启动 pool，完成一块立即取下一块，无批次屏障。结果按原始 chunkIndex 写入 `results[chunkIndex]` 保序，最后 `results.filter(Boolean)` 过滤失败块。新增 onChunkDone(chunkIndex, parsed) 回调供管线增量落盘。
+  - tagSlicesRateLimited 串行 for 改动态 worker pool：原 `for(i+=BATCH)` 串行每批，多批打标总耗时=批数×单批延迟；改为预切 batches 数组 + worker pool(5)，打标环节 4 批→1 波并发，实测同场景 4x 提速（旧 10.6s → 新 6.1s，含综合阶段固定 1.5s）。进度消息 done 计数按完成批片累加去重。
+  - 列名一致性存量 bug：knowledge_samples 表（db.js DDL）的序号列名是 `chunk_index`，但 updateSampleTags（knowledge_store.js:75）SQL 写成了 `slice_index`——AI 打标升级后写回标签必崩 `no such column: slice_index`，知识库导入与 retag 路由（routes.js:7437）都踩中。两张表序号列名不同：style_slices.slice_index / knowledge_samples.chunk_index，跨表读写已在 slice_store.js:146 用别名统一，但直接写 SQL 的 updateSampleTags 漏改。修复：UPDATE 语句 slice_index→chunk_index。
+  - 端到端验证 SOP（mock LLM）：写带 1.5s 延迟的 OpenAI 兼容 mock（/v1/models + /v1/chat/completions，按 system prompt 路由返回分块分析 JSON 或场景标签数组）→ PUT /api/settings 切 baseUrl 到 mock → curl -N POST /api/knowledge/import 抓 SSE → 解析 progress 序列确认分块并发、done 事件确认 corpus status=learned → 直连 SQLite 验 scene_tags 落库。计时对比用 git stash 切旧代码同 payload 复测。
+  - 提速对比定式：mock 每请求固定延迟时，旧逻辑耗时=批数×延迟（批间屏障），新逻辑=ceil(批数/pool)×延迟；真实 LLM 无固定延迟，提速体现在单块退避/超时不拖累其他块。
+  - 回归测试：round7-26 全绿（共 200+ 断言）；本轮无新扫描器/提示词改动，仅并发架构与列名修复。
