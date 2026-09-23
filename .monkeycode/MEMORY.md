@@ -929,3 +929,21 @@ Entries discovered by the Agent during task execution should follow this format:
   - 行业赛道撞车需按行业分组匹配：A 命中"常平仓"、C 命中"漕粮"是不同关键词但同一行业（粮政），逐词 Map 匹配会漏判——改为 SCENE_GROUPS 分组（粮政漕运/盐政/税务/驿站/河工），同组任一词命中即撞车。
   - prompt 层约束 vs gate 层安全网的分工：prompt 层只放核心铁律（身穿/孤家寡人/不打工/不直译现代职业），差异化与赛道去重交给 gate 门禁（投亲亲缘剔除+身份撞车+行业赛道撞车）——prompt 管方向，gate 管兜底。
   - E2E SOP：mock 返回 3 创意（A 无籍流民+常平仓, B 投亲不遇, C 有名籍+漕粮）→ 断言 B 亲缘剔除+C 赛道撞车剔除+保留 A（/tmp/opencode/e2e_round30.mjs，4 断言）；测试素材 /tmp/opencode/test_round30.mjs（26 断言）。
+
+[User Instruction Summary]
+- Date: 2026-09-23
+- Context: 第三十三轮（v1.4.59）用户用 1.4.15 之前的旧版范例对比——"生成的灵感想法毫无看点和没有逻辑，1.4.15 之前的版本有看点多了，题材也没跑偏"
+- Instructions:
+  - 用户认可的标杆创意 = 陈若辰太史令爆款史书系统（穿越+系统+历史）：金手指、职业、主线三者咬合；因果链闭环零强凑；开篇钩子是完整小剧场（具体任务+两难+后果+金句"不爆更就爆毙"）。
+  - 资产化处理：该范例全文写入 IDEAS_SYSTEM 作"看点标杆范例"（禁照抄、任何题材通用），三条标准（三咬合/因果链闭环/钩子小剧场）后续所有创意必须达到。
+
+[Project Knowledge Summary]
+- Date: 2026-09-23
+- Context: 第三十三轮（v1.4.59）因果链第七问 + 看点标杆范例 + 共情读心异能拦截
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 旧版本的好创意是可复用资产：用户点名 1.4.15 前的范例比新版本好——把范例原文+拆解写进 prompt 当 few-shot 标杆，比继续加负面禁令有效（负面清单只会缩小想象空间，正向标杆给出可达水准）。
+  - 因果链断链是"毫无逻辑"的根因：受处分靠跑十公里撤处分、班长靠跑赢保送——利害被硬凑到与它无因果的事件上；IDEAS_SYSTEM 加第七问「必须做X才能Y的因果链成立吗」并用用户实锤例。
+  - 异能泄漏新形态：「共情天赋能听到所有人情绪」混进现实校园题材——MYSTICAL_CARRIER_RE 补 '读心' / '共情(天赋|异能)' / '听(到|见)...(情绪|心声|想法|念头)'。
+  - RegExp g flag + .test() 有状态（lastIndex 残留）：单测里直接 MYSTICAL_CARRIER_RE.test() 连续调用会假阴性；matchAll/match 无此问题——测试用 .match()。
+  - E2E SOP：mock59(4159) 返回 3 校园创意（B 含共情异能）→ 断言载体剔除+保留 2（/tmp/opencode/e2e_round31.mjs，3 断言）；mock 创意的 genre 必须全词命中所选题材（含"言情"会被题材门禁先剔）；测试素材 /tmp/opencode/test_round31.mjs（22 断言）+ 全量 round7-31 sweep 零 fail。
