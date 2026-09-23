@@ -1815,13 +1815,22 @@ ${blocks.join('\n\n')}`;
   const shuffle = (arr) => arr.map((v) => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
   const gfSlots = shuffle(GF_POOL).slice(0, ideaCount);
   const idSlots = shuffle(ID_POOL).slice(0, ideaCount);
-  // isSystem 时槽位行内联载体锁定：功能名在槽位里，模型最易在"怎么实现"上偷换载体
-  const gfSlotNote = isSystem && !isFantasy ? '（载体必须是系统界面：面板/提示音/任务列表/兑换，严禁写成身体异能或器物灵性）' : '';
+  // isSystem 时槽位行内联载体锁定：功能名在槽位里，模型最易在"怎么实现"上偷换载体——
+  // 把"推演系统"写成"算盘梦里推演"、"信息溯源系统"写成"警哨听真话"。
+  // 锁载体结构（非词汇）：系统是无形界面化存在，物理器物只能作触发媒介不能自带超自然功能。
+  const gfSlotNote = isSystem && !isFantasy
+    ? '（载体锁定：系统是无形的界面化存在——面板/光幕/提示音/任务列表/兑换商城，功能必须落在系统界面上。严禁依附于物理器物：算盘/警哨/罗盘/铜镜/玉佩/铜钱/签筒等随身物件不能"自带"推演/预知/听真话/通感等超自然功能；器物最多作为触发系统面板的媒介，功能本身必须在系统界面里呈现。写成"器物本身能推演/听真话/预知"即废稿）'
+    : '';
   // 穿越分支身份不设槽位（用户指令：身份不要固定，随故事发展获得地位；开局不打工），
   // 只保留金手指差异化轴；其余分支沿用身份槽位（防同质化核心机制）
+  // 穿越（含系统+穿越组合）身份不设职业槽位：用户硬底线——身份不固定、
+  // 禁现代职业直译成古代同类营生。预设"现代商人/刑侦从业者穿越者"等
+  // 职业槽位会直接引导模型生成"商人管军饷/刑警翻案"的职业直译套路，
+  // 与 transmigrationBlock"禁职业直译"自相矛盾。身份靠硬底线管，差异化靠金手指轴。
+  const needsFreeIdentity = isTransmigration || (isSystem && hasTrans);
   const axisBlock = gfSlots.map((gf, i) => {
-    if (isTransmigration) {
-      return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}，主角开局身份不预设——孤家寡人白手起家，身份与地位因契机或随故事发展获得（具体怎么起家由你自由构思，严禁开局处于给人打工受人使唤的状态）`;
+    if (needsFreeIdentity) {
+      return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}，主角开局身份不预设——孤家寡人白手起家，身份与地位因契机或随故事发展获得（具体怎么起家由你自由构思，严禁开局处于给人打工受人使唤的状态，严禁把现代职业直译成古代同类营生——商人管军饷国库、刑警翻案、厨师开酒楼这种一一对应缺乏错位趣味，一律废稿）`;
     }
     return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}，主角初始身份必须是「${idSlots[i]}」`;
   }).join('\n');
