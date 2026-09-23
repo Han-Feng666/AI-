@@ -1784,8 +1784,9 @@ ${blocks.join('\n\n')}`;
   const isTransmigration = !isSystem && !isFantasy && hasTrans;
   let GF_POOL, ID_POOL, gfLabel;
   if (isSystem) {
-    // 用户明确勾了"系统"：金手指必须是系统化的，严禁血脉/传承/法宝等玄幻绑定型设定
-    GF_POOL = ['全能辅助系统（属性/任务/兑换面板）', '文抄/知识兑换系统', '签到打卡系统', '剧情推演/模拟器系统', '位面商城系统', '任务发布式系统（积分奖惩）', '信息溯源系统（复原历史真相）', '后勤保障系统（物资/工匠调度）'];
+    // 用户明确勾了"系统"：金手指必须是系统化的，严禁血脉/传承/法宝等玄幻绑定型设定。
+    // 槽位=正统系统文循环（用户定义）：面板+系统发布任务+完成得奖励+完不成受惩罚+系统能交流
+    GF_POOL = ['任务发布系统（面板发布任务，完成得奖励、失败受惩罚，系统可对话交流）', '全能辅助系统（属性/任务/兑换面板+积分奖惩，系统有性格会主动搭话）', '签到打卡系统（每日面板签到领奖、漏签惩罚，系统语音催促交流）', '剧情推演/模拟器系统（面板内推演剧情走向，成功结算奖励、失败扣积分）', '位面商城系统（做任务赚积分兑换商品，系统客服式讨价还价）', '文抄/知识兑换系统（系统派创作/学习任务，兑换知识库，烂尾扣分惩罚）', '信息溯源系统（面板显示线索任务，破案达标积分结算，系统提示音播报）', '后勤保障系统（物资调度任务面板，达标解锁物资、延误扣分惩罚）'];
     // 勾了穿越/重生时身份槽位用"穿越者来历"措辞（古代身份措辞会被模型结合成
     // "穿越成基层小吏"的魂穿语法）；落地处境由 transmigrationBlock 管硬底线
     ID_POOL = hasTrans
@@ -1819,7 +1820,7 @@ ${blocks.join('\n\n')}`;
   // 把"推演系统"写成"算盘梦里推演"、"信息溯源系统"写成"警哨听真话"。
   // 锁载体结构（非词汇）：系统是无形界面化存在，物理器物只能作触发媒介不能自带超自然功能。
   const gfSlotNote = isSystem && !isFantasy
-    ? '（载体锁定：系统是无形的界面化存在——面板/光幕/提示音/任务列表/兑换商城，功能必须落在系统界面上。严禁依附于物理器物：算盘/警哨/罗盘/铜镜/玉佩/铜钱/签筒等随身物件不能"自带"推演/预知/听真话/通感等超自然功能；器物最多作为触发系统面板的媒介，功能本身必须在系统界面里呈现。写成"器物本身能推演/听真话/预知"即废稿）'
+    ? '（载体锁定：系统是无形的界面化存在——面板/光幕/提示音/任务列表/兑换商城，功能必须落在系统界面上。严禁依附于物理器物：算盘/警哨/罗盘/铜镜/玉佩/铜钱/签筒等随身物件不能"自带"推演/预知/听真话/通感等超自然功能；器物最多作为触发系统面板的媒介，功能本身必须在系统界面里呈现。写成"器物本身能推演/听真话/预知"即废稿。正统系统文四要素缺一即废稿：①可视面板——主角能看见并操作的界面；②任务闭环——开局第一个任务带明确奖惩，完成当场得奖励、失败当场受罚；③系统可交流——系统有性格，以提示音/对话框与主角一来一回对话（催促/吐槽/讨价还价）；④金手指描述必须写出这套"发布任务→完成→结算"循环）'
     : '';
   // 穿越分支身份不设槽位（用户指令：身份不要固定，随故事发展获得地位；开局不打工），
   // 只保留金手指差异化轴；其余分支沿用身份槽位（防同质化核心机制）
@@ -1892,10 +1893,12 @@ ${bannedKws.length ? `- 用户未选择以下题材元素，严禁作为主题�
 ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM_KEYWORDS.some((k) => g.includes(k))).join('、')}"但未勾选玄幻/修仙/奇幻等玄修题材：金手指必须是纯系统载体（面板/任务/兑换/签到/模拟等），严禁出现"血脉/血脉觉醒/灵根/传承记忆/法宝/契约召唤"等玄幻绑定型设定——历史/架空背景里的金手指只能是系统的，不能靠血统。
 - 世界观本底声明（白名单）：本作的世界是纯现实世界（历史/架空古代），唯一的超凡元素就是主角的系统——除此之外的世界与真实历史一模一样：没有鬼神、没有修仙、没有异能、没有灵异事件，所有人都过着符合物理规律的生活。系统之外出现任何超凡存在（鬼神/阴差/城隍/仙家/精怪/风水秘术/命格天命/神秘老者）都视为跑偏废稿。
 - 金手指载体形态锁定（比词汇禁令更重要）：金手指在故事里必须表现为一个可交互的"系统"——有面板/提示音/任务列表/积分/兑换界面这类"像操作软件一样"的结构，主角能看见它的字、点它的选项。
-- 严禁"保留功能、偷换载体"的三种偷换形态（违反即废稿）：
+- 严禁"保留功能、偷换载体"的四种偷换形态（违反即废稿）：
   ① 感官异能化：把"信息溯源系统"歪成"摸旧物重历感官记忆的通感能力"——溯源功能必须做成系统界面（屏幕显示线索/任务指引），严禁变成主角的身体感官；
   ② 残魂寄宿化：把"任务发布系统"歪成"先祖残魂发任务/器物里住着灵魂"——任务来源必须是系统本身（机械音/面板弹窗），严禁任何亡魂/先祖/精怪充当系统；
-  ③ 器物灵性化：把"签到/商城系统"歪成"老物件有灵性/玉佩吸生机做交换"——代价必须是系统规则（扣积分/掉评价），严禁写成器物损耗灵性、草木枯荣这类玄幻代价。` : ''}
+  ③ 器物灵性化：把"签到/商城系统"歪成"老物件有灵性/玉佩吸生机做交换"——代价必须是系统规则（扣积分/掉评价），严禁写成器物损耗灵性、草木枯荣这类玄幻代价。
+  ④ 道具显灵/代价灵异化：把系统歪成"无字卷宗自动显形被删历史、烧掉记忆换真相"——线索与历史真相只能由系统面板主动显示、以任务积分结算奖励，严禁任何器物自行显灵，严禁以烧失记忆/献祭阳寿这类灵异代价替代系统积分惩罚（实锤：「史官不敢写」金手指=卷宗显形+烧记忆，整案废稿）。
+- 正统系统文看点循环（hook/logline/golden_finger 至少体现其一，全部没有=废稿）：开局第一个任务的高利害压力（失败惩罚具体到痛感）、完成任务当场兑现奖励改变处境、系统人格与主角的一来一回对话交锋（毒舌催更/讨价还价/冷酷倒计时）。` : ''}
 - 违反题材贴合的创意视为废稿。`;
   // 穿越纯净性块：勾穿越/重生时锁定穿越形态与开局处境。
   // 适用范围：无系统的穿越分支 + 系统+穿越组合（实锤：系统分支曾漏注入，
@@ -1970,15 +1973,20 @@ ${axisBlock}
         send({ type: 'status', message: '输出内容解析失败，正在自动重试一次…' });
       }
     }
-    if (Array.isArray(ideas)) {
+    // 门禁统一收口：正常解析与 LLM 修复两条路径都必须过同一道门。
+    // 实锤（v1.4.56）：修复路径曾 `return end({ideas3})` 原样放行——首解析失败→修复成功后
+    // 题材门禁/载体白名单全部跳过，「史官不敢写」无字卷宗案例就是从这个漏洞漏出的。
+    const GATE_BLOCKED_MSG = '生成的创意全部偏离所选题材（或金手指载体跑偏），已自动拦截。请点击"重新生成"再试——多次跑偏可在想法框里补充一句方向约束。';
+    const gateIdeas = (raw) => {
+      let list = Array.isArray(raw) ? raw : [];
       // 残缺创意过滤：截断自愈会救回"只有 title"的半成品对象（截断点前的最后半截），
       // hook/logline 双缺的创意对用户无意义，剔除并提示重新生成补齐
-      const beforeSalvage = ideas.length;
-      ideas = ideas.filter((it) => String(it.hook || '').trim() || String(it.logline || '').trim());
-      if (ideas.length < beforeSalvage) {
-        send({ type: 'status', message: `剔除 ${beforeSalvage - ideas.length} 个内容残缺的半成品创意` });
+      const beforeSalvage = list.length;
+      list = list.filter((it) => String(it.hook || '').trim() || String(it.logline || '').trim());
+      if (list.length < beforeSalvage) {
+        send({ type: 'status', message: `剔除 ${beforeSalvage - list.length} 个内容残缺的半成品创意` });
       }
-      ideas = ideas.map((it, i) => ({
+      list = list.map((it, i) => ({
         id: `idea-${Date.now()}-${i}`,
         title: String(it.title || `创意${i + 1}`),
         genre: String(it.genre || ''),
@@ -2000,8 +2008,8 @@ ${axisBlock}
         const tokens = t.split(/[+、,，/｜|\s]+/).map((x) => x.trim()).filter(Boolean);
         return tokens.every((tok) => genreList.some((sel) => tok.includes(sel) || sel.includes(tok)));
       };
-      const before = ideas.length;
-      ideas = ideas.filter((it) => {
+      const before = list.length;
+      list = list.filter((it) => {
         if (genreAllowed(it.genre)) return true;
         send({ type: 'status', message: `已剔除偏离所选题材的创意「${it.title}」（题材：${it.genre || '空'}），可点击重新生成补齐` });
         return false;
@@ -2014,21 +2022,21 @@ ${axisBlock}
       // 系统题材额外跑白名单兜底（detectIdeaCarrierDrift 第三参 isSystem）：
       // 金手指无任何系统形态词（面板/任务/积分/签到等）= "能力系统化"偷换，剔除。
       if (!isFantasy) {
-        const beforeCarrier = ideas.length;
-        ideas = ideas.filter((it) => {
+        const beforeCarrier = list.length;
+        list = list.filter((it) => {
           const hits = detectIdeaCarrierDrift(it, false, isSystem);
           if (!hits.length) return true;
           send({ type: 'status', message: `已剔除金手指载体跑偏的创意「${it.title}」（${hits.join('、')}），可点击重新生成补齐` });
           return false;
         });
-        if (ideas.length < beforeCarrier) {
+        if (list.length < beforeCarrier) {
           send({ type: 'status', message: `提示：所选题材为现实向世界观，玄幻载体（残魂/通感/器物有灵/神秘老人）已自动剔除${isSystem ? '，系统题材金手指只会以系统面板/任务/兑换形式出现' : '，穿越题材金手指只能是现代知识/技能/心智'}` });
         }
       }
 
       // 批内去重：金手指 + 主角身份 + logline 前段 任一组合重复即剔除后者
       const sigs = new Set();
-      ideas = ideas.filter((it) => {
+      list = list.filter((it) => {
         const sig = [it.protagonist?.golden_finger || '', it.protagonist?.identity || '', String(it.logline || '').slice(0, 30)]
           .join('｜');
         if (sigs.has(sig)) return false;
@@ -2036,15 +2044,20 @@ ${axisBlock}
         return true;
       });
 
-      if (before > ideas.length) {
-        send({ type: 'status', message: `剔除 ${before - ideas.length} 个偏题/重复创意，保留 ${ideas.length} 个` });
+      if (before > list.length) {
+        send({ type: 'status', message: `剔除 ${before - list.length} 个偏题/重复创意，保留 ${list.length} 个` });
       }
+      return { ideas: list, hadCandidates: before > 0 };
+    };
+    if (Array.isArray(ideas)) {
+      const gated = gateIdeas(ideas);
       // 全部被门禁剔除时必须短路返回：掉进下方"解析失败→LLM修复"路径会把
       // 刚被剔除的违规创意原样解析回来，门禁形同虚设
-      if (Array.isArray(ideas) && before > 0 && ideas.length === 0) {
-        return end({ type: 'error', message: '生成的创意全部偏离所选题材（或金手指载体跑偏），已自动拦截。请点击"重新生成"再试——多次跑偏可在想法框里补充一句方向约束。' });
+      if (gated.hadCandidates && gated.ideas.length === 0) {
+        return end({ type: 'error', message: GATE_BLOCKED_MSG });
       }
-      if (ideas.length) return end({ type: 'done', data: { ideas } });
+      if (gated.ideas.length) return end({ type: 'done', data: { ideas: gated.ideas } });
+      // hadCandidates=false 且无产出：全是残缺半成品，落入下方修复路径
     }
     send({ type: 'status', message: '创意解析失败，正在尝试自动修复…' });
 
@@ -2078,7 +2091,16 @@ ${axisBlock}
           potential_risk: String(it.potential_risk || '')
         }));
         send({ type: 'status', message: '自动修复成功' });
-        return end({ type: 'done', data: { ideas: ideas3 } });
+        // 修复产物同样必须过门禁：此处曾直接 return 原样放行，是「史官不敢写」
+        // 无字卷宗案例绕过题材/载体校验的漏出口（v1.4.56 修复）
+        const gatedRepair = gateIdeas(ideas3);
+        if (gatedRepair.hadCandidates && gatedRepair.ideas.length === 0) {
+          return end({ type: 'error', message: GATE_BLOCKED_MSG });
+        }
+        if (gatedRepair.ideas.length) {
+          return end({ type: 'done', data: { ideas: gatedRepair.ideas } });
+        }
+        // 修复产物全是残缺半成品 → 继续走下方失败提示
       }
     } catch { /* 修复失败继续走错误提示 */ }
 
