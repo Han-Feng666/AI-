@@ -872,3 +872,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 端到端验证 SOP（mock LLM）：写带 1.5s 延迟的 OpenAI 兼容 mock（/v1/models + /v1/chat/completions，按 system prompt 路由返回分块分析 JSON 或场景标签数组）→ PUT /api/settings 切 baseUrl 到 mock → curl -N POST /api/knowledge/import 抓 SSE → 解析 progress 序列确认分块并发、done 事件确认 corpus status=learned → 直连 SQLite 验 scene_tags 落库。计时对比用 git stash 切旧代码同 payload 复测。
   - 提速对比定式：mock 每请求固定延迟时，旧逻辑耗时=批数×延迟（批间屏障），新逻辑=ceil(批数/pool)×延迟；真实 LLM 无固定延迟，提速体现在单块退避/超时不拖累其他块。
   - 回归测试：round7-26 全绿（共 200+ 断言）；本轮无新扫描器/提示词改动，仅并发架构与列名修复。
+
+[Project Knowledge Summary]
+- Date: 2026-09-23
+- Context: 第二十九轮（v1.4.55）灵感生成器题材跑偏+毫无看点修复（用户实锤：勾"系统+穿越+历史+架空"生成"九珠算兴亡·算盘梦里推演""白骨会翻供·警哨听真话"，金手指完全丢失，两案例均无系统形态）
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 根因是算式矛盾：isTransmigration = !isSystem && !isFantasy && hasTrans——勾"穿越+系统"时 isSystem=true → isTransmigration=false，axisBlock 走 else 分支仍分配 ID_POOL 古代职业槽位，transmigrationBlock 的"禁职业直译"约束不注入，模型合出"现代商人穿越者"套话；修复为 needsFreeIdentity = isTransmigration || (isSystem && hasTrans)，该分支身份不预设职业槽位
+  - 金手指载体丢失修复：gfSlotNote 强化为器物载体锁定（算盘/警哨/罗盘等自带超自然功能=偷换，器物只能是普通物件+面板另存）；MYSTICAL_CARRIER_RE 补"听出真话/真相""以X为载体/媒介""吹响→感知"等感知类词组
+  - 白名单校验字段教训：detectIdeaCarrierDrift 原只查 golden_finger，扩展为合并 hook+logline 后 round25「一页万金」被 hook 里自然词"能兑换现实"误中 SYSTEM_FORM_TOKENS 的"兑换"而漏检——正确形态是分层：golden_finger 存在时只严格校验它，缺失时才回退 hook+logline 兜底（覆盖"金手指写在钩子字段"的漏字段形态）
+  - IDEAS_SYSTEM 新增两条生成前铁律：禁随身物件穿越当金手指（器物只能是普通物件+面板另存）、禁死局限时开局（被迫行动不等于死局倒计时开场）；金手指载体铁律与差异化铁律并列
+  - 验证 SOP：mock LLM 流式输出实锤/狡猾包装两版案例 → POST /api/ideas 确认全剔短路 error；单元测试断言词表命中+合法系统放行；全量回归 round7-27 零 fail
+  - 测试素材：/tmp/opencode/test_round27.mjs（29 断言）；上游 sensenova 配额耗尽时端到端必须走本地 mock
