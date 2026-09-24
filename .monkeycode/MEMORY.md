@@ -966,4 +966,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - SSE 路由样板：GET /api/thinking/stream 仿 jobs/stream——writeHead text/event-stream + `data: JSON\n\n` + 首帧 snapshot + close 时退订。
   - 前端：stores/thinking.js（EventSource 单例订阅、跟随最新会话）+ ThinkingPanel.vue（历史下拉、底边近距才自动滚动、清空）+ Editor.vue 四栏（think-col 300px，collapse-btn.right 折叠钮）；3999 服务的是 web/dist，前端改动必须先构建才生效。
   - 构建/发版：cd /workspace && node scripts/build-and-patch.cjs --bump（递增 desktop+server 版本 → vite build → 生成 desktop/release/update-X.Y.Z.patch.json）；web/dist 与 release 补丁不入库，只提交源码。
+  - 内存紧张（free < 500 MiB）时纯后端改动加 --no-build 跳过 vite build（peak 760 MiB），仅打包后端 + bump 版本号；非纯后端改动必须先杀掉 mock/测试服等非必要终端释放内存再构建。
+
+[Project Knowledge Summary]
+- Date: 2026-09-24
+- Context: 第三十五轮（v1.4.61）方案生成截断自愈链路修复——chapterMaxOut 按批章数估算 + finish_reason=length 截断分流 + planRange 拆半重试 + 尾部占位补齐
+- Category: Testing Methods + Troubleshooting & Debugging
+- Instructions:
+  - mock 端口扩展：mock61 = 4161（方案规划三模式 mock：truncate 截断首帧 / short 返回 85% 章节数 / size≥20 返回 40% 逼迫拆半）；mock56=4127、mock57=4128、mock59=4159、mock60=4160。
+  - E2E SOP：mock61(4161) 三场景（truncate→截断自愈救回部分+拆半补全无占位 / short→17/20 达标接受+尾部 3 占位 / size≥20→8/10 不足→拆半各补 2 占位）→ 16 断言（/tmp/opencode/e2e_round33.mjs）；测试素材 /tmp/opencode/test_round33.mjs（19 断言）；全量 sweep round7-33 源测 + e2e 28/30/31/32/33 零 fail。
+  - 既有问题（不影响交付）：e2e_round29 断言与 mock57 场景数据不同步——mock 返回"应天投亲客/临安漕粮官/汴京签王"但断言期望"临安扫货王/应天账房郎"，4 断言全 fail；ideas 链路本身正常，仅 mock 数据漂移，后续需同步 mock57 场景数据或更新断言。
+  - mock 进程是 Node 常驻进程，修改 mock 源码后必须重启 mock 终端才生效（Node 不热加载）；e2e 跑完 mock 数据漂移排查首查 mock 源码版本 vs 运行进程版本。
   - 测试：test_round32 36 断言（thinkingBus 并发/迟到增量/幂等 end + 流式/非流式 reasoning + content 数组拍平 + 失败置 error）+ e2e_round32 12 断言（mock60:4160，并发触发 manager chat+ideas，断言 snapshot/think_start/think_delta/think_end chars>0/正文未混入思考）+ round7-32 全量 sweep 零 fail。
