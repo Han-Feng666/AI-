@@ -2605,24 +2605,31 @@ const userPrompt = `${conceptRule}
   const maxOut = Math.max(4096, Number(config.maxTokens) || 8192);
   // 骨架输出含角色/势力/关系列表，输出规模大：下限提到 12288，防止截断导致反复重试后降级（书名/大纲雷同的根因之一）
   const skeletonMaxOut = Math.min(Math.max(maxOut, 12288), 16384);
-  const chapterMaxOut = Math.min(maxOut, 4096);
-
+  // 章节规划批次输出上限按批大小估算：30 章 × 5 字段中文 JSON ≈ 400 token/章（约 9k-12k tokens），
+  // 旧的固定 min(maxOut,4096) 必然截断——截断的 JSON 无法解析，是"格式错误→重试 5 次→整批占位降级"的主根因
+  const PLAN_BATCH = target >= 200 ? 30 : 20;
+  const chapterMaxOut = Math.min(Math.max(maxOut, PLAN_BATCH * 420), 16384);
   // 流式生成并把内容透传给前端（进度可见），返回完整文本
   // 单批次 idle 超时：3 分钟无数据则判定超时
+  // 记录最近一次流式调用的 finish_reason：length=输出被截断（换截断专用提示词与话术，与格式错误分流）
+  let lastFinishReason = '';
   const streamCollect = async (messages, label, mt = maxOut) => {
     let full = '';
     send({ type: 'status', message: label });
+    lastFinishReason = '';
     if (config?.forceNonStreaming) {
       const r = await chat({ config, messages, maxTokens: mt, timeout: 300000, wantsJson: true });
       full = r?.content || '';
+      lastFinishReason = r?.finishReason || '';
     } else {
-      await runLLMStream(config, messages, {
+      const r = await runLLMStream(config, messages, {
         ctrl,
         task: 'planning',
         maxTokens: mt,
         wantsJson: true,
         onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
       });
+      lastFinishReason = r?.finishReason || '';
     }
     return full;
   };
@@ -2633,7 +2640,9 @@ const userPrompt = `${conceptRule}
   // 流式生成 + 解析 JSON，最多重试 maxAttempts 次（流式 + 非流式交替 + 指数退避）
   // 重试时追加格式强化提示，降低格式出错率。重试时递增 max_tokens 防止截断（上限 cap）
   const FORMAT_REMINDER = '\n\n【重要提醒】你之前的输出无法被解析为 JSON。输出前先在脑内构造完整、合法、可解析的 JSON，再一次性输出。只输出一个 JSON 对象或数组，不要输出任何说明文字、markdown 代码块标记（```）、注释或多余字符。确保所有字符串值中的双引号用 \\" 转义，换行用 \\n 转义。不要输出 think/thinking 内容。';
-const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
+  // 截断专用提醒：输出因 max_tokens 被切掉时，要求压缩篇幅保证完整，格式提醒在此场景无效且误导
+  const TRUNC_REMINDER = '\n\n【输出被截断】你上一次的输出因为长度上限在 JSON 中途被切断。请大幅压缩每个字段的篇幅（概要压缩为一句话、emotion/arc_hint/hook 各压缩到十几个字以内），确保整批 JSON 能一次性完整输出。仍然只输出 JSON 本身，不要任何说明文字。';
+  const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
     const maxAttempts = Number(opts.maxAttempts) > 0 ? opts.maxAttempts : 5;
     const cap = Number(opts.cap) > 0 ? opts.cap : maxOut;
     let lastText = '';
@@ -2646,12 +2655,13 @@ const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
         // 递增 max_tokens 防止截断
         mt = Math.min(cap, Math.round(mt * 1.5));
       }
-      // 重试时追加格式强化提示
+      // 重试时追加提示：截断 → 压缩篇幅重出；真格式错误 → 格式强化
+      const truncated = lastFinishReason === 'length' && lastText && !extractJson(lastText);
       const useMessages = attempt > 1
-        ? messages.map((m) => m.role === 'user' ? { ...m, content: m.content + FORMAT_REMINDER } : m)
+        ? messages.map((m) => m.role === 'user' ? { ...m, content: m.content + (truncated ? TRUNC_REMINDER : FORMAT_REMINDER) } : m)
         : messages;
       try {
-        lastText = await streamCollect(useMessages, attempt === 1 ? label : `${label}（重试 ${attempt}，已强化格式要求）`, mt);
+        lastText = await streamCollect(useMessages, attempt === 1 ? label : `${label}（重试 ${attempt}，${truncated ? '已要求压缩篇幅' : '已强化格式要求'}）`, mt);
       } catch (e) {
         if (e.name === 'AbortError') {
           // 超时 AbortError 可能来自流式空闲超时（非用户主动中止），尝试非流式降级
@@ -2720,7 +2730,11 @@ const jsonFrom = async (messages, label, mt = maxOut, opts = {}) => {
       } catch { /* 样本留存失败不阻塞 */ }
       if (attempt < maxAttempts) {
         const preview = lastText.slice(0, 120).replace(/\n/g, ' ');
-        send({ type: 'status', message: `解析失败（返回内容开头：${preview}…），将重试…` });
+        if (lastFinishReason === 'length') {
+          send({ type: 'status', message: `输出在 JSON 中途被截断（长度上限 ${mt} 不够），正在加大输出上限并压缩篇幅重试…` });
+        } else {
+          send({ type: 'status', message: `解析失败（返回内容开头：${preview}…），将重试…` });
+        }
       }
     }
     if (lastText.trim()) {
@@ -2860,8 +2874,7 @@ ${parts.join('\n\n')}
     send({ type: 'progress', progress: 30, message: '骨架已生成，正在规划章节…' });
     updateJob(job.id, { progress: 30, stream_cursor: '骨架已生成，正在规划章节…' });
 
-    // 阶段 2：章节规划（分批，超长篇 200+ 章用 30 章/批，其余用 20 章/批）
-    const BATCH_SIZE = target >= 200 ? 30 : 20;
+    // 阶段 2：章节规划（分批，超长篇 200+ 章用 30 章/批，其余用 20 章/批；批大小 PLAN_BATCH 同时决定单批输出上限）
     const skeletonChapters = Array.isArray(skeleton.chapters)
       ? skeleton.chapters.filter((c) => c && c.title).map((c) => ({ title: String(c.title), summary: String(c.summary || ''), emotion: String(c.emotion || ''), arc_hint: String(c.arc_hint || ''), hook: String(c.hook || '') }))
       : [];
@@ -2873,22 +2886,15 @@ ${parts.join('\n\n')}
       let consecutiveFallbacks = 0;
       const MAX_CONSECUTIVE_FALLBACKS = 3;
 
-      while (start <= target) {
-        if (isPlanOverdue()) {
-          const remaining = generateFallbackChapters(start, target, brief);
-          allChapters.push(...remaining);
-          send({ type: 'status', message: `方案生成已到整体时限，剩余章节（第 ${start}-${target} 章）已用占位补齐，生成完成后可手动完善。` });
-          break;
-        }
-        const batchEnd = Math.min(target, start + BATCH_SIZE - 1);
-        const batchSize = batchEnd - start + 1;
-
+      // 规划一个编号区间：输出覆盖率 ≥80% 即接受（尾部缺号补占位保持编号对齐）；
+      // 覆盖不足且区间较大时拆成两半各重试一次（批越小输出越短，截断/漏号概率大幅下降），仍失败返回 null 由调用方占位降级
+      const planRange = async (s, e, depth = 0) => {
+        const size = e - s + 1;
         // 批次连续性：把已规划的最近章节概要作为前情传给本批，防止批次间剧情脱节/重复
         const prevTail = allChapters.slice(-6);
         const prevBlock = prevTail.length
           ? prevTail.map((c, i) => `第${allChapters.length - prevTail.length + i + 1}章「${c.title}」：${c.summary}`).join('\n')
           : '';
-
         const batch = await jsonFrom(
           [
             { role: 'system', content: PLAN_CHAPTERS_SYSTEM },
@@ -2898,35 +2904,64 @@ ${parts.join('\n\n')}
 ${brief}
 
 计划章节数：${target} 章。
-请规划第 ${start} 至第 ${batchEnd} 章的标题与剧情概要（共 ${batchSize} 章），必须完整覆盖此编号范围。
+请规划第 ${s} 至第 ${e} 章的标题与剧情概要（共 ${size} 章），必须完整覆盖此编号范围。
 
 【当前规划所处全书阶段】
-本批覆盖第 ${start}-${batchEnd} 章，全书 ${target} 章，对应阶段：${chapterStageLabel(start, target)}。规划时应让剧情节奏符合该阶段（开篇直接抛出钩子、中期渐紧、高潮高密度、终局收束）。
+本批覆盖第 ${s}-${e} 章，全书 ${target} 章，对应阶段：${chapterStageLabel(s, target)}。规划时应让剧情节奏符合该阶段（开篇直接抛出钩子、中期渐紧、高潮高密度、终局收束）。
 
 【前情（此前已规划的章节，剧情必须自然承接，不得与之重复或冲突）】
 ${prevBlock || '（无，这是开头章节）'}
 
-第 ${start} 章紧接前情结尾继续推进。` }
+第 ${s} 章紧接前情结尾继续推进。` }
           ],
-          `正在规划章节 ${start}-${batchEnd}（已完成 ${allChapters.length}/${target}）…`,
-          chapterMaxOut
+          `正在规划章节 ${s}-${e}（已完成 ${allChapters.length}/${target}）…`,
+          chapterMaxOut,
+          { cap: 16384 }
         );
-
         const list = Array.isArray(batch) ? batch : (Array.isArray(batch?.chapters) ? batch.chapters : []);
         const clean = list
           .filter((c) => c && (c.title || c.summary))
-          .map((c) => ({
-            title: String(c.title || `第${start}章`),
+          .map((c, i) => ({
+            title: String(c.title || `第${s + i}章`),
             summary: String(c.summary || ''),
             emotion: String(c.emotion || ''),
             arc_hint: String(c.arc_hint || ''),
             hook: String(c.hook || '')
           }));
+        if (clean.length >= Math.ceil(size * 0.8)) {
+          const out = clean.slice(0, size);
+          // 尾部缺号补占位：模型偶发少给 1-3 章，补齐保证章节编号不整体错位
+          for (let k = s + out.length; k <= e; k++) {
+            out.push({ title: `第${k}章`, summary: '（自动生成占位）根据大纲推进剧情，具体内容在创作时补充。', emotion: '', arc_hint: '', hook: '' });
+          }
+          return out;
+        }
+        if (size > 10 && depth < 1) {
+          const mid = s + Math.ceil(size / 2) - 1;
+          send({ type: 'status', message: `第 ${s}-${e} 章规划输出不完整（收到 ${clean.length}/${size}），拆分为 ${s}-${mid} / ${mid + 1}-${e} 两批重试…` });
+          const a = await planRange(s, mid, depth + 1);
+          const b = await planRange(mid + 1, e, depth + 1);
+          const merged = [...(a || []), ...(b || [])];
+          if (merged.length) return merged;
+        }
+        return null;
+      };
 
-        if (!clean.length) {
+      while (start <= target) {
+        if (isPlanOverdue()) {
+          const remaining = generateFallbackChapters(start, target, brief);
+          allChapters.push(...remaining);
+          send({ type: 'status', message: `方案生成已到整体时限，剩余章节（第 ${start}-${target} 章）已用占位补齐，生成完成后可手动完善。` });
+          break;
+        }
+        const batchEnd = Math.min(target, start + PLAN_BATCH - 1);
+        const batchSize = batchEnd - start + 1;
+
+        const got = await planRange(start, batchEnd);
+        if (!got || !got.length) {
           // 降级：生成占位章节，不中断
           consecutiveFallbacks++;
-          send({ type: 'status', message: `章节规划（${start}-${batchEnd}）解析失败 5 次，已自动生成占位章节（降级 ${consecutiveFallbacks}/${MAX_CONSECUTIVE_FALLBACKS}）。` });
+          send({ type: 'status', message: `章节规划（${start}-${batchEnd}）多轮重试仍失败，已自动生成占位章节（降级 ${consecutiveFallbacks}/${MAX_CONSECUTIVE_FALLBACKS}）。` });
           const fallback = generateFallbackChapters(start, batchEnd, brief);
           allChapters.push(...fallback);
 
@@ -2942,7 +2977,7 @@ ${prevBlock || '（无，这是开头章节）'}
           }
         } else {
           consecutiveFallbacks = 0; // 成功则重置
-          allChapters.push(...clean);
+          allChapters.push(...got);
         }
 
         start = batchEnd + 1;
