@@ -59,6 +59,7 @@ import {
   listActiveJobs, tryCreateJob, subscribeJobEvents, abortJob,
   registerJobCtrl, unregisterJobCtrl
 } from './jobs.js';
+import { thinkingStreamHandler } from './thinkingBus.js';
 import {
   saveVersion, listVersions, getVersion, getLatestPending,
   acceptVersion as acceptVersionRow, appendChangeLog,
@@ -7167,6 +7168,9 @@ router.get('/jobs/stream', (req, res) => {
   const unsub = subscribeJobEvents((ev) => write(ev));
    req.on('close', () => unsub());
 });
+
+// SSE 通道：AI 思考过程（reasoning）增量推给前端「AI 思考过程」面板
+router.get('/thinking/stream', thinkingStreamHandler);
 
 // ---------- Manager 总管 AI（tool-use，REQ-04 / REQ-05） ----------
 // Phase 增强 2：manager_messages 阈值摘要压缩，避免长对话无限膨胀 token 预算

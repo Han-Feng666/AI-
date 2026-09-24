@@ -922,10 +922,6 @@ async function onUpdateFileChosen(e) {
           </el-select>
         </el-form-item>
 
-        <el-form-item label="API Base URL">
-          <el-input v-model="store.llm_config.baseUrl" placeholder="https://api.deepseek.com 或 https://api.openai.com/v1" @input="scheduleAutoFetch" @blur="scheduleAutoFetch" />
-        </el-form-item>
-
         <el-form-item :label="needKey ? 'API Key' : 'API Key（本地模型可留空）'">
           <el-input
             v-model="store.llm_config.apiKey"
@@ -994,6 +990,11 @@ async function onUpdateFileChosen(e) {
             </div>
           </div>
         </el-form-item>
+
+        <div class="thinking-live-tip">
+          <el-icon><InfoFilled /></el-icon>
+          思考过程可在编辑页主内容区与 AI 总管之间的「AI 思考过程」面板实时查看；模型需返回 reasoning 字段才有内容。
+        </div>
 
         <div class="two-col">
           <el-form-item label="温度（越高越有创造性）">
@@ -1676,4 +1677,16 @@ async function onUpdateFileChosen(e) {
 .model-option-name { font-size: 13px; font-weight: 700; color: #1e1b4b; }
 .model-option-meta { font-size: 11px; color: #9ca3af; margin: 2px 0; }
 .model-option-desc { font-size: 11px; color: #6b7280; }
+.thinking-live-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -4px 0 14px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 12px;
+  line-height: 1.5;
+}
 </style>

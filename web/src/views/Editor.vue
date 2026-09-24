@@ -9,6 +9,7 @@ import NavBar from '../components/NavBar.vue';
 import ChapterList from '../components/ChapterList.vue';
 import ChapterArea from '../components/ChapterArea.vue';
 import ChatPanel from '../components/ChatPanel.vue';
+import ThinkingPanel from '../components/ThinkingPanel.vue';
 import SetupPanel from '../components/SetupPanel.vue';
 import CharacterPanel from '../components/CharacterPanel.vue';
 import FactionPanel from '../components/FactionPanel.vue';
@@ -28,6 +29,7 @@ const router = useRouter();
 const store = useEditorStore();
 const settings = useSettingsStore();
 const chatCollapsed = ref(false);
+const thinkCollapsed = ref(false);
 const leftCollapsed = ref(false);
 
 const novelId = computed(() => Number(route.params.id));
@@ -464,7 +466,7 @@ async function deleteNovel() {
         </el-alert>
       </div>
 
-      <!-- 主体三栏：左导航 / 中间工作区 / 右侧 AI 对话 -->
+      <!-- 主体四栏：左导航 / 中间工作区 / AI 思考过程 / 右侧 AI 对话 -->
       <div class="editor-body">
         <aside class="left-col" :class="{ collapsed: leftCollapsed }">
           <button class="collapse-btn" @click="leftCollapsed = !leftCollapsed">
@@ -493,6 +495,13 @@ async function deleteNovel() {
             <StatsPanel v-else-if="store.workspace === 'stats'" />
           </div>
         </section>
+
+        <aside class="think-col" :class="{ collapsed: thinkCollapsed }">
+          <button class="collapse-btn right" @click="thinkCollapsed = !thinkCollapsed">
+            <el-icon><DArrowRight v-if="!thinkCollapsed" /><DArrowLeft v-else /></el-icon>
+          </button>
+          <ThinkingPanel v-if="!thinkCollapsed" />
+        </aside>
 
         <aside class="right-col" :class="{ collapsed: chatCollapsed }">
           <button class="collapse-btn right" @click="chatCollapsed = !chatCollapsed">
@@ -686,6 +695,15 @@ async function deleteNovel() {
   min-width: 0;
   min-height: 0;
 }
+.think-col {
+  width: 300px;
+  flex-shrink: 0;
+  position: relative;
+  transition: width .2s;
+  height: 100%;
+  overflow: hidden;
+}
+.think-col.collapsed { width: 8px; overflow: visible; }
 .right-col {
   width: 360px;
   flex-shrink: 0;

@@ -1,6 +1,34 @@
 import { estimateTokens } from './lib.js';
 import { getTaskConfig } from './model_router.js';
 import { acquire as rateLimitAcquire, onRateLimited } from './rate_limit.js';
+import { beginSession as beginThinkSession, pushThinking, endSession as endThinkSession } from './thinkingBus.js';
+
+// content 字段兼容：字符串原样返回；部分网关返回分段数组（[{type:'text',text:...}]），
+// 拍平成字符串再进 unescapeUnicode，防 [object Object] 污染正文
+export function textOf(v) {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) {
+    return v.map((p) => (typeof p === 'string' ? p : (p?.text ?? p?.content ?? ''))).join('');
+  }
+  return v == null ? '' : String(v);
+}
+
+// 任务 → 思考面板中文标签
+const THINK_LABELS = {
+  writing: '正文生成',
+  planning: '方案策划',
+  polishing: '润色改写',
+  analysis: '文本分析',
+  quality: '质量检测',
+  research: '联网检索',
+  summary: '摘要生成',
+  chat: '对话',
+  ideas: '灵感构思',
+  manager: 'AI 总管'
+};
+function thinkLabel(task) {
+  return THINK_LABELS[task] || '模型调用';
+}
 
 // 还原模型/中转站把中文双重转义成的字面 \uXXXX 序列（含代理对）。
 // 正常内容里的真实反斜杠+\u（如讲解转义用法的文本）会被一并还原，但小说创作场景不受影响。
@@ -199,12 +227,35 @@ function buildHeaders(config) {
  *                                未传时按 task 从多模型路由解析；也未解析到时使用默认配置
  * @param {Array<{role:string,content:string}>} opts.messages
  * @param {number} [opts.temperature]
- * @param {number} [opts.maxTokens]
- * @param {(delta:string)=>void} [opts.onDelta] - 流式增量回调
- * @param {AbortSignal} [opts.signal]
- * @returns {Promise<{content:string, finishReason:string}>}
- */
-export async function chat(opts) {
+  * @param {number} [opts.maxTokens]
+  * @param {(delta:string)=>void} [opts.onDelta] - 流式增量回调
+  * @param {AbortSignal} [opts.signal]
+  * @returns {Promise<{content:string, finishReason:string}>}
+  */
+  // chat 是对外统一入口：解析路由后包一层「思考会话」，
+  // reasoning 增量推给 thinkingBus（/api/thinking/stream 的 SSE 客户端实时消费）。
+  // 会话级 sid 串接 begin/push/end，多路并发时旧会话迟到的增量会被丢弃，防串台。
+  export async function chat(opts) {
+    const routed = opts.task ? getTaskConfig(opts.task) : null;
+    const model = routed?.model || opts.config?.model || DEFAULT_CONFIG?.model || '';
+    if (!model) {
+      // 未配置模型：chatInner 会抛「未配置模型名称」，无需制造一条失败思考记录
+      return chatInner(opts);
+    }
+    const sid = beginThinkSession({ label: thinkLabel(opts.task), model: String(model) });
+    try {
+      const r = await chatInner({ ...opts, __onReason: (t) => pushThinking(t, sid) });
+      endThinkSession(sid, 'done');
+      return r;
+    } catch (e) {
+      // 用户主动取消不算失败；其余（4xx/超时/网关错）标记调用失败
+      const cancelled = e?.name === 'AbortError' && opts.signal?.aborted;
+      endThinkSession(sid, cancelled ? 'done' : 'error');
+      throw e;
+    }
+  }
+
+  async function chatInner(opts) {
   const {
     config,
     task,
@@ -481,10 +532,10 @@ export async function chat(opts) {
      const rawOnDelta = onDelta;
      let emittedAny = false;
      const countingDelta = rawOnDelta ? ((d) => { emittedAny = true; rawOnDelta(d); }) : undefined;
-     const runStreamOnce = async (responseToUse) => {
-       const streamIdleTimeout = Number(opts.streamIdleTimeout) || 300000;
-       return consumeStream(responseToUse, countingDelta, combined, streamIdleTimeout);
-     };
+      const runStreamOnce = async (responseToUse) => {
+        const streamIdleTimeout = Number(opts.streamIdleTimeout) || 300000;
+        return consumeStream(responseToUse, countingDelta, combined, streamIdleTimeout, opts.__onReason);
+      };
      try {
        let r0;
        try {
@@ -535,7 +586,18 @@ export async function chat(opts) {
   try {
     const data = await resp.json();
     const choice = data?.choices?.[0] || {};
-    let content = unescapeUnicode(choice.message?.content ?? '');
+    // 非流式 reasoning：DeepSeek/Kimi 系 message.reasoning_content，少数网关 message.reasoning/thinking_content
+    const pickReasoning = (msg) => {
+      if (!msg) return '';
+      for (const k of ['reasoning_content', 'reasoning', 'thinking_content', 'thinking']) {
+        const v = msg[k];
+        if (typeof v === 'string' && v) return unescapeUnicode(v);
+      }
+      return '';
+    };
+    let content = textOf(choice.message?.content ?? '');
+    content = content ? unescapeUnicode(content) : '';
+    let reasonOut = pickReasoning(choice.message);
     let finishReason = choice.finish_reason || 'stop';
     let toolCalls = Array.isArray(choice.message?.tool_calls) ? choice.message.tool_calls.map((tc) => ({
       id: tc.id,
@@ -560,7 +622,9 @@ export async function chat(opts) {
       if (retryResp.ok) {
         const retryData = await retryResp.json();
         const retryChoice = retryData?.choices?.[0] || {};
-        content = unescapeUnicode(retryChoice.message?.content ?? '');
+        content = textOf(retryChoice.message?.content ?? '');
+        content = content ? unescapeUnicode(content) : '';
+        reasonOut = pickReasoning(retryChoice.message) || reasonOut;
         finishReason = retryChoice.finish_reason || 'stop';
         toolCalls = Array.isArray(retryChoice.message?.tool_calls) ? retryChoice.message.tool_calls.map((tc) => ({
           id: tc.id,
@@ -580,6 +644,7 @@ export async function chat(opts) {
       }
     }
 
+    if (reasonOut) opts.__onReason?.(reasonOut);
     return { content: unescapeUnicode(content), finishReason, toolCalls };
   } catch (e) {
     if (e.name === 'AbortError') {
@@ -592,7 +657,7 @@ export async function chat(opts) {
   }
 }
 
-async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
+async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000, onReason) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
@@ -666,7 +731,8 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
             const err = new Error(`模型流式响应出错：${msg}`);
             throw err;
           }
-          const delta = unescapeUnicode(json?.choices?.[0]?.delta?.content ?? '');
+          // content 兼容分段数组（[{type:'text',text:...}]），拍平防 [object Object]
+          const delta = unescapeUnicode(textOf(json?.choices?.[0]?.delta?.content ?? ''));
           if (delta) {
             full += delta;
             try {
@@ -676,6 +742,14 @@ async function consumeStream(resp, onDelta, signal, idleTimeoutMs = 120000) {
               cancelReader();
               throw new Error(`流式输出回调失败：${deltaErr.message}`);
             }
+          }
+          // 思考增量：DeepSeek/Kimi/GLM 系用 reasoning_content，部分网关用 reasoning/thinking
+          const d = json?.choices?.[0]?.delta;
+          const rawReason = d?.reasoning_content ?? d?.reasoning ?? d?.thinking;
+          if (typeof rawReason === 'string' && rawReason) {
+            try {
+              onReason?.(unescapeUnicode(rawReason));
+            } catch { /* 思考回调失败不影响正文流 */ }
           }
           if (json?.choices?.[0]?.finish_reason) {
             finishReason = json.choices[0].finish_reason;
