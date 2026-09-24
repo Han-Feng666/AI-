@@ -947,3 +947,23 @@ Entries discovered by the Agent during task execution should follow this format:
   - 异能泄漏新形态：「共情天赋能听到所有人情绪」混进现实校园题材——MYSTICAL_CARRIER_RE 补 '读心' / '共情(天赋|异能)' / '听(到|见)...(情绪|心声|想法|念头)'。
   - RegExp g flag + .test() 有状态（lastIndex 残留）：单测里直接 MYSTICAL_CARRIER_RE.test() 连续调用会假阴性；matchAll/match 无此问题——测试用 .match()。
   - E2E SOP：mock59(4159) 返回 3 校园创意（B 含共情异能）→ 断言载体剔除+保留 2（/tmp/opencode/e2e_round31.mjs，3 断言）；mock 创意的 genre 必须全词命中所选题材（含"言情"会被题材门禁先剔）；测试素材 /tmp/opencode/test_round31.mjs（22 断言）+ 全量 round7-31 sweep 零 fail。
+
+[User Instruction Summary]
+- Date: 2026-09-24
+- Context: 第三十四轮（v1.4.60）用户要求：主内容区和右侧 AI 总管中间加一个窗口显示 AI 大模型思考过程，主内容区宽度缩小，思考过程用中文展示，继续增强优化 AI 大模型接入功能
+- Instructions:
+  - 「AI 思考过程」面板固定在主内容区与 AI 总管之间（think-col 300px、可折叠），主内容区 flex:1 随之收窄。
+  - UI 文案全中文（思考中/已完成/调用失败/暂无思考内容）；思考正文按模型原始输出展示。
+  - 思考功能提示写进「设置 → 思考功能」旁（thinking-live-tip）。
+
+[Project Knowledge Summary]
+- Date: 2026-09-24
+- Context: 第三十四轮（v1.4.60）AI 思考过程面板全链路（llm reasoning 捕获 + SSE 实时流 + 前端四栏）
+- Category: Build Methods
+- Instructions:
+  - reasoning 捕获单点在 llm.js chat() 包装器：begin/push/end 带 sid；流式吃 delta.reasoning_content/reasoning/thinking（必须 typeof string 守卫，防 bool 开关回显混入）；非流式吃 message.reasoning_content/reasoning/thinking_content；content 可能是分段数组 → textOf() 拍平防 "[object Object]"。
+  - thinkingBus 并发教训：单 active 会话在并发 chat() 下互相封存/丢增量（E2E 并发跑 manager+ideas 出现空会话、reasoning 全丢）→ 改 Map(sid→会话) 按 sid 路由，已结束会话的迟到增量直接丢弃；snapshot 首帧带最近会话+历史环。
+  - SSE 路由样板：GET /api/thinking/stream 仿 jobs/stream——writeHead text/event-stream + `data: JSON\n\n` + 首帧 snapshot + close 时退订。
+  - 前端：stores/thinking.js（EventSource 单例订阅、跟随最新会话）+ ThinkingPanel.vue（历史下拉、底边近距才自动滚动、清空）+ Editor.vue 四栏（think-col 300px，collapse-btn.right 折叠钮）；3999 服务的是 web/dist，前端改动必须先构建才生效。
+  - 构建/发版：cd /workspace && node scripts/build-and-patch.cjs --bump（递增 desktop+server 版本 → vite build → 生成 desktop/release/update-X.Y.Z.patch.json）；web/dist 与 release 补丁不入库，只提交源码。
+  - 测试：test_round32 36 断言（thinkingBus 并发/迟到增量/幂等 end + 流式/非流式 reasoning + content 数组拍平 + 失败置 error）+ e2e_round32 12 断言（mock60:4160，并发触发 manager chat+ideas，断言 snapshot/think_start/think_delta/think_end chars>0/正文未混入思考）+ round7-32 全量 sweep 零 fail。
