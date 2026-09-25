@@ -52,7 +52,11 @@ export const useManagerStore = defineStore('manager', {
       if (this.busy) return;
       const text = String(content || '').trim();
       if (!text) return;
-      const originId = novelId;
+      // 同步 loadedNovelId 防止 watch 异步延迟导致 same 判断失败
+      if (novelId != null && this.loadedNovelId !== novelId) {
+        this.loadedNovelId = novelId;
+      }
+      const originId = this.loadedNovelId;
       this.busy = true;
       this.replyStream = '';
       this.progress = 10;
