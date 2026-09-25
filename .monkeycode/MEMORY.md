@@ -977,4 +977,19 @@ Entries discovered by the Agent during task execution should follow this format:
   - E2E SOP：mock61(4161) 三场景（truncate→截断自愈救回部分+拆半补全无占位 / short→17/20 达标接受+尾部 3 占位 / size≥20→8/10 不足→拆半各补 2 占位）→ 16 断言（/tmp/opencode/e2e_round33.mjs）；测试素材 /tmp/opencode/test_round33.mjs（19 断言）；全量 sweep round7-33 源测 + e2e 28/30/31/32/33 零 fail。
   - 既有问题（不影响交付）：e2e_round29 断言与 mock57 场景数据不同步——mock 返回"应天投亲客/临安漕粮官/汴京签王"但断言期望"临安扫货王/应天账房郎"，4 断言全 fail；ideas 链路本身正常，仅 mock 数据漂移，后续需同步 mock57 场景数据或更新断言。
   - mock 进程是 Node 常驻进程，修改 mock 源码后必须重启 mock 终端才生效（Node 不热加载）；e2e 跑完 mock 数据漂移排查首查 mock 源码版本 vs 运行进程版本。
+
+[User Instruction Summary]
+- Date: 2026-09-25
+- Context: 第三十六轮（v1.4.62）用户要求：AI 大模型思考窗口的过程用中文展示（模型原始 reasoning 是英文，前端需要翻译成中文）
+- Instructions:
+  - 思考过程面板默认中文展示：reasoning 英文 → endSession 后异步翻译 → snapshot 推送替换前端显示。
+
+[Project Knowledge Summary]
+- Date: 2026-09-25
+- Context: 第三十六轮（v1.4.62）思考过程翻译链路——thinkingBus endSession 异步翻译 + snapshot 推送 + chat skipThinking
+- Category: Build Methods + Testing Methods + Troubleshooting & Debugging
+- Instructions:
+  - build-and-patch 代码已提交后必须用 --from <上个版本 commit> 指定基准，否则 patch 只含版本号 bump 不含功能代码（默认基准 HEAD 对比工作树，已提交的改动不在 diff 内）。
+  - mock62 = 4162（翻译 E2E 双模式 mock：非翻译请求返回英文 reasoning_content + 英文 content，翻译请求返回中文）；5 断言（/tmp/opencode/e2e_thinking_translate.mjs）。
+  - llm.js chatInner 流式判断 isStream = typeof onDelta === 'function'（line 306）——翻译等无 onDelta 的请求走非流式路径，mock SSE 会 JSON.parse 失败；解决：传 onDelta: () => {} 空回调触发流式路径。
   - 测试：test_round32 36 断言（thinkingBus 并发/迟到增量/幂等 end + 流式/非流式 reasoning + content 数组拍平 + 失败置 error）+ e2e_round32 12 断言（mock60:4160，并发触发 manager chat+ideas，断言 snapshot/think_start/think_delta/think_end chars>0/正文未混入思考）+ round7-32 全量 sweep 零 fail。
