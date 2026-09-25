@@ -7,6 +7,9 @@
 
 const clients = new Set();
 let sessionCounter = 0;
+let translator = null;
+
+export function registerTranslator(fn) { translator = fn; }
 
 // 最近结束会话环（前端连接晚于 chat() 完成时能拿到已有内容）
 const MAX_HISTORY = 30;
@@ -62,6 +65,22 @@ export function endSession(sid, status = 'done') {
   broadcast({ type: 'think_end', id: s.id, status, chars: s.text.length });
   history.unshift(s);
   if (history.length > MAX_HISTORY) history.length = MAX_HISTORY;
+  // 异步翻译：reasoning 含足够英文时翻译成中文，完成后推送 snapshot 更新前端显示
+  if (translator && s.text && s.text.length > 100 && /[\x00-\x7f]{50,}/.test(s.text)) {
+    translator(s.text, s.model).then((zh) => {
+      if (!zh || zh.length <= 20 || zh === s.text) return;
+      s.text = zh;
+      s.updatedAt = Date.now();
+      const acts = [...active.values()].sort((a, b) => b.startedAt - a.startedAt);
+      const others = acts.filter((a) => a.id !== s.id);
+      const hist = history.filter((h) => h.id !== s.id);
+      broadcast({
+        type: 'snapshot',
+        session: { id: s.id, label: s.label, model: s.model, text: s.text, status: s.status, startedAt: s.startedAt, updatedAt: s.updatedAt },
+        history: [...others, ...hist].slice(0, 19).map((h) => ({ id: h.id, label: h.label, model: h.model, text: h.text, status: h.status, startedAt: h.startedAt, updatedAt: h.updatedAt }))
+      });
+    }).catch(() => {});
+  }
 }
 
 // 新连接首帧：最近开启的会话（进行中优先）+ 其余进行中会话 + 最近结束环

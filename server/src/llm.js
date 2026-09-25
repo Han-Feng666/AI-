@@ -236,6 +236,7 @@ function buildHeaders(config) {
   // reasoning 增量推给 thinkingBus（/api/thinking/stream 的 SSE 客户端实时消费）。
   // 会话级 sid 串接 begin/push/end，多路并发时旧会话迟到的增量会被丢弃，防串台。
   export async function chat(opts) {
+    if (opts.skipThinking) return chatInner(opts);
     const routed = opts.task ? getTaskConfig(opts.task) : null;
     const model = routed?.model || opts.config?.model || DEFAULT_CONFIG?.model || '';
     if (!model) {

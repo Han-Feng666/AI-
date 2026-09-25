@@ -59,7 +59,7 @@ import {
   listActiveJobs, tryCreateJob, subscribeJobEvents, abortJob,
   registerJobCtrl, unregisterJobCtrl
 } from './jobs.js';
-import { thinkingStreamHandler } from './thinkingBus.js';
+import { thinkingStreamHandler, registerTranslator } from './thinkingBus.js';
 import {
   saveVersion, listVersions, getVersion, getLatestPending,
   acceptVersion as acceptVersionRow, appendChangeLog,
@@ -535,6 +535,27 @@ function requireLLM() {
   }
   return { config, error: null };
 }
+
+// 思考过程翻译：reasoning 含英文时异步翻译成中文，通过 snapshot 推送更新前端显示
+registerTranslator(async (text) => {
+  try {
+    const { config } = requireLLM();
+    if (!config || !config.apiKey) return null;
+    const r = await chat({
+      skipThinking: true,
+      config,
+      messages: [
+        { role: 'system', content: '你是专业翻译。将以下 AI 推理思考过程翻译成自然流畅的简体中文，保持原意、逻辑结构和语气。只输出翻译结果，不添加解释或注释。原文中已有的中文保留。' },
+        { role: 'user', content: text }
+      ],
+      maxTokens: Math.min(8192, Math.max(2048, Math.ceil(text.length * 0.6))),
+      temperature: 0.3,
+      onDelta: () => {}
+    });
+    const zh = (r.content || '').trim();
+    return zh.length > 20 ? zh : null;
+  } catch { return null; }
+});
 
 // 多模型交叉评审：从已启用的多模型配置里挑一个与当前写作模型不同的可用模型，
 // 作为"第二读者"做终审。单模型环境返回 null（调用方跳过，不增加成本）。
