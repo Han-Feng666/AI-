@@ -993,3 +993,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - mock62 = 4162（翻译 E2E 双模式 mock：非翻译请求返回英文 reasoning_content + 英文 content，翻译请求返回中文）；5 断言（/tmp/opencode/e2e_thinking_translate.mjs）。
   - llm.js chatInner 流式判断 isStream = typeof onDelta === 'function'（line 306）——翻译等无 onDelta 的请求走非流式路径，mock SSE 会 JSON.parse 失败；解决：传 onDelta: () => {} 空回调触发流式路径。
   - 测试：test_round32 36 断言（thinkingBus 并发/迟到增量/幂等 end + 流式/非流式 reasoning + content 数组拍平 + 失败置 error）+ e2e_round32 12 断言（mock60:4160，并发触发 manager chat+ideas，断言 snapshot/think_start/think_delta/think_end chars>0/正文未混入思考）+ round7-32 全量 sweep 零 fail。
+
+[Project Knowledge Summary]
+- Date: 2026-09-25
+- Context: 第三十七轮（v1.4.63）授权条 XML fallback 修复 + 正文去 AI 味/文笔/逻辑增强
+- Category: Troubleshooting & Debugging + Testing Methods + Environment Configuration
+- Instructions:
+  - 授权条不弹的根因排查链：模型不返回原生 tool_calls（不支持 function calling 或不选择调用）→ 后端走无 pending 分支只回 {reply, toolCalls:[]} → 前端读不到 pendingToolCalls。修复：managerSystemContext 注入完整工具列表+XML 调用格式（<invoke name> + <parameter name>），模型在 content 里写 XML 也能被 llm.js:640 的 parseTextToolCalls 解析；行为准则加"写操作必须调工具，禁止口头回复不调工具"。前端 same 竞态是第二丢点：originId 应取 this.loadedNovelId（send 开头先与参数同步），防止 watch 异步延迟判 false 丢弃 pendingToolCalls。
+  - manager 路由挂 /api 前缀：E2E/脚本必须用 /api/manager/chat、/api/manager/tool/:id/reject，裸路径 404；reject 无 status 检查可重复调用（幂等 200）。
+  - mock63 = 4163（XML fallback E2E mock：忽略请求 tools，/大纲/ → content 返回 update_outline XML、/进度/ → get_novel_progress XML）；e2e_manager_tool_auth.mjs 13 断言：写类 XML → pendingToolCalls 非空 + reject 清理；读类 XML → 直接执行无 pending + r2 回合返回 toolCalls。
+  - 测试实例隔离样板：PORT=3002 NOVEL_DATA_DIR=/tmp/opencode/novel-data-round37 node index.js，与 3999 生产实例互不干扰；本轮 e2e 28/30/31/32/33（8+4+3+12+16）+ thinking_translate 5 + round7-33 sweep 27 + round34 静态 32 全零 fail。
+  - Write/Edit 工具参数含 XML 标签会被参数解析器截断（</parameter> 提前闭合参数）——写含 XML 内容的文件（如 mock 服务器返回 XML 工具调用）必须用 bash heredoc + String.fromCharCode(60) 拼 XML 标签，禁止在工具参数里直接写 <parameter>/<invoke> 字面量。
