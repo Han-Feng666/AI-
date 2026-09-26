@@ -1004,3 +1004,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - mock63 = 4163（XML fallback E2E mock：忽略请求 tools，/大纲/ → content 返回 update_outline XML、/进度/ → get_novel_progress XML）；e2e_manager_tool_auth.mjs 13 断言：写类 XML → pendingToolCalls 非空 + reject 清理；读类 XML → 直接执行无 pending + r2 回合返回 toolCalls。
   - 测试实例隔离样板：PORT=3002 NOVEL_DATA_DIR=/tmp/opencode/novel-data-round37 node index.js，与 3999 生产实例互不干扰；本轮 e2e 28/30/31/32/33（8+4+3+12+16）+ thinking_translate 5 + round7-33 sweep 27 + round34 静态 32 全零 fail。
   - Write/Edit 工具参数含 XML 标签会被参数解析器截断（</parameter> 提前闭合参数）——写含 XML 内容的文件（如 mock 服务器返回 XML 工具调用）必须用 bash heredoc + String.fromCharCode(60) 拼 XML 标签，禁止在工具参数里直接写 <parameter>/<invoke> 字面量。
+
+[Project Knowledge Summary]
+- Date: 2026-09-26
+- Context: 第三十八轮（v1.4.64）章节记忆链补建修复——手动粘贴章节续不上/剧情重演/未来元素提前泄漏
+- Category: Troubleshooting & Debugging + Testing Methods + Build Methods
+- Instructions:
+  - 手动粘贴章节"续不上"根因排查链：PUT /novels/:id/chapters/:idx 只存标题/正文，未经过生成管线的记忆后处理（摘要/角色状态/关键事实/伏笔）→ 粘贴章无摘要 → 前情摘要链、脉络时间线、角色状态快照全部缺失，模型只能看到上一章末尾几百字（旧 prevTailLen=800）→ 续写重演。修复三件套：backfillChapterMemory（无摘要近期章节 ≤3 章补建摘要+角色状态；生成路由开头同步补建 + PUT 保存后台补建，幂等无害）；PUT 正文变化超 30% 作废旧摘要；prevTailLen 分级 1200（有摘要）/2000（无摘要时正文为唯一前情来源）。
+  - 未来元素提前泄漏（未创办先拥有）修复：outlineDisciplineBlock 注入 userPrompt——大纲/时间线后续元素（组织/势力/物品/功法/头衔/官职/人脉）一律视为"尚未发生"，严禁以已成立状态写入正文，全章节生效（开篇另有 openingScopeBlock idx≤3 双层防护）。
+  - 跨章对话复读检测（5d）：findDuplicateDialogues（lib.js 导出，引号对话 ≥8 字交集）进质量循环，≥2 处触发定向润色——长公共子串（5c）只能抓连续大段复述，短对话逐句复读由这里兜底。
+  - E2E SOP：mock64=4164（全任务分流 mock：plan/骨架/细纲 SSE + 速记员摘要纯文本 + 各审查员 JSON + 默认流式返回正文散文；capture/req-N.txt 存每次请求供断言）；e2e_round38.mjs 23 断言（PUT 摘要作废→后台补建→生成上下文含补建摘要/1200 字结尾段/大纲时序纪律块）。测试粘贴正文必须逐段变化且长度 >1250 字——8+ 字重复串会触发跨章复读/固化检测进入润色循环；正文太短时 slice(-1200) 返回全文导致截断断言失真。
+  - 测试素材 /tmp/opencode/test_round38.mjs（19 断言：findDuplicateDialogues 单测 + routes.js 代码存在性）；全量 sweep round7-34 静态 28/0（round7-12 无汇总行，按退出码判断——用输出 tail 判定会误报）；e2e 28/30/31/32/33 5/0（round29 mock57 数据漂移依旧不阻塞）+ manager_tool_auth 13/0（3999 补丁后验证无回归）。
+  - server 入口是 /workspace/server/index.js（包根目录，src/index.js 不存在）；本环境 node 22.22.0 不支持 --no-warn 参数，直接 node index.js 启动。
