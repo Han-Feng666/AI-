@@ -1016,3 +1016,17 @@ Entries discovered by the Agent during task execution should follow this format:
   - E2E SOP：mock64=4164（全任务分流 mock：plan/骨架/细纲 SSE + 速记员摘要纯文本 + 各审查员 JSON + 默认流式返回正文散文；capture/req-N.txt 存每次请求供断言）；e2e_round38.mjs 23 断言（PUT 摘要作废→后台补建→生成上下文含补建摘要/1200 字结尾段/大纲时序纪律块）。测试粘贴正文必须逐段变化且长度 >1250 字——8+ 字重复串会触发跨章复读/固化检测进入润色循环；正文太短时 slice(-1200) 返回全文导致截断断言失真。
   - 测试素材 /tmp/opencode/test_round38.mjs（19 断言：findDuplicateDialogues 单测 + routes.js 代码存在性）；全量 sweep round7-34 静态 28/0（round7-12 无汇总行，按退出码判断——用输出 tail 判定会误报）；e2e 28/30/31/32/33 5/0（round29 mock57 数据漂移依旧不阻塞）+ manager_tool_auth 13/0（3999 补丁后验证无回归）。
   - server 入口是 /workspace/server/index.js（包根目录，src/index.js 不存在）；本环境 node 22.22.0 不支持 --no-warn 参数，直接 node index.js 启动。
+
+[Project Knowledge Summary]
+- Date: 2026-09-26
+- Context: 第三十九轮（v1.4.65）规划概要衔接校准 + 记忆下探第2章 + AI味软档位 + 补建关键剧情 + 润色改写示范
+- Category: Troubleshooting & Debugging + Testing Methods + Build Methods
+- Instructions:
+  - 规划概要与实际正文脱节根因：本章剧情概要用的是 ch2 的规划摘要，而规划摘要续接的是"规划中的 ch1"，与用户粘贴的 ch1 实际正文脱节 → 模型按规划走 → 续不上。修复：calibrateNextSummary（routes.js ~394）生成前调 LLM 判定上一章实际末尾（slice(-1200)）与本章规划概要的衔接性，脱节时改写概要并落库 + 走 summaryOverride 注入生成上下文【本章剧情概要】+ arcTimelineBlock；衔接正常返回 null 不改写。状态提示"已自动校准第 N 章概要"。校准调用 maxTokens 400，低成本自愈所有脱节来源（粘贴/手改/导入）。
+  - structureFixes 清空时序陷阱：section 5（表达层结构检测）原有 `structureFixes = []` 清空，会把 section 2（AI 味检测）软档位推入的修复项一起冲掉 → 软档位修复项永远到不了 wq 循环的润色调用。修复：清空点从 section 5 移到 attempt 循环开头（`for (let attempt...) { structureFixes = [];`），section 2 和 section 5 的 push 在同一 attempt 内累加，最终一起传给 iteratePolish 的 extraIssues。
+  - AI 味软档位（score 0.6×阈值~阈值）：临界分不值得整章重生成，转 structureFixes 定向润色逐条清除——regex 分支 `regexTotal > aiScorePass()*0.6 && bl.length`、LLM 分支 `total > aiScorePass()*0.6 && (det.issues.length || templateHits)`。wq 循环 needsPolish=false 但 structureFixes 非空时仍跑一轮 iteratePolish（extraIssues: structureFixes），润色后 `if (!needsPolish) structureFixes = []` 清空避免重复。
+  - 记忆一致性校验门禁 idx>2 改为 idx>=2：第 2 章（粘贴 ch1 后续写）也走 checkMemoryConsistency；memory.js 内部记忆库为空时提前返回，不会误报。
+  - backfillChapterMemory 扩展：补建时同时提取关键剧情事实（KEY_MOMENTS_SYSTEM → addKeyMomentUnique）和伏笔（FORESHADOW_ANALYZE_SYSTEM → insertForeshadowUnique），为后续章节提供完整记忆链。
+  - POLISH_SYSTEM 改写示范：6 组"原句→改写后"示例（删情绪解释/递进句/伪深度感悟/心理旁白/模糊量词/空泛拟人），教模型"怎么改"而非照抄。
+  - build-and-patch 补丁应用方式：POST /api/update/apply 期望 patch JSON 在请求体（`-d @file.patch.json`），不是 `{patchPath}`。代码已提交时需 `--from HEAD~1`（脚本自动检测：有未提交改动用 HEAD，否则 HEAD~1；但 --bump 创建未提交 package.json 会使检测误判为"有未提交改动"→ baseline=HEAD → 遗漏已提交代码）。
+  - 测试素材：mock65=4165（diverge/connected 模式切换 + score-8 AI 检测 + 记忆一致性 + 关键剧情）；e2e_round39.mjs 15 断言（A:diverge 校准+落库+生成上下文含校准概要+记忆校验+关键剧情补建；B:connected 不误改+软档位润色）；test_round39.mjs 39 断言。全量回归：static sweep round7-34 28/0、e2e 28/30/31/32/33 43/0、round29 0/4（预存不阻塞）、round38 19+23/0、manager 13/0。
