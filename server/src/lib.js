@@ -1155,6 +1155,20 @@ export function longestDuplicateLength(a, b) {
   return best;
 }
 
+// 跨章对话复读检测：上一章出现过的原句对话（≥8 字）在本章原样再现的条数。
+// 长公共子串只能抓连续大段复述，短对话逐句复读（上一章场景在本章重演）由这里兜底。
+export function findDuplicateDialogues(prevContent, content, minLen = 8) {
+  const quoteRe = new RegExp(`[「"『]([^「」"』『"]{${minLen},})[」"』]`, 'g');
+  const prevQuotes = new Set();
+  for (const m of String(prevContent || '').matchAll(quoteRe)) prevQuotes.add(m[1]);
+  if (!prevQuotes.size) return [];
+  const dups = new Set();
+  for (const m of String(content || '').matchAll(quoteRe)) {
+    if (prevQuotes.has(m[1])) dups.add(m[1]);
+  }
+  return [...dups];
+}
+
 // 时间线自洽检测：文中出现的具体时刻按叙述顺序必须递进。
 // 若后文出现的时刻早于前文（如先写"凌晨三点"守夜、后写"凌晨两点四十七分"死亡），
 // 且两处之间没有"前一天/回忆/当时/想起/与此同时"等回溯或并行标记，即判定时间倒置。

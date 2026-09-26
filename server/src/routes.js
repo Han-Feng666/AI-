@@ -11,7 +11,7 @@ import {
   getStageMemories, formatStageMemories, upsertStageMemory,
   getCharacterProfiles, upsertCharacterProfile, formatCharacterProfiles,
   scanAiPatterns, blacklistPenalty, blacklistFlagWords, cleanAiText, scanTopicDrift,
-  scanStructureBalance, scanCrossChapterRepeats, longestDuplicateLength,
+  scanStructureBalance, scanCrossChapterRepeats, longestDuplicateLength, findDuplicateDialogues,
   scanTimelineContradiction, scanKinshipTitleConflict, scanSceneElementMismatch,
   scanRankDrift, scanRuleDrift, scanBeatEcho, scanActionLoop, scanDenyReframe,
   scanRhetoricPileup, scanToldEmotion, scanOverBut, scanOminousForeshadow, scanClicheGesture,
@@ -315,6 +315,40 @@ async function updateCharacterStates(config, novel, idx, full) {
   db.prepare('INSERT OR REPLACE INTO character_states (novel_id, chapter_index, states) VALUES (?,?,?)')
     .run(novel.id, idx, JSON.stringify(merged.slice(0, 20)));
   return merged;
+}
+
+// 记忆链补建：手动粘贴/外部编辑的章节不经过生成管线的记忆后处理（摘要/角色状态），
+// 直接续写下一章时前情摘要、脉络时间线、角色状态全部缺失，模型只能看到上一章末尾几百字
+// → 续不上、剧情重演。生成正文前为缺记忆的近期章节（beforeIdx 之前最多 3 章）补建，失败不阻塞。
+async function backfillChapterMemory(novel, config, send, beforeIdx) {
+  const rows = db.prepare(
+    "SELECT id, chapter_index, title, content FROM chapters WHERE novel_id = ? AND chapter_index < ? AND content != '' AND (summary IS NULL OR summary = '') ORDER BY chapter_index DESC LIMIT 3"
+  ).all(novel.id, beforeIdx);
+  for (const ch of rows.reverse()) {
+    try {
+      const r = await chat({
+        config,
+        task: 'summary',
+        messages: [
+          { role: 'system', content: AUTO_SUMMARY_SYSTEM },
+          { role: 'user', content: `第${ch.chapter_index}章 标题：${ch.title || ''}\n\n${String(ch.content).slice(0, 4000)}` }
+        ],
+        maxTokens: 500
+      });
+      const summary = (r.content || '').trim();
+      if (summary) {
+        db.prepare('UPDATE chapters SET summary = ? WHERE id = ?').run(summary, ch.id);
+        if (send) send({ type: 'status', message: `第 ${ch.chapter_index} 章缺少记忆摘要，已自动补建` });
+      }
+    } catch { /* 单章摘要失败继续 */ }
+    try {
+      await updateCharacterStates(config, novel, ch.chapter_index, ch.content);
+    } catch { /* 状态提取失败继续 */ }
+  }
+  if (rows.length) {
+    try { refreshMemoryFile(novel.id); } catch { /* 记忆文件重建失败不阻塞 */ }
+  }
+  return rows.length;
 }
 
 async function runAdvanceCheck(config, idx, targetChapters, summary, full, nextSummaries = []) {
@@ -3810,12 +3844,27 @@ router.put('/novels/:id/chapters/:idx', async (req, res) => {
   const { title, content } = req.body || {};
   const newTitle = title !== undefined ? title : ch.title;
   const newContent = content !== undefined ? content : ch.content;
+  // 手动粘贴/改写正文后旧摘要失真：正文长度变化超 30% 时作废摘要（记忆链与正文保持一致）
+  const contentChanged = String(newContent || '') !== String(ch.content || '');
+  const lenDelta = Math.abs(String(newContent || '').length - String(ch.content || '').length);
+  const summaryStale = contentChanged && lenDelta / Math.max(String(ch.content || '').length, 1) > 0.3;
+  if (summaryStale && ch.summary) {
+    db.prepare('UPDATE chapters SET summary = ? WHERE id = ?').run('', ch.id);
+  }
   db.prepare('UPDATE chapters SET title = ?, content = ?, word_count = ?, status = ? WHERE id = ?')
     .run(newTitle, newContent, countWords(newContent), newContent ? 'draft' : ch.status, ch.id);
   touchNovel(novel.id);
   try {
     await writeChapterTxt(novel, { chapter_index: idx, title: newTitle, content: newContent });
   } catch { /* 文件写入失败不阻塞 */ }
+  // 手动保存的正文不经过生成管线的记忆后处理：后台补建摘要与角色状态（不阻塞保存响应）。
+  // 即使用户紧接着生成下一章，生成路由开头也会同步补建（幂等，重复生成无害）
+  if (contentChanged && String(newContent || '').length > 500) {
+    const bgConfig = getLLMConfig();
+    if (bgConfig.baseUrl) {
+      backfillChapterMemory(novel, bgConfig, null, idx + 1).catch(() => {});
+    }
+  }
   res.json(getChapter(novel.id, idx));
 });
 
@@ -4304,6 +4353,12 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       } catch { /* 参考搜索失败不阻塞 */ }
     }
 
+    // 记忆链补建（源头治理）：上一章若是手动粘贴/外部编辑的，没有摘要与状态快照，
+    // 前情摘要链、脉络时间线、角色状态全部缺失 → 续不上、剧情重演。生成前先补建。
+    try {
+      await backfillChapterMemory(novel, config, send, idx);
+    } catch { /* 补建失败不阻塞 */ }
+
     // 上一章结尾片段：强制本章从它续写，防止跑题（模型易忽略模糊的前情）
     const prevChapter = db.prepare("SELECT title, content, summary, beats FROM chapters WHERE novel_id = ? AND chapter_index = ? AND content != ''").get(novel.id, idx - 1);
     const prevChapterSummary = prevChapter?.summary ? `\n上一章概要：${prevChapter.summary}` : '';
@@ -4317,7 +4372,8 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         }
       } catch { /* 解析失败不阻塞 */ }
     }
-    const prevTailLen = mode === 'regenerate' ? 1500 : 800;
+    // 常规 1200 字；上一章没有摘要时（补建失败/离线模式）正文是唯一前情来源，加大到 2000 字
+    const prevTailLen = mode === 'regenerate' ? 1500 : (prevChapter?.summary ? 1200 : 2000);
     const prevTailBlock = prevChapter
       ? `【上一章结尾（本章必须从上一章结尾的场面直接续写，严格延续时间/地点/人物/悬念，不得倒回上一章开头重新描写同一场景，不得重复已经发生过的事件）】
 上一章《${prevChapter.title}》${prevChapterSummary}${prevBeatsBlock}
@@ -4413,6 +4469,19 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       }
     }
 
+    // 大纲时序纪律（防"未创办先拥有"）：大纲/时间线里的后续元素（势力/物品/头衔/人脉）只能停在"未来"，
+    // 防止模型把大纲里的远期设定当成已成立事实提前写进正文
+    let outlineDisciplineBlock = '';
+    {
+      const futureCnt = db.prepare("SELECT COUNT(*) AS n FROM chapters WHERE novel_id = ? AND summary != '' AND chapter_index > ?").get(novel.id, idx).n;
+      if (novel.outline || futureCnt > 0) {
+        outlineDisciplineBlock = `\n【大纲时序纪律（防止"未创办先拥有"，最高优先级）】
+- 【剧情大纲】与【全书脉络时间线】是全书路线图：其中标"后续"的章节概要所提到的组织/势力/物品/功法/头衔/官职/人脉，在本章时间点上一律视为"尚未发生"。
+- 主角在本章尚未创办的势力、尚未获得的物品、尚未上任的职位、尚未结识的人物，本章严禁以"已创办/已拥有/已上任/已结识"的状态出现——只能作为"正在谋划/初次听闻/远期目标"。
+- 自查：本章正文中主角拥有的每样东西、担任的每个职位、打交道的每个组织，都必须能在【上一章结尾】【角色当前状态】【前情摘要】中找到来源；找不到来源的，删除或改写为尚未达成。`;
+      }
+    }
+
     const userPrompt = `${context}
 ${prevTailBlock}
 【角色隔离铁律（必须严格遵守）】
@@ -4436,6 +4505,7 @@ ${prevTailBlock}
  ${openingScopeBlock}
  ${charStateBlock}
  ${arcTimelineBlock}
+ ${outlineDisciplineBlock}
  ${beatsBlock}
  ${referenceBlock}
  
@@ -5148,6 +5218,12 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
               problems.push({ desc: `本章存在 ≥${dupLen} 字的大段连续重复上一章内容，属于剧情复述而非推进。必须删掉复述段落，从上一章结尾之后的新内容写起` });
             } else if (dupLen >= 80) {
               structureFixes.push(`本章有约 ${dupLen} 字内容与上一章高度雷同（重复叙述/换皮描写），请把这些段落的表达彻底改写或压缩为一句话带过`);
+            }
+            // 5d) 跨章对话复读：上一章出现过的原句对话（≥8 字）在本章原样再现 ≥2 处 → 判定对话复读。
+            //     长公共子串只能抓连续大段，短对话逐句复读（上一章场景在本章重演）由这里兜底。
+            const dupQuotes = findDuplicateDialogues(prevChapter.content, full);
+            if (dupQuotes.length >= 2) {
+              structureFixes.push(`本章有 ${dupQuotes.length} 处对话与上一章原句完全相同（如「${dupQuotes[0].slice(0, 20)}」），属于对话复读。这些场景在上一章已发生过，本章严禁重演相同对话——剧情必须从上一章结尾之后的新事件推进`);
             }
           }
         }
