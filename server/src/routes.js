@@ -44,6 +44,7 @@ import {
   FORESHADOW_ANALYZE_SYSTEM, AI_DETECT_SYSTEM, KEY_MOMENTS_SYSTEM, PLAN_ADVANCE_SYSTEM, STAGE_SUMMARY_SYSTEM, CHARACTER_CONSISTENCY_SYSTEM,
   FACT_EXTRACT_SYSTEM, CHAR_CHANGE_EXTRACT_SYSTEM, FORESHADOW_RECALL_PREDICT_SYSTEM, TIMELINE_EXTRACT_SYSTEM, HIERARCHICAL_SUMMARY_SYSTEM,
   PERSONA_DRIFT_CHECK_SYSTEM,
+  NEXT_SUMMARY_CALIBRATE_SYSTEM,
   CHARACTER_VOICE_EXTRACT_SYSTEM, PLOT_CONSISTENCY_CHECK_SYSTEM, NOVEL_CONSTITUTION_BUILD_SYSTEM,
   CHAPTER_BEAT_SYSTEM, PLAN_BEATS_SYSTEM, WRITING_QUALITY_SYSTEM, WRITING_ELEVATE_SYSTEM, AUTO_SUMMARY_SYSTEM, STORY_READABILITY_SYSTEM, STYLE_LEARN_APPLY_SYSTEM, NAMEGEN_SYSTEM,
   ARC_PLAN_SYSTEM, WORLD_EXPAND_SYSTEM, EMOTION_CURVE_SYSTEM,
@@ -344,11 +345,76 @@ async function backfillChapterMemory(novel, config, send, beforeIdx) {
     try {
       await updateCharacterStates(config, novel, ch.chapter_index, ch.content);
     } catch { /* 状态提取失败继续 */ }
+    try {
+      const kRes = await chat({
+        config,
+        task: 'analysis',
+        messages: [
+          { role: 'system', content: KEY_MOMENTS_SYSTEM },
+          { role: 'user', content: `第${ch.chapter_index}章 标题：${ch.title || ''}\n\n${String(ch.content).slice(0, 4000)}` }
+        ],
+        maxTokens: 1000
+      });
+      const km = extractJson(kRes.content);
+      if (Array.isArray(km)) {
+        for (const m of km.filter(Boolean).map(String).slice(0, 8)) {
+          addKeyMomentUnique(novel.id, m, ch.chapter_index);
+        }
+      }
+    } catch { /* 关键事实提取失败继续 */ }
+    try {
+      const fRes = await chat({
+        config,
+        task: 'analysis',
+        messages: [
+          { role: 'system', content: FORESHADOW_ANALYZE_SYSTEM },
+          { role: 'user', content: `第${ch.chapter_index}章 标题：${ch.title || ''}\n\n${String(ch.content).slice(0, 4000)}` }
+        ],
+        maxTokens: 1000
+      });
+      const fo = extractJson(fRes.content);
+      if (fo) {
+        const newList = Array.isArray(fo.new) ? fo.new.filter(Boolean).map(String).slice(0, 10) : [];
+        for (const c of newList) {
+          insertForeshadowUnique(novel.id, c, ch.chapter_index);
+        }
+      }
+    } catch { /* 伏笔提取失败继续 */ }
   }
   if (rows.length) {
     try { refreshMemoryFile(novel.id); } catch { /* 记忆文件重建失败不阻塞 */ }
   }
   return rows.length;
+}
+
+// 下一章概要衔接校准：上一章实际正文可能已偏离原规划（作者手动改写/粘贴了自己的正文），
+// 本章概要若按规划链走会把"规划里的上一章"当成既定前情 → 与实际正文脱节。
+// 生成前判定衔接性，脱节时改写本章概要（保留核心推进方向，桥接到上一章实际结尾）并落库，
+// 让后续生成都基于校准后的概要。返回改写后的概要（未改写返回 null）。
+async function calibrateNextSummary(novel, config, send, idx, prevContent) {
+  if (!prevContent || String(prevContent).length < 300) return null;
+  const cur = getChapter(novel.id, idx);
+  if (!cur || !cur.summary || String(cur.summary).includes('自动生成占位')) return null;
+  try {
+    const r = await chat({
+      config,
+      task: 'analysis',
+      wantsJson: true,
+      messages: [
+        { role: 'system', content: NEXT_SUMMARY_CALIBRATE_SYSTEM },
+        { role: 'user', content: `【上一章实际结尾】\n…${String(prevContent).slice(-1200)}\n\n【本章（第${idx}章）现有规划概要】\n${String(cur.summary).slice(0, 300)}\n${cur.hook ? `【本章结尾钩子】${cur.hook}` : ''}\n\n请判定本章概要能否从上一章实际结尾自然衔接。` }
+      ],
+      maxTokens: 400
+    });
+    const j = extractJson(r.content) || {};
+    if (j.connected) return null;
+    const fixed = String(j.rewritten_summary || '').trim();
+    if (fixed.length < 20) return null;
+    db.prepare('UPDATE chapters SET summary = ? WHERE id = ?').run(fixed, cur.id);
+    if (send) send({ type: 'status', message: `上一章实际正文与本章规划脱节，已自动校准第 ${idx} 章概要` });
+    return fixed;
+  } catch { /* 校准失败不阻塞 */ }
+  return null;
 }
 
 async function runAdvanceCheck(config, idx, targetChapters, summary, full, nextSummaries = []) {
@@ -4361,6 +4427,13 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 
     // 上一章结尾片段：强制本章从它续写，防止跑题（模型易忽略模糊的前情）
     const prevChapter = db.prepare("SELECT title, content, summary, beats FROM chapters WHERE novel_id = ? AND chapter_index = ? AND content != ''").get(novel.id, idx - 1);
+    // 下一章概要衔接校准：上一章实际正文（手动粘贴/改写）与本章规划概要脱节时自动改写概要桥接，
+    // 改写结果落库 + 走 summaryOverride，让【本章剧情概要】【全书脉络时间线】都用校准后的版本
+    let calibratedSummary = null;
+    try {
+      calibratedSummary = await calibrateNextSummary(novel, config, send, idx, prevChapter?.content);
+    } catch { /* 校准失败不阻塞 */ }
+    if (calibratedSummary) summaryOverride = calibratedSummary;
     const prevChapterSummary = prevChapter?.summary ? `\n上一章概要：${prevChapter.summary}` : '';
     let prevBeatsBlock = '';
     if (prevChapter?.beats) {
@@ -4383,7 +4456,8 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
 - 本章第一句必须紧接上述"上一章结尾"的最后一个人物动作、一句对话或一个悬念往下写，让读者感到前后两章是连续的。
 - 开头不得另起炉灶介绍新场景/新人物/新设定，不得从"时间过去了很久""另一边""与此同时"等跳转话术另开一线。
 - 若上一章结尾主角正处在某个地点/某个动作中，本章开头就从这个地点/动作继续。
-- 不得引入上一章未出现的设定/能力/物品（如系统、功法、武器等），除非在上一章已有铺垫。`
+- 不得引入上一章未出现的设定/能力/物品（如系统、功法、武器等），除非在上一章已有铺垫。
+- 正文优先铁律：若【本章剧情概要】与上述上一章实际结尾冲突（概要默认的前情在实际正文里没发生过），一律以上一章实际正文为准续写，概要只取其后仍适用的推进方向。`
       : '';
 
     const regenNote = mode === 'regenerate'
@@ -4565,6 +4639,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
     };
 
     for (let attempt = 0; attempt <= MAX_AUTO_REGENERATE; attempt++) {
+      structureFixes = [];
       const isRegen = attempt > 0;
       if (isRegen) {
         send({ type: 'reset' });
@@ -4864,6 +4939,10 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
           total = regexTotal;
           det = { score: regexTotal, issues: [] };
           problems.push({ desc: `AI 味明显（${regexTotal} 分，阈值 ${aiScorePass()}${bl.length ? '；高频复用词语：' + bl.join('、') : ''}${templateHits ? `；模板句式命中 ${templateHits} 类` : ''}）` });
+        } else if (regexTotal > aiScorePass() * 0.6 && bl.length) {
+          // 软档位：评分未到重生成线但黑名单词已现苗头 → 定向润色替换，避免整章重生成洗掉语感
+          structureFixes.push(`AI 腔词复用（${regexTotal} 分）：${bl.join('、')}——请把这些词的复用处改写为具体动作/细节描写，一词一章最多出现 1 次`);
+          total = regexTotal;
         } else {
           // 正则检测通过，再做 LLM 深度检测
           // 采样策略：长文分四段均匀覆盖（前+前中+后中+后），减少中段盲区
@@ -4886,6 +4965,10 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
             total = Math.min(100, det.score + regexScore);
             if (total > aiScorePass()) {
               problems.push({ desc: `AI 味明显（${total} 分，阈值 ${aiScorePass()}；模板句式命中 ${templateHits} 类）` });
+            } else if (total > aiScorePass() * 0.6 && (det.issues.length || templateHits)) {
+              // 软档位：临界 AI 味（0.6×阈值 ~ 阈值）不值得整章重生成，转定向润色逐条清除
+              const issueHints = det.issues.slice(0, 4).map((i) => `"${String(i.quote || '').slice(0, 20)}"${i.suggestion ? `→${String(i.suggestion).slice(0, 40)}` : ''}`).join('；');
+              structureFixes.push(`AI 味临界（${total} 分，达标线 ${aiScorePass()}），定向清除以下痕迹：${issueHints || `模板句式 ${templateHits} 类`}`);
             }
           } catch (e) {
             // LLM 检测失败时明示用户（静默放行会让用户拿到未经检测的初稿还以为过了质检）
@@ -4929,7 +5012,8 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
       // 3b) 记忆一致性校验（正文 vs 记忆库：硬事实/角色档案/状态快照/剧情日志/时间线）。
       //     checkPlotConsistency 查"章内逻辑"，这里查"跨章记忆"——超长连载防记忆错乱的专用闸。
       //     high 级矛盾触发重生成，medium 级转定向润色提示。
-      if (problems.length === 0 && idx > 2) {
+      //     第 2 章起即启用：粘贴/补建记忆链后第 2 章已有可对照记忆（记忆库为空时函数内部自会放行）。
+      if (problems.length === 0 && idx >= 2) {
         try {
           const memCheck = await checkMemoryConsistency(novel.id, idx, full, config);
           const highConflicts = (memCheck.conflicts || []).filter((c) => c.severity === 'high');
@@ -5108,7 +5192,8 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
 
       // 5) 表达层结构检测（免费正则，模型无关）：对白失衡/跨章口癖固化/自我复述。
       //    这些属"表达层"问题，整章重生成同样概率复发且代价高，收集为定向润色信号注入 autoPolish 与文笔门。
-      structureFixes = [];
+      //    注意：此处不再清空 structureFixes——第 2 步 AI 味软档位已推入修复项，清空会丢失。
+      //    每轮 attempt 开头已重置，此处只做累加。
       try {
         // 5a) 对白/叙述结构失衡：全章零对话（流水账旁白体）或全章 85%+ 对话（剧本化）
         structureFixes.push(...scanStructureBalance(full));
