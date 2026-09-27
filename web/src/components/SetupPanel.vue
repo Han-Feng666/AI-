@@ -100,8 +100,11 @@ const planForm = ref({
   chapterWordCount: 2000,
   targetChapters: 20,
   protagonistName: '',
-  heroineName: ''
+  heroineName: '',
+  existingChapterContent: ''
 });
+const EXISTING_MIN_LEN = 200;
+const showExistingInput = ref(false);
 const styleIds = ref([]);
 const stylePresets = ref([]);
 const knowledgeIds = ref([]);
@@ -368,6 +371,11 @@ async function startPlan() {
     ElMessage.warning('请先输入你的灵感想法');
     return;
   }
+  const existingContent = planForm.value.existingChapterContent.trim();
+  if (existingContent && existingContent.length < EXISTING_MIN_LEN) {
+    ElMessage.warning(`已有正文过短（至少 ${EXISTING_MIN_LEN} 字），当前 ${existingContent.length} 字`);
+    return;
+  }
   const referenceNotes = useReferenceInPlan.value && refSearchResults.value.length
     ? refSearchResults.value.map((r) => `《${r.title}》：${r.snippet || ''}`).join('\n')
     : '';
@@ -379,7 +387,8 @@ async function startPlan() {
       genre: planForm.value.genre.join(','),
       stylePresets: stylePresets.value,
       lengthClass: lengthClass.value,
-      referenceNotes
+      referenceNotes,
+      existingChapters: existingContent ? [{ index: 1, content: existingContent }] : []
     });
     if (!data) return;
     planDialog.value = true;
@@ -433,6 +442,26 @@ function closePlanDialog() {
           placeholder="描述你的想法：世界观、主角、核心冲突…"
         />
       </el-form-item>
+      <div class="existing-section">
+        <button type="button" class="existing-toggle" @click="showExistingInput = !showExistingInput">
+          <span class="existing-arrow">{{ showExistingInput ? '▾' : '▸' }}</span>
+          已有开头正文（可选，至少 {{ EXISTING_MIN_LEN }} 字）
+          <span v-if="planForm.existingChapterContent.trim().length" class="existing-count">
+            已填 {{ planForm.existingChapterContent.trim().length }} 字
+          </span>
+        </button>
+        <el-input
+          v-if="showExistingInput"
+          v-model="planForm.existingChapterContent"
+          type="textarea"
+          :rows="10"
+          class="existing-textarea"
+          placeholder="把你已经写好的第一章正文粘贴到这里。方案会以这段实际内容为既定事实锚定后续剧情，避免生成的第2章与你的正文脱节。"
+        />
+        <div v-if="showExistingInput" class="existing-hint">
+          填写后方案中的第1章概要将直接采用实际内容概括，人物与设定将以你的正文为准。
+        </div>
+      </div>
       <div class="two-col">
         <el-form-item label="男主角名字（可选）">
           <el-input v-model="planForm.protagonistName" placeholder="如：林风 / 陈若辰" maxlength="10" />
@@ -836,6 +865,35 @@ function closePlanDialog() {
   color: #1e1b4b;
 }
 .setup-form { max-width: 560px; }
+.existing-section { margin: -6px 0 14px; }
+.existing-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px dashed #c7d2fe;
+  border-radius: 6px;
+  background: #f8faff;
+  color: #4338ca;
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.existing-toggle:hover { background: #eef2ff; }
+.existing-arrow { font-size: 11px; }
+.existing-count {
+  color: #059669;
+  font-weight: 600;
+  margin-left: 4px;
+}
+.existing-textarea { margin-top: 10px; }
+.existing-textarea :deep(.el-textarea__inner) { font-size: 13px; line-height: 1.7; }
+.existing-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.6;
+}
 .check-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));

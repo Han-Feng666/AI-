@@ -2487,17 +2487,24 @@ async function applyPlan(novel, plan, opts = {}) {
   db.prepare('UPDATE novels SET title = ?, genre = ?, world_view = ?, outline = ?, concept = ?, chapter_word_count = ?, target_chapters = ?, status = ?, story_arcs = ?, protagonist_name = ?, heroine_name = ? WHERE id = ?')
     .run(title, genreV, worldView, outline, concept, words, target, 'planned', storyArcs, String(plan.protagonist_name || novel.protagonist_name || ''), String(plan.heroine_name || novel.heroine_name || ''), novel.id);
 
-  // 采纳修订方案前快照已写章节：仅当新方案对应章节的标题与概要都未变时保留正文，
-  // 避免修订方案把用户已写内容全部清空重写（重写会丢失原稿语感且触发重型润色管线）
+  // 采纳方案前快照已写章节：
+  // - user 来源章节（作者手写/粘贴）：按章节序号强制恢复正文（正文优先，方案必须适配实际内容），
+  //   概要优先用快照中的补建摘要；方案分章数不足时超额章节在计划章节之后追加恢复。
+  // - ai 来源章节：仅当新方案对应章节的标题与概要都未变时保留正文，
+  //   避免修订方案把 AI 已写内容错误带进新方向（重写会丢失语感且触发重型润色管线）。
   let writtenSnapshot = [];
   try {
     writtenSnapshot = db.prepare(
-      "SELECT chapter_index, title, summary, content, word_count, ai_score FROM chapters WHERE novel_id = ? AND content != ''"
+      "SELECT chapter_index, title, summary, content, word_count, ai_score, source FROM chapters WHERE novel_id = ? AND content != ''"
     ).all(novel.id);
   } catch { /* 快照失败不阻塞 */ }
   const writtenByKey = new Map();
+  const writtenByUserIndex = new Map();
   for (const w of writtenSnapshot) {
     writtenByKey.set(`${String(w.title || '').trim()}||${String(w.summary || '').trim()}`, w);
+    if (String(w.source || '') === 'user' || (opts.existingIndices || []).includes(w.chapter_index)) {
+      writtenByUserIndex.set(w.chapter_index, w);
+    }
   }
 
   db.prepare('DELETE FROM relationships WHERE novel_id = ?').run(novel.id);
@@ -2549,18 +2556,36 @@ async function applyPlan(novel, plan, opts = {}) {
   for (let i = 0; i < chapters.length; i++) {
     const ch = chapters[i];
     const beatsJson = ch?.beats ? (Array.isArray(ch.beats) ? JSON.stringify(ch.beats) : String(ch.beats)) : '';
+    // user 来源章节：按章节序号强制恢复正文与补建摘要（方案概要让位实际内容）
+    const keptByIndex = writtenByUserIndex.get(i + 1);
+    if (keptByIndex) {
+      db.prepare("INSERT INTO chapters (novel_id, chapter_index, title, summary, emotion, arc_hint, hook, beats, content, status, word_count, ai_score, source) VALUES (?,?,?,?,?,?,?,?,?,'done',?,?,'user')")
+        .run(novel.id, i + 1, keptByIndex.title || String(ch?.title || `第${i + 1}章`), String(keptByIndex.summary || ch?.summary || ''), String(ch?.emotion || ''), String(ch?.arc_hint || ''), String(ch?.hook || ''), beatsJson, String(keptByIndex.content), Number(keptByIndex.word_count) || 0, keptByIndex.ai_score ?? null);
+      writtenByUserIndex.delete(i + 1);
+      preservedChapters++;
+      continue;
+    }
     // 标题+概要均未变的已写章节：恢复正文与完成状态（语感延续，避免无谓重写）
     const key = `${String(ch?.title || '').trim()}||${String(ch?.summary || '').trim()}`;
     const kept = writtenByKey.get(key);
     if (kept) {
-      db.prepare('INSERT INTO chapters (novel_id, chapter_index, title, summary, emotion, arc_hint, hook, beats, content, status, word_count, ai_score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-        .run(novel.id, i + 1, String(ch?.title || `第${i + 1}章`), String(ch?.summary || ''), String(ch?.emotion || ''), String(ch?.arc_hint || ''), String(ch?.hook || ''), beatsJson, String(kept.content), 'done', Number(kept.word_count) || 0, kept.ai_score ?? null);
+      db.prepare("INSERT INTO chapters (novel_id, chapter_index, title, summary, emotion, arc_hint, hook, beats, content, status, word_count, ai_score, source) VALUES (?,?,?,?,?,?,?,?,?,'done',?,?,?)")
+        .run(novel.id, i + 1, String(ch?.title || `第${i + 1}章`), String(ch?.summary || ''), String(ch?.emotion || ''), String(ch?.arc_hint || ''), String(ch?.hook || ''), beatsJson, String(kept.content), Number(kept.word_count) || 0, kept.ai_score ?? null, String(kept.source || 'ai'));
       writtenByKey.delete(key);
       preservedChapters++;
       continue;
     }
-    db.prepare('INSERT INTO chapters (novel_id, chapter_index, title, summary, emotion, arc_hint, hook, beats, content, status) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(novel.id, i + 1, String(ch?.title || `第${i + 1}章`), String(ch?.summary || ''), String(ch?.emotion || ''), String(ch?.arc_hint || ''), String(ch?.hook || ''), beatsJson, '', 'planned');
+    db.prepare("INSERT INTO chapters (novel_id, chapter_index, title, summary, emotion, arc_hint, hook, beats, content, status, source) VALUES (?,?,?,?,?,?,?,?,?,'planned','')")
+      .run(novel.id, i + 1, String(ch?.title || `第${i + 1}章`), String(ch?.summary || ''), String(ch?.emotion || ''), String(ch?.arc_hint || ''), String(ch?.hook || ''), beatsJson, '');
+  }
+  // 方案分章数少于用户已写正文覆盖章节数时：超额 user 章节在计划章节之后按序号追加恢复
+  const extraUser = [...writtenByUserIndex.values()].sort((a, b) => a.chapter_index - b.chapter_index);
+  let extraIdx = chapters.length;
+  for (const w of extraUser) {
+    extraIdx++;
+    db.prepare("INSERT INTO chapters (novel_id, chapter_index, title, summary, content, status, word_count, ai_score, source) VALUES (?,?,?,?,?,'done',?,?,'user')")
+      .run(novel.id, extraIdx, String(w.title || `第${extraIdx}章`), String(w.summary || ''), String(w.content), Number(w.word_count) || 0, w.ai_score ?? null);
+    preservedChapters++;
   }
 
   touchNovel(novel.id);
@@ -2666,6 +2691,26 @@ router.post('/novels/:id/plan', async (req, res) => {
   const { config, error } = requireLLM();
   if (error) return res.status(400).json({ error: error.message });
 
+  // 已有正文（content-first-plan）：作者把已写好的章节随方案请求提交，方案以实际正文为既定事实锚点。
+  // v1 支持第一章（index 缺省 1），数据结构按多章数组设计。
+  const EXISTING_MIN_LEN = 200;
+  const existingChapters = [];
+  if (Array.isArray(req.body?.existingChapters)) {
+    for (const ec of req.body.existingChapters) {
+      const content = String(ec?.content || '').trim();
+      if (!content) continue;
+      if (content.length < EXISTING_MIN_LEN) {
+        return res.status(400).json({ error: `已有正文过短（至少 ${EXISTING_MIN_LEN} 字），当前 ${content.length} 字` });
+      }
+      existingChapters.push({ index: Math.max(1, Number(ec?.index) || 1), title: String(ec?.title || '').trim(), content });
+    }
+    // 同序号重复提交时保留最后一版
+    const byIndex = new Map();
+    for (const ec of existingChapters) byIndex.set(ec.index, ec);
+    existingChapters.length = 0;
+    existingChapters.push(...[...byIndex.values()].sort((a, b) => a.index - b.index));
+  }
+
   // Job 化：拒绝同节段并发新建
   const jobTry = tryCreateJob(novel.id, 'plan', { concept, genre, chapterWordCount, targetChapters, lengthClass });
   if (jobTry.conflict) {
@@ -2681,6 +2726,45 @@ router.post('/novels/:id/plan', async (req, res) => {
   send({ type: 'progress', progress: 5, message: '正在初始化…' });
   updateJob(job.id, { progress: 5 });
 
+  // 重新生成方案会重建全部章节/角色/关系，旧伏笔指向已失效，一并清空。
+  // 必须在已有正文补建之前执行：补建会为已有章节写入新伏笔，放在后面会把它清掉。
+  db.prepare('DELETE FROM foreshadowings WHERE novel_id = ?').run(novel.id);
+
+  // 已有正文先落库（方案生成期间章节表会被 applyPlan 重建，靠 existingIndices 快照恢复）。
+  // 覆盖旧正文时清空旧摘要，让补建链路按最新正文重建记忆。
+  for (const ec of existingChapters) {
+    db.prepare(
+      "DELETE FROM chapters WHERE novel_id = ? AND chapter_index = ?"
+    ).run(novel.id, ec.index);
+    db.prepare(
+      "INSERT INTO chapters (novel_id, chapter_index, title, content, word_count, status, source) VALUES (?,?,?,?,?,?,'user')"
+    ).run(novel.id, ec.index, ec.title || `第${ec.index}章`, ec.content, ec.content.length, 'done');
+  }
+  // 已有正文补建记忆链（摘要/角色状态/关键剧情事实/伏笔）：方案提示词与后续生成都依赖它
+  let existingBlock = '';
+  if (existingChapters.length) {
+    send({ type: 'status', message: '正在消化已有正文（生成摘要与关键剧情事实）…' });
+    try {
+      await backfillChapterMemory(novel, config, send, Math.max(...existingChapters.map((e) => e.index)) + 1);
+    } catch { /* 补建失败降级为仅结尾片段 */ }
+    const parts = ['【作者已完成章节（既定事实，方案必须与之相容）】'];
+    for (const ec of existingChapters) {
+      const saved = db.prepare('SELECT title, summary FROM chapters WHERE novel_id = ? AND chapter_index = ?').get(novel.id, ec.index);
+      const tail = String(ec.content).slice(-600);
+      const lines = [`第${ec.index}章已完成，实际内容如下：`, `- 章节标题：${saved?.title || ec.title || `第${ec.index}章`}`];
+      if (saved?.summary) {
+        lines.push(`- 章节摘要：${saved.summary}`);
+        lines.push(`- 正文结尾：…${tail}`);
+      } else {
+        lines.push(`- 章节摘要：（补建失败，以正文结尾为准）`);
+        lines.push(`- 正文结尾：…${tail}`);
+      }
+      parts.push(lines.join('\n'));
+    }
+    parts.push('既定事实铁律：已有正文中出场的人物、发生的事件、确立的设定为既定事实。方案中的人物表、世界观、势力、第2章起的分章概要必须从这些事实自然延展，严禁改写、忽略已有正文中已发生的事件，严禁引入与已有正文矛盾的人物或设定。第1章的概要必须直接采用上方"章节摘要"（实际内容概括），严禁另行规划第1章剧情。方案中的主角名必须使用已有正文中实际出现的称呼。');
+    existingBlock = parts.join('\n\n');
+  }
+
   // 重新生成方案会重建全部章节/角色/关系，旧伏笔指向已失效，一并清空
   db.prepare('DELETE FROM foreshadowings WHERE novel_id = ?').run(novel.id);
 
@@ -2693,7 +2777,7 @@ router.post('/novels/:id/plan', async (req, res) => {
 const conceptText = concept || novel.concept || '';
 const conceptRule = buildConceptFidelityRule(conceptText);
 const userPrompt = `${conceptRule}
-
+${existingBlock ? `\n${existingBlock}\n` : ''}
 【方案参数】
  类型：${genre || novel.genre || '不限（请根据内容判断）'}
  创作风格：${presets.length ? presets.join('、') : '由你判断，选择适合该题材的风格基调'}
@@ -3021,7 +3105,7 @@ ${parts.join('\n\n')}
             { role: 'system', content: PLAN_CHAPTERS_SYSTEM },
             { role: 'user', content: `${conceptRule}
 
-作品骨架：
+${existingBlock ? `${existingBlock}\n` : ''}作品骨架：
 ${brief}
 
 计划章节数：${target} 章。
@@ -3256,7 +3340,7 @@ ${prevBlock || '（无，这是开头章节）'}
     };
 
     send({ type: 'progress', progress: 96, message: '正在应用方案到小说…' });
-    const result = await applyPlan(novel, plan, { words, target, concept });
+    const result = await applyPlan(novel, plan, { words, target, concept, existingIndices: existingChapters.map((e) => e.index) });
     send({ type: 'progress', progress: 100, message: '方案生成完成（细纲转后台生成，稍后自动出现）' });
     updateJob(job.id, { status: 'done', progress: 100, result_ref: String(novel.id) });
     end({ type: 'done', data: { novel: result, jobId: job.id, totalChapters: allChapters.length } });
@@ -3917,8 +4001,10 @@ router.put('/novels/:id/chapters/:idx', async (req, res) => {
   if (summaryStale && ch.summary) {
     db.prepare('UPDATE chapters SET summary = ? WHERE id = ?').run('', ch.id);
   }
-  db.prepare('UPDATE chapters SET title = ?, content = ?, word_count = ?, status = ? WHERE id = ?')
-    .run(newTitle, newContent, countWords(newContent), newContent ? 'draft' : ch.status, ch.id);
+  // 手动保存的正文标记为 user 来源：方案重生成时按章节序号强制保留（正文优先）
+  const manualSource = contentChanged && String(newContent || '').trim() ? 'user' : (ch.source || '');
+  db.prepare('UPDATE chapters SET title = ?, content = ?, word_count = ?, status = ?, source = ? WHERE id = ?')
+    .run(newTitle, newContent, countWords(newContent), newContent ? 'draft' : ch.status, manualSource, ch.id);
   touchNovel(novel.id);
   try {
     await writeChapterTxt(novel, { chapter_index: idx, title: newTitle, content: newContent });
@@ -5545,11 +5631,11 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
     const wc = countWords(full);
     if (existing) {
       backupChapter(novel.id, idx, mode === 'regenerate' ? '重新生成' : '生成覆盖');
-      db.prepare('UPDATE chapters SET title = ?, content = ?, word_count = ?, status = ? WHERE id = ?')
-        .run(title, full, wc, 'draft', existing.id);
+      db.prepare("UPDATE chapters SET title = ?, content = ?, word_count = ?, status = 'draft', source = 'ai' WHERE id = ?")
+        .run(title, full, wc, existing.id);
     } else {
-      const ins = db.prepare('INSERT INTO chapters (novel_id, chapter_index, title, content, summary, word_count, status) VALUES (?,?,?,?,?,?,?)')
-        .run(novel.id, idx, title, full, existing?.summary || '', wc, 'draft');
+      const ins = db.prepare("INSERT INTO chapters (novel_id, chapter_index, title, content, summary, word_count, status, source) VALUES (?,?,?,?,?,?,'draft','ai')")
+        .run(novel.id, idx, title, full, existing?.summary || '', wc);
       chapterId = ins.lastInsertRowid;
     }
     touchNovel(novel.id);

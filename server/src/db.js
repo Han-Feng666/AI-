@@ -426,6 +426,8 @@ ensureColumn('novels', 'style_samples', "style_samples TEXT DEFAULT ''");
 ensureColumn('novels', 'style_presets', "style_presets TEXT DEFAULT ''");
 ensureColumn('chapters', 'ai_score', 'ai_score INTEGER DEFAULT NULL');
 ensureColumn('chapters', 'beats', "beats TEXT DEFAULT ''");
+// 正文来源标记：'user'（作者手写/粘贴，方案重生成时按章节序号强制保留）/'ai'（AI 生成，维持原有标题+概要匹配恢复）
+ensureColumn('chapters', 'source', "source TEXT DEFAULT ''");
 ensureColumn('styles', 'style_samples', "style_samples TEXT DEFAULT ''");
 ensureColumn('novels', 'length_class', "length_class TEXT DEFAULT 'long'");
 ensureColumn('world_settings', 'source', "source TEXT DEFAULT 'manual'");
