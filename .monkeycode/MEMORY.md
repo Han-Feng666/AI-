@@ -1030,3 +1030,19 @@ Entries discovered by the Agent during task execution should follow this format:
   - POLISH_SYSTEM 改写示范：6 组"原句→改写后"示例（删情绪解释/递进句/伪深度感悟/心理旁白/模糊量词/空泛拟人），教模型"怎么改"而非照抄。
   - build-and-patch 补丁应用方式：POST /api/update/apply 期望 patch JSON 在请求体（`-d @file.patch.json`），不是 `{patchPath}`。代码已提交时需 `--from HEAD~1`（脚本自动检测：有未提交改动用 HEAD，否则 HEAD~1；但 --bump 创建未提交 package.json 会使检测误判为"有未提交改动"→ baseline=HEAD → 遗漏已提交代码）。
   - 测试素材：mock65=4165（diverge/connected 模式切换 + score-8 AI 检测 + 记忆一致性 + 关键剧情）；e2e_round39.mjs 15 断言（A:diverge 校准+落库+生成上下文含校准概要+记忆校验+关键剧情补建；B:connected 不误改+软档位润色）；test_round39.mjs 39 断言。全量回归：static sweep round7-34 28/0、e2e 28/30/31/32/33 43/0、round29 0/4（预存不阻塞）、round38 19+23/0、manager 13/0。
+
+[Project Knowledge Summary]
+- Date: 2026-09-27
+- Context: 第四十轮（v1.4.66）正文优先方案（content-first-plan）——方案生成支持粘贴已有正文，既定事实锚定后续剧情
+- Category: Troubleshooting & Debugging + Testing Methods + Build Methods + Environment Configuration
+- Instructions:
+  - 功能目标：用户在方案生成流程粘贴已写好的第一章正文（existingChapters），方案以实际正文为既定事实锚点（补建记忆 → 方案提示词既定事实块 → applyPlan 按序号恢复正文），从源头消除方案与正文脱节。
+  - 核心机制：POST /plan 新增 existingChapters 参数（≥200字校验，400 拒绝过短）；已有正文落库 source=user（db.js ensureColumn chapters.source 迁移）；backfillChapterMemory 补建摘要/关键剧情/伏笔后注入方案提示词【作者已完成章节（既定事实，方案必须与之相容）】；applyPlan 按章节序号恢复 user 来源正文（优先补建摘要），AI 章节保持标题+概要匹配恢复。
+  - 关键顺序陷阱：DELETE FROM foreshadowings 必须在已有正文落库+补建之前执行，否则补建写入的伏笔会被清空。
+  - 章节批次提示词（请规划第 X 至第 Y 章）也需注入 existingBlock——否则批次间规划会忽略已有正文锚点。
+  - applyPlan existingIndices：plan 路由显式传 existingChapters.map(e=>e.index)；无参数时自动推导 source=user 的章节按序号恢复；超额 user 章节在计划章节后追加。
+  - 手动保存 PUT /chapters/:idx 正文变化时标记 source=user；AI 生成落库 source=ai（UPDATE/INSERT 均含）。
+  - 前端 SetupPanel：折叠面板"已有开头正文（可选，至少 200 字）"，startPlan 校验后传 existingChapters=[{index:1,content}]。
+  - 测试素材：mock66=4166（复用 mock65 全任务分流 + plan-with-existingChapters）；test_round40.mjs 46 断言；e2e_round40.mjs 25 断言（A:过短400；B:粘贴→补建→既定事实块→applyPlan保留正文+source=user；C:无existingChapters重跑→source自动保留；D:AI生成source=ai+生成上下文含ch1结尾）。
+  - 全量回归：static sweep round7-34 31/0、e2e 28/30/31/32/33 5/0（round29 0/4 预存不阻塞）、round38/39/40 3/0、manager_tool_auth 13/0。
+  - 环境注意：node 22.22.0 不支持 --no-warn 参数；E2E 测试服务器端口与数据目录需独立（3002/round39、3004/round40c），mock 端口按轮次递增（mock65=4165、mock66=4166）。
