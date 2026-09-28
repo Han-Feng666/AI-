@@ -7,7 +7,8 @@
 - **一键创作**：输入灵感想法，选择小说类型，AI 自动生成书名、世界观、剧情大纲、角色关系网与完整章节规划
 - **逐章创作**：按章生成内容，支持设定每章字数（500-8000 字），生成过程中实时流式显示
 - **无 AI 味**：内置「人类写作风格铁律」—— 禁用套话总结腔、机械排比、辞藻堆砌、空洞升华、功能化对话等 AI 高频痕迹；生成后支持一键「去 AI 味」润色，也可在设置中开启「自动去除 AI 味」，每章完成后自动按人类文风重写
-- **铁律模式（生成质量门）**：默认开启的硬性质量保障 —— 生成与「去 AI 味」都走强制闭环：润色 → AI 味检测 → 未达标自动再润色（最多 3 轮，每轮带上一次检测出的具体问题清单与 AI 高频词），并叠加程序级「AI 高频词黑名单」硬过滤，检测通过、不再命中黑名单词才算完成并写入正式章节，从机制上杜绝 AI 味残留；可在「模型设置」中关闭
+- **铁律模式（生成质量门）**：默认开启的硬性质量保障 —— 生成与「去 AI 味」都走强制闭环：润色 → AI 味检测 → 未达标自动再润色（最多 3 轮，每轮带上一次检测出的具体问题清单与 AI 高频词），并叠加程序级「AI 高频词黑名单」硬过滤；还要过可读性、章内剧情逻辑（全章抽样校验，长章节后半段不漏检）、跨章记忆一致性等多道关卡，重试耗尽后逻辑类问题会走「逻辑修补编辑」定向修复因果链而非整章重写，全部通过才写入正式章节；可在「模型设置」中关闭
+- **粘贴已有正文开书**：方案生成时可直接粘贴你已写好的开头章节（如自己写的第一章），AI 先为其补建记忆，再以实际正文为「既定事实」锚定后续大纲与章节规划，杜绝方案与正文脱节、续写接不上的情况
 - **长篇小说支持**：专为长篇设计的分层记忆机制 —— 每章自动生成剧情摘要，创作时参考「前情摘要 + 最近章节全文」，可稳定支撑数十万乃至千万字的长篇连载，且不受上下文窗口限制
 - **创作对话**：内置 AI 对话面板，创作间隙随时与 AI 讨论剧情走向、人物设定、修改意见，AI 记得你的设定与进度
 - **人物关系网**：AI 自动提取角色与关系，可视化关系图谱（力导向图），支持手动增删改
@@ -164,19 +165,25 @@ novel-studio/
 │   └── src/
 │       ├── db.js      # SQLite 数据模型
 │       ├── llm.js     # 大模型客户端（流式/非流式）
-│       ├── prompts.js # 提示词组装（设定/大纲/章节/摘要/对话）
-│       ├── lib.js     # 业务辅助（字数统计/记忆组装/伏笔/设定/备份）
+│       ├── prompts.js # 提示词组装（设定/大纲/章节/摘要/润色/逻辑修复）
+│       ├── lib.js     # 业务辅助（字数统计/记忆组装/伏笔/设定/备份/AI 扫描器）
+│       ├── memory.js  # 长篇分层记忆 + 剧情/记忆一致性校验
 │       ├── storage.js # 作品文件夹 + 每章 TXT 持久化
-│       └── routes.js  # 业务 API
+│       ├── routes.js  # 业务 API（含生成质量门闭环）
+│       ├── rag.js / knowledge_graph.js / style_dna.js / genre_engine.js 等
+│       └── updater.js # 增量补丁应用（/api/update/apply）
+├── scripts/
+│   └── build-and-patch.cjs  # 增量补丁打包（--bump/--from/--no-build）
 ├── web/               # 前端
 │   └── src/
 │       ├── views/     # 书架/工作台/设置/风格库
 │       ├── components/  # 章节/对话/角色/关系/伏笔/设定面板
 │       ├── stores/    # Pinia 状态（编辑器/设置）
 │       └── api/       # HTTP + SSE 流式封装
-└── desktop/           # Electron 桌面版
-    ├── electron/main.cjs  # 主进程（内置后端 + 窗口）
-    └── package.json       # electron-builder 打包配置
+├── desktop/           # Electron 桌面版
+│   ├── electron/main.cjs  # 主进程（内置后端 + 窗口）
+│   └── package.json       # electron-builder 打包配置
+└── .monkeycode/       # 迭代记录（MEMORY.md）与需求规格（specs/）
 ```
 
 ## 数据与隐私
@@ -184,6 +191,52 @@ novel-studio/
 - 所有作品数据仅保存在本机 SQLite 文件中，不经过任何第三方服务器
 - API Key 仅保存在本机，仅用于调用你配置的模型服务
 - 模型调用由后端转发到你配置的 Base URL，前端不直接接触 Key
+
+## 开发与维护（贡献者 / AI Agent 指南）
+
+### 版本与补丁工作流
+
+```bash
+# 改代码后一键打包增量补丁（自动递增版本号；纯后端改动加 --no-build 跳过 vite 构建）
+node scripts/build-and-patch.cjs --bump
+
+# 补丁输出到 desktop/release/update-<version>.patch.json
+# 应用到运行中的实例（注意是请求体，不是 {patchPath}）
+curl -X POST http://127.0.0.1:3999/api/update/apply \
+  -H 'Content-Type: application/json' \
+  -d @desktop/release/update-1.4.67.patch.json
+# 应用后实例自动重启，用 GET /api/health 确认存活
+```
+
+约定：`web/dist` 与 `desktop/release/*.patch.json` 是构建产物，**不提交** git；代码改动需 commit 时补丁用 `--from HEAD~1` 基准（脚本有未提交改动时默认 HEAD）。
+
+### 测试约定
+
+- 单元/静态测试：`/tmp/opencode/test_round<N>.mjs`（每轮迭代一个文件，node 直接运行）
+- E2E 测试：`/tmp/opencode/e2e_round<N>.mjs` —— 独立端口 + 独立 `NOVEL_DATA_DIR`（如 `PORT=3005 NOVEL_DATA_DIR=/tmp/opencode/novel-data-round41`），避免污染开发数据
+- mock LLM 服务器：`/tmp/opencode/mock<N>/server.mjs`，按轮次递增端口（mock56=4127 … mock67=4167）；mock 无热重载，改后必须重启
+- mock 正文素材必须先过真实扫描器验证（`lib.js` 的 `scanAiPatterns` 等），否则质量门在中间环节拦截、断言打不到目标环节；正文需含 ≥8% 对话行且长度 >5000 字才能验证截断/采样问题
+- 全量回归 = 全部 test_round* + e2e_round* + e2e_manager_tool_auth
+
+### 生成质量门架构（改 routes.js 前先读这里）
+
+质量门在 `server/src/routes.js` 生成循环内按序执行，**前几道不过则后续全部跳过**：
+
+1. 对话比例检测（0b）→ 泄漏/思考残留（0c）→ 题材跑题
+2. AI 味检测（regex 先行 → 超阈值直接进问题清单，否则 LLM 深检四段采样）
+3. 可读性检测（`STORY_READABILITY`，四段均匀采样）
+4. 章内剧情逻辑校验（`checkPlotConsistency`，全章抽样 `sampleChapterForCheck`）
+5. 跨章记忆一致性（`checkMemoryConsistency`，idx>=2 门控）
+6. 行为逻辑/时间线/设定漂移/人格正则 → 结构扫描 → 跨章复述
+7. 重试耗尽（1+3 个版本）后按问题类型分流兜底：**逻辑类走 `iteratePlotFix` 定向修复**（预算 -2，长度 <50% 拒采纳），其余走 `iteratePolish` 通用润色（extraIssues 排除已修复逻辑问题）
+
+关键阈值：`AI_SCORE_PASS_DEFAULT=10`、`llmRewriteBudget=5`、软档位 `0.6×阈值`（临界分不整章重生成，转 structureFixes 定向润色）。
+
+提示词集中在 `server/src/prompts.js`（CHAPTER_SYSTEM 反 AI 铁律、PLOT_FIX_SYSTEM 逻辑修补、STORY_READABILITY 可读性、POLISH_SYSTEM 润色）；记忆与一致性校验在 `server/src/memory.js`。
+
+### 迭代记录
+
+每轮迭代的踩坑与决策记录在 [.monkeycode/MEMORY.md](.monkeycode/MEMORY.md)（第三十三轮起）。接手维护前先读该文件末尾几条。需求与设计规格在 `.monkeycode/specs/`。
 
 ## 常见问题
 
