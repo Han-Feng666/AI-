@@ -1046,3 +1046,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 测试素材：mock66=4166（复用 mock65 全任务分流 + plan-with-existingChapters）；test_round40.mjs 46 断言；e2e_round40.mjs 25 断言（A:过短400；B:粘贴→补建→既定事实块→applyPlan保留正文+source=user；C:无existingChapters重跑→source自动保留；D:AI生成source=ai+生成上下文含ch1结尾）。
   - 全量回归：static sweep round7-34 31/0、e2e 28/30/31/32/33 5/0（round29 0/4 预存不阻塞）、round38/39/40 3/0、manager_tool_auth 13/0。
   - 环境注意：node 22.22.0 不支持 --no-warn 参数；E2E 测试服务器端口与数据目录需独立（3002/round39、3004/round40c），mock 端口按轮次递增（mock65=4165、mock66=4166）。
+
+[Project Knowledge Summary]
+- Date: 2026-09-28
+- Context: 第四十一轮（v1.4.67）生成质量增强——逻辑校验全章抽样 + 重试耗尽后逻辑问题定向修复（用户反馈"降低AI味/提高质量/避免剧情没逻辑"）
+- Category: Troubleshooting & Debugging + Testing Methods
+- Instructions:
+  - 三个具体弱点及修复：(1) checkPlotConsistency（memory.js）只截 slice(0,5000)，长章节后半段逻辑问题漏检 → 改 sampleChapterForCheck 全章抽样（头2000+中段900×2+尾800）；(2) 可读性检测（routes.js）只取前3000+后500，中段盲区 → 改四段均匀采样（前+1/4+1/2+3/4+尾600，与 AI 深检同策略）；(3) iteratePlotFix（routes.js:572）是死代码从未被调用，重试耗尽后逻辑问题只走通用润色（润色修不了因果链）→ 重试耗尽后按问题类型分流：匹配 /剧情逻辑|记忆库|因果|时间线|空间|动机|称呼与身份|设定漂移/ 的走 iteratePlotFix（预算-2，长度<50%拒采纳），其余走 iteratePolish 且 extraIssues 排除已修复逻辑问题。
+  - 质量门顺序（routes.js 生成循环内）：0b 对话比例 → 0c 泄漏/思考残留 → 1 题材跑题 → 2 AI 味（regex 先行，超阈值直接 problems 不再 LLM 深检）→ 2b 可读性（仅 problems 空时）→ 3 章内逻辑校验（仅 problems 空时）→ 3b 跨章记忆校验（idx>=2 且 problems 空时）→ 4 行为逻辑正则 → 5 结构正则。前几道不过后面全部跳过，mock 正文必须过 regex 门（blacklistPenalty=0、无模板命中、对话行占比≥8%）才能测到逻辑校验。
+  - 测试素材设计要点：验证采样覆盖率的 mock 正文需 >5000 字（旧逻辑校验截断 5000）且中段锚点 >3000 字（旧可读性采样前3000）；用 build_prose.mjs 生成后必须跑真实 lib.js 扫描器（scanAiPatterns/scanOpeningCliche/scanEndingHookCliche/scanTimelineContradiction）确认零命中，否则质量门拦截导致后续检测不执行；对话行需「」引号开头/结尾才算入对话比例；capture 断言排序按数字（req-10 排在 req-2 前的字典序陷阱）。
+  - iteratePlotFix 复检调用 checkPlotConsistency(idx=-1)，mock 恒 fail 模式下修复仍会采纳（fixed=true），复检只决定是否提前收敛第二轮。
+  - mock67=4167（normal/logicfail 模式；润色回显输入原稿模拟"局部改写"，逻辑修复返回 FIXED_PROSE 含动机铺垫句）；e2e_round41.mjs 14 断言（A:全章抽样尾部锚点+中略标记+可读性四段采样中段/尾部锚点；B:逻辑校验5次调用+逻辑修补编辑2次+落库为修复版）；test_round41.mjs 26 断言。
+  - 全量回归：static sweep round7-41 全绿、e2e 28/30/31/32/33/38/39/40 全绿、manager 13/0（round40 偶发 1 fail 重跑消失，round29 预存不阻塞）。
