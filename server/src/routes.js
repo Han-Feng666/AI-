@@ -5071,8 +5071,21 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
       if (problems.length === 0) {
         let rd = { average: 0, verdict: 'pass', issues: [] };
         try {
-          // 可读性检测也只取前3000字+后500字
-          const rdText = full.length > 3500 ? full.slice(0, 3000) + '\n...\n' + full.slice(-500) : full;
+          // 可读性检测四段均匀采样（前+前中+后中+后），消除长章中段盲区
+          let rdText;
+          if (full.length > 3500) {
+            const seg = Math.min(1100, Math.floor(full.length / 4));
+            const q1 = Math.floor(full.length / 4);
+            const q2 = Math.floor(full.length / 2);
+            const q3 = Math.floor(full.length * 3 / 4);
+            rdText = full.slice(0, seg) + '\n...\n'
+              + full.slice(q1, q1 + seg) + '\n...\n'
+              + full.slice(q2, q2 + seg) + '\n...\n'
+              + full.slice(q3, q3 + seg) + '\n...\n'
+              + full.slice(-600);
+          } else {
+            rdText = full;
+          }
           rd = await runReadability(config, rdText);
           if (rd.verdict === 'rewrite') {
             const rdIssues = (rd.issues || []).slice(0, 4)
@@ -5405,8 +5418,27 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
 
       if (attempt < MAX_AUTO_REGENERATE) continue; // 整章重新生成
 
-      // 已达重试上限：用定向润色修复问题，而不是直接保存未修复版本
-      send({ type: 'status', message: `自动重试 ${MAX_AUTO_REGENERATE} 次仍有 ${problems.length} 处问题，正在定向润色修复…` });
+      // 已达重试上限：先按问题类型分流——剧情逻辑问题走定向逻辑修复（iteratePlotFix），
+      // 其余走定向润色，而不是直接保存未修复版本。
+      send({ type: 'status', message: `自动重试 ${MAX_AUTO_REGENERATE} 次仍有 ${problems.length} 处问题，正在定向修复…` });
+      // 剧情逻辑/记忆矛盾类问题：通用润色修不了因果链，必须走专用修复循环（带复检，最多 2 轮）
+      const logicProblems = problems.filter((p) => /剧情逻辑|记忆库|因果|时间线|空间|动机|称呼与身份|设定漂移/.test(String(p.desc)));
+      if (logicProblems.length && llmRewriteBudget > 0) {
+        try {
+          const plotFixed = await iteratePlotFix(
+            config,
+            novel,
+            full,
+            logicProblems.slice(0, 6).map((p) => ({ type: 'logic', description: p.desc, severity: 'high' })),
+            { onStatus: (m) => send({ type: 'status', message: m }) }
+          );
+          if (plotFixed.fixed && plotFixed.text && plotFixed.text.trim().length >= Math.floor(full.length * 0.5)) {
+            full = plotFixed.text.trim();
+            send({ type: 'status', message: '剧情逻辑定向修复完成' });
+          }
+          llmRewriteBudget -= 2;
+        } catch { /* 逻辑修复失败不阻塞，继续走润色 */ }
+      }
       try {
         if (llmRewriteBudget > 0) {
           const fixed = await iteratePolish(config, novel, full, {
@@ -5415,7 +5447,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
             opts: {
               knowledgeBlock, skillsBlock, genre: novel.genre,
               novelVoice: buildNovelVoiceAnchor(novel, idx),
-              extraIssues: problems.map(p => p.desc).slice(0, 5),
+              extraIssues: problems.filter((p) => !logicProblems.includes(p)).map(p => p.desc).slice(0, 5),
               ...buildStyleInjection(novel, full.slice(0, 2000))
             }
           });

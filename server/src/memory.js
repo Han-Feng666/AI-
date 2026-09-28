@@ -480,7 +480,7 @@ export async function checkPlotConsistency(novelId, chapterIdx, chapterText, con
     task: 'analysis',
     messages: [
       { role: 'system', content: PLOT_CONSISTENCY_CHECK_SYSTEM },
-      { role: 'user', content: `【作品】《${novel.title}》${novel.genre}\n【世界观】${novel.world_view || ''}\n\n【角色设定】\n${charBlock || '（暂无）'}\n\n【角色语音档案】\n${voiceBlock || '（暂无）'}\n\n【硬事实库】\n${factBlock || '（暂无）'}\n\n【关键剧情事实】\n${kmBlock || '（暂无）'}\n\n【本章正文（第${chapterIdx}章）】\n${String(chapterText).slice(0, 5000)}` }
+      { role: 'user', content: `【作品】《${novel.title}》${novel.genre}\n【世界观】${novel.world_view || ''}\n\n【角色设定】\n${charBlock || '（暂无）'}\n\n【角色语音档案】\n${voiceBlock || '（暂无）'}\n\n【硬事实库】\n${factBlock || '（暂无）'}\n\n【关键剧情事实】\n${kmBlock || '（暂无）'}\n\n【本章正文（第${chapterIdx}章）】\n${sampleChapterForCheck(String(chapterText))}` }
     ],
     maxTokens: 1500
   }).catch(() => null);
