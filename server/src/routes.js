@@ -53,7 +53,9 @@ import {
   buildNovelContext, buildChapterSystem, buildPolishSystem,
   buildPolishWithIssues, buildPlotFixSystem, buildElevateSystem, extractJson, extractArray, buildReviseSystem,
 getGenreGuide, getGenreGuides, buildPlanGenreConformity, buildAntiTropeBlock,
-  detectIdeaCarrierDrift
+  detectIdeaCarrierDrift, hasTrueFantasyTag, buildIdeasEngineBlock,
+  IDEAS_SUPERPOWER_RE, IDEAS_SYSTEM_LEAK_RE, IDEAS_TRANS_LEAK_RE,
+  IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
@@ -1872,6 +1874,7 @@ ${parts.join('\n\n')}${dnaBlock ? '\n\n' + dnaBlock : ''}
       return `参考${i + 1}《${r.title}》（${r.genre}，${r.total_words}字）\n${analysis}`;
     });
     knowledgeBlock = `\n\n【同类优秀作品写作经验参考（借鉴其套路与技法，禁止照搬人物/情节）】
+题材失配警示：下列参考若与用户所选题材主线类型不符，只借技法（节奏/人物手法/场景密度），严禁借其剧情结构（尤其悬疑调查、灵异超凡、系统打卡）。
 ${blocks.join('\n\n')}`;
   }
 
@@ -1908,7 +1911,7 @@ ${blocks.join('\n\n')}`;
   if (isSystem) {
     // 用户明确勾了"系统"：金手指必须是系统化的，严禁血脉/传承/法宝等玄幻绑定型设定。
     // 槽位=正统系统文循环（用户定义）：面板+系统发布任务+完成得奖励+完不成受惩罚+系统能交流
-    GF_POOL = ['任务发布系统（面板发布任务，完成得奖励、失败受惩罚，系统可对话交流）', '全能辅助系统（属性/任务/兑换面板+积分奖惩，系统有性格会主动搭话）', '签到打卡系统（每日面板签到领奖、漏签惩罚，系统语音催促交流）', '剧情推演/模拟器系统（面板内推演剧情走向，成功结算奖励、失败扣积分）', '位面商城系统（做任务赚积分兑换商品，系统客服式讨价还价）', '文抄/知识兑换系统（系统派创作/学习任务，兑换知识库，烂尾扣分惩罚）', '信息溯源系统（面板显示线索任务，破案达标积分结算，系统提示音播报）', '后勤保障系统（物资调度任务面板，达标解锁物资、延误扣分惩罚）'];
+    GF_POOL = ['任务发布系统（面板发布任务，完成得奖励、失败受惩罚，系统可对话交流）', '全能辅助系统（属性/任务/兑换面板+积分奖惩，系统有性格会主动搭话）', '签到打卡系统（每日面板签到领奖、漏签惩罚，系统语音催促交流）', '剧情推演/模拟器系统（面板内推演剧情走向，成功结算奖励、失败扣积分）', '位面商城系统（做任务赚积分兑换商品，系统客服式讨价还价）', '文抄/知识兑换系统（系统派创作/学习任务，兑换知识库，烂尾扣分惩罚）', '情报汇编系统（面板汇总公开信息与人情账，达标积分结算，系统提示音播报）', '后勤保障系统（物资调度任务面板，达标解锁物资、延误扣分惩罚）'];
     // 勾了穿越/重生时身份槽位用"穿越者来历"措辞（古代身份措辞会被模型结合成
     // "穿越成基层小吏"的魂穿语法）；落地处境由 transmigrationBlock 管硬底线
     ID_POOL = hasTrans
@@ -1927,11 +1930,11 @@ ${blocks.join('\n\n')}`;
     ID_POOL = ['底层草根', '落魄贵族后人', '隐世传人', '市井游民', '少年天才', '军方武力背景', '商贾之后', '工匠手艺人', '戴罪之身', '边军小卒'];
     gfLabel = '金手指类型';
   } else if (isYouth) {
-    GF_POOL = ['被埋没的学业/艺术天赋', '超强共情/人心洞察', '天生的社交感染力', '逆境反弹韧性', '超常细节观察力', '出众的表达与创作才华', '突出体能/竞技特长', '关键人脉（师长/发小）'];
+    GF_POOL = ['被埋没的学业/艺术天赋', '读人细节的观察习惯（非超感）', '天生的社交感染力', '逆境反弹韧性', '可训练的细节观察力', '出众的表达与创作才华', '突出体能/竞技特长（训练所得）', '关键人脉（师长/发小）'];
     ID_POOL = ['高三学生', '大学新生', '转学生', '社恐学生', '才艺特长生', '学霸/尖子生', '问题少年', '留学生', '复读生', '校园风云人物'];
     gfLabel = '核心优势类型';
   } else {
-    GF_POOL = ['信息差/内幕优势', '被埋没的天赋觉醒', '关键人脉关系网', '超强洞察力/共情', '商业直觉/创业天赋', '突出体能/竞技特长', '家传手艺/特殊技艺', '人格魅力/社交天赋', '逆境反弹韧性', '细节记忆/观察力'];
+    GF_POOL = ['信息差/内幕优势', '被埋没但可训练的手艺', '关键人脉关系网', '读人细节的观察习惯（非超感）', '商业直觉/创业经验', '突出体能/竞技特长（训练所得）', '家传手艺/特殊技艺', '人格魅力/社交天赋', '逆境反弹韧性', '细节记忆习惯/观察力'];
     ID_POOL = ['刚毕业的大学生', '职场新人', '转行新人', '校园学生', '退役运动员', '回乡的都市人', '社恐青年', '才艺特长生', '自由职业者', '打工攒钱者'];
     gfLabel = '核心优势类型';
   }
@@ -2045,6 +2048,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
   // 换皮对抗：每批随机抽 3 条"反套路禁令"注入（共享池见 prompts.js ANTI_TROPE_POOL），
   // 强制创意脱离 AI 默认套路分布；方案层（/novels/:id/plan）同样注入，防"创意反套路、方案又套路回去"
   const antiTropeBlock = buildAntiTropeBlock(isSystem);
+  const engineBlock = buildIdeasEngineBlock(genreList, { isSystem, hasTrans });
 
   const seedBlock = seed
     ? `\n\n【用户核心想法（最高优先级）】
@@ -2053,7 +2057,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${seedBlock}${antiTropeBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${seedBlock}${antiTropeBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
@@ -2154,6 +2158,53 @@ ${axisBlock}
         if (list.length < beforeCarrier) {
           send({ type: 'status', message: `提示：所选题材为现实向世界观，玄幻载体（残魂/通感/器物有灵/神秘老人）已自动剔除${isSystem ? '，系统题材金手指只会以系统面板/任务/兑换形式出现' : '，穿越题材金手指只能是现代知识/技能/心智'}` });
         }
+      }
+
+      // 现实向引擎门禁：载体门禁之后、身份撞车之前。
+      // 真超凡题材跳过（hasTrueFantasyTag）；武侠走现实向但 SUPERPOWER_RE 不拦内功/轻功。
+      if (!hasTrueFantasyTag(genreList.join(' '))) {
+        const allowsMystery = /悬疑|推理|侦探|刑侦|法医|谍战|密室/.test(genreList.join(' '));
+        list = list.filter((it) => {
+          const text = [
+            it?.protagonist?.golden_finger,
+            it?.protagonist2?.golden_finger,
+            it?.hook,
+            it?.logline,
+            ...(Array.isArray(it?.outline_H5) ? it.outline_H5 : [])
+          ].filter(Boolean).join('\n');
+          const gf = [it?.protagonist?.golden_finger, it?.protagonist2?.golden_finger].filter(Boolean).join('\n');
+          const sp = String(text).match(IDEAS_SUPERPOWER_RE);
+          if (sp) {
+            send({ type: 'status', message: `已剔除超凡能力泄漏的创意「${it.title}」（${sp[0]}），现实向题材金手指只能是可解释的现实优势` });
+            return false;
+          }
+          if (!isSystem) {
+            const sysHit = String(text).match(IDEAS_SYSTEM_LEAK_RE);
+            if (sysHit) {
+              send({ type: 'status', message: `已剔除系统形态泄漏的创意「${it.title}」（${sysHit[0]}），未勾选系统题材` });
+              return false;
+            }
+            if (gf && !IDEAS_REALISTIC_TOKENS.some((t) => gf.includes(t))) {
+              send({ type: 'status', message: `已剔除金手指空泛的创意「${it.title}」（未写出现实优势：信息差/手艺/观察习惯等）` });
+              return false;
+            }
+          }
+          if (!hasTrans) {
+            const transHit = String(text).match(IDEAS_TRANS_LEAK_RE);
+            if (transHit) {
+              send({ type: 'status', message: `已剔除穿越形态泄漏的创意「${it.title}」（${transHit[0]}），未勾选穿越/重生` });
+              return false;
+            }
+          }
+          if (!allowsMystery) {
+            const invHit = String(text).match(IDEAS_INVESTIGATION_RE);
+            if (invHit) {
+              send({ type: 'status', message: `已剔除调查主线偏题的创意「${it.title}」（${invHit[0]}），未勾选悬疑/推理` });
+              return false;
+            }
+          }
+          return true;
+        });
       }
 
       // 开局身份撞车检查：整批创意共用同一种开局处境模板（实锤 v1.4.57：三个创意

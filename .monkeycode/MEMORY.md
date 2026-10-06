@@ -1058,3 +1058,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - iteratePlotFix 复检调用 checkPlotConsistency(idx=-1)，mock 恒 fail 模式下修复仍会采纳（fixed=true），复检只决定是否提前收敛第二轮。
   - mock67=4167（normal/logicfail 模式；润色回显输入原稿模拟"局部改写"，逻辑修复返回 FIXED_PROSE 含动机铺垫句）；e2e_round41.mjs 14 断言（A:全章抽样尾部锚点+中略标记+可读性四段采样中段/尾部锚点；B:逻辑校验5次调用+逻辑修补编辑2次+落库为修复版）；test_round41.mjs 26 断言。
   - 全量回归：static sweep round7-41 全绿、e2e 28/30/31/32/33/38/39/40 全绿、manager 13/0（round40 偶发 1 fail 重跑消失，round29 预存不阻塞）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-06
+- Context: Discovered by Agent while hardening /ideas + plan against superpower leak / investigation-subplot flood / low-stakes isomorphism (v1.4.68)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 现实向引擎双轨：`buildIdeasEngineBlock(genreList,{isSystem,hasTrans})` 仅在 `!hasTrueFantasyTag` 时注入；武侠走现实向但 SUPERPOWER_RE 不拦内功/轻功。方案层同步点：`buildPlanGenreConformity` 系统注 + PLAN_SKELETON_SYSTEM 暗线/硬利害。
+  - 门禁顺序：题材 → 载体（MYSTICAL_CARRIER_RE）→ 引擎（SUPERPOWER / 未勾系统扫 SYSTEM_LEAK / 未勾穿越扫 TRANS_LEAK / 非悬疑扫 INVESTIGATION / 非系统现实金手指须含 REALISTIC_TOKENS）→ 身份撞车 → 赛道撞车。词表全部非全局，禁止 `.test()` 带 `g`。
+  - 槽位去超凡：GF_POOL 青春/都市改为可训练现实优势；系统槽「信息溯源/破案达标」改为「情报汇编」。知识库块加失配警示：只借技法不借悬疑/超凡/系统打卡结构。
+  - 验证：`NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs`（65 断言）。纯后端改动打补丁用 `node scripts/build-and-patch.cjs --bump --no-build`。
