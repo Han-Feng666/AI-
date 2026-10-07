@@ -57,7 +57,8 @@ getGenreGuide, getGenreGuides, buildPlanGenreConformity, buildAntiTropeBlock,
   IDEAS_SUPERPOWER_RE, IDEAS_SYSTEM_LEAK_RE, IDEAS_TRANS_LEAK_RE,
   IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS,
   bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock,
-  buildHorrorEraBlock, HORROR_ANCIENT_ERA_RE, HORROR_BODY_COUNTER_RE
+  buildHorrorEraBlock, HORROR_ANCIENT_ERA_RE, HORROR_BODY_COUNTER_RE,
+  buildFunEngineBlock, buildIdeaExamplesBlock
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
@@ -679,7 +680,7 @@ function pickReviewerConfig(currentConfig) {
   return null;
 }
 
-async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, timeout, streamIdleTimeout, wantsJson } = {}) {
+async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, timeout, streamIdleTimeout, wantsJson, temperature } = {}) {
   // 流式调用默认给更长空闲阈值（10 分钟）：思考型模型开头可能长时间无流式输出，300s 会被误杀
   const idleTimeout = Number(streamIdleTimeout) > 0 ? streamIdleTimeout : 600000;
   const callChat = () => chat({
@@ -687,6 +688,7 @@ async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, 
     task,
     messages,
     maxTokens,
+    temperature,
     signal: ctrl?.signal,
     timeout: timeout || 600000,
     wantsJson
@@ -702,6 +704,7 @@ async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, 
     task,
     messages,
     maxTokens,
+    temperature,
     signal: ctrl?.signal,
     onDelta,
     streamIdleTimeout: idleTimeout,
@@ -716,6 +719,7 @@ async function runLLMStream(config, messages, { onDelta, ctrl, maxTokens, task, 
       task,
       messages,
       maxTokens: Math.min(65536, (Number(maxTokens) || 4096) * 2),
+      temperature,
       signal: ctrl?.signal,
       timeout: timeout || 600000
     }).catch(() => null);
@@ -2029,8 +2033,8 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
   ① 感官异能化：把"信息溯源系统"歪成"摸旧物重历感官记忆的通感能力"——溯源功能必须做成系统界面（屏幕显示线索/任务指引），严禁变成主角的身体感官；
   ② 残魂寄宿化：把"任务发布系统"歪成"先祖残魂发任务/器物里住着灵魂"——任务来源必须是系统本身（机械音/面板弹窗），严禁任何亡魂/先祖/精怪充当系统；
   ③ 器物灵性化：把"签到/商城系统"歪成"老物件有灵性/玉佩吸生机做交换"——代价必须是系统规则（扣积分/掉评价），严禁写成器物损耗灵性、草木枯荣这类玄幻代价。
-  ④ 道具显灵/代价灵异化：把系统歪成"无字卷宗自动显形被删历史、烧掉记忆换真相"——线索与历史真相只能由系统面板主动显示、以任务积分结算奖励，严禁任何器物自行显灵，严禁以烧失记忆/献祭阳寿/抹除他人记忆或让主角"从未存在"这类现实改写型灵异代价替代系统积分惩罚（实锤：「史官不敢写」金手指=卷宗显形+烧记忆，整案废稿）。
-- 正统系统文看点循环（hook/logline/golden_finger 至少体现其一，全部没有=废稿）：开局第一个任务的高利害压力（失败惩罚具体到痛感）、完成任务当场兑现奖励改变处境、系统人格与主角的一来一回对话交锋（毒舌催更/讨价还价/冷酷倒计时）。四要素是合格线而非剧情公式：严禁整批创意都写成"系统逼主角做任务否则受罚"的同构打卡打工文——爽点发动机必须是主角主动玩转系统规则（钻空子/用奖励翻盘/把功能用出新花样），惩罚威胁至多在钩子里作一次开局压力，三个创意里至少一个的主角形态是"主动追着系统奖励搞事"。严禁把"断签焚奖励/延误扣物资"这类系统惩罚倒计时当成钩子的主压力来源——主钩子必须是主角的欲望/目标与具体对手的利害冲撞，系统规则只是背景板（实锤 v1.4.58：两个创意的钩子全是"惩罚倒计时+限时破局"，看点为零）。` : ''}
+  ④ 道具显灵/代价灵异化：把系统歪成"无字卷宗自动显形被删历史、烧掉记忆换真相"——线索与历史真相只能由系统面板主动显示、以任务积分结算奖励，严禁任何器物自行显灵，严禁以烧失记忆/献祭阳寿/抹除他人记忆或让主角"从未存在"这类现实改写型灵异代价替代系统积分惩罚。
+- 正统系统文看点循环（hook/logline/golden_finger 至少体现其一，全部没有=废稿）：开局第一个任务的高利害压力（失败惩罚具体到痛感）、完成任务当场兑现奖励改变处境、系统人格与主角的一来一回对话交锋（毒舌催更/讨价还价/冷酷倒计时）。四要素是合格线而非剧情公式：严禁整批创意都写成"系统逼主角做任务否则受罚"的同构打卡打工文——爽点发动机必须是主角主动玩转系统规则（钻空子/用奖励翻盘/把功能用出新花样），惩罚威胁至多在钩子里作一次开局压力，三个创意里至少一个的主角形态是"主动追着系统奖励搞事"。严禁把"断签焚奖励/延误扣物资"这类系统惩罚倒计时当成钩子的主压力来源——主钩子必须是主角的欲望/目标与具体对手的利害冲撞，系统规则只是背景板。` : ''}
 - 违反题材贴合的创意视为废稿。`;
   // 穿越纯净性块：勾穿越/重生时锁定穿越形态与开局处境。
   // 适用范围：无系统的穿越分支 + 系统+穿越组合（实锤：系统分支曾漏注入，
@@ -2059,6 +2063,9 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
   const xuanhuanCanonBlock = buildXuanhuanCanonBlock(genreList);
   const coverageBlock = buildGenreCoverageBlock(genreList, ideaCount, { isMaleChannel: channel === '男频' });
   const horrorEraBlock = buildHorrorEraBlock(genreList);
+  // v1.4.72 正向引导：趣味引擎槽位+多题材标杆——禁令拦废稿，范例立水准
+  const funBlock = buildFunEngineBlock(ideaCount);
+  const examplesBlock = buildIdeaExamplesBlock(genreList);
 
   const seedBlock = seed
     ? `\n\n【用户核心想法（最高优先级）】
@@ -2067,12 +2074,12 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${xuanhuanCanonBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${antiTropeBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${xuanhuanCanonBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}${antiTropeBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
-
-请一次构思 ${ideaCount} 个彼此完全不同的小说创意，输出 JSON 数组。`;
+${funBlock}
+ 请一次构思 ${ideaCount} 个彼此完全不同的小说创意，输出 JSON 数组。`;
 
   try {
     // maxOut 按创意数缩放：6 个创意含 outline_H5 五章要点，8192 tokens 易截断
@@ -2089,7 +2096,7 @@ ${axisBlock}
         const r = await chat({ config, messages: [
           { role: 'system', content: IDEAS_SYSTEM },
           { role: 'user', content: userPrompt }
-        ], maxTokens: maxOut, timeout: 300000 });
+        ], maxTokens: maxOut, temperature: 0.95, timeout: 300000 });
         full = r?.content || '';
       } else {
         await runLLMStream(config, [
@@ -2098,6 +2105,7 @@ ${axisBlock}
         ], {
           ctrl,
           task: 'planning',
+          temperature: 0.95,
           maxTokens: maxOut,
           onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
         });

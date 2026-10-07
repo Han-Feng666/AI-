@@ -1099,3 +1099,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - 修复：buildHorrorEraBlock(genreList)——勾灵异/恐怖且未勾穿越/架空/历史/古代/玄幻/民国时锁现代当代（手机/监控/网约车在场，舞台取老小区/地下车库/医院/出租屋）； HORROR_ANCIENT_ERA_RE（朝廷/衙门/钦天监/卦摊/长袍马褂等成建制古代政权词）做时代门禁；HORROR_BODY_COUNTER_RE 拦"每算命一次碎一块骨头"式身体自残计数器代价——恐怖代价口径=因果债/规则反噬/执念盯人/越接近真相越被盯上。
   - 灵异+历史/穿越/民国组合仍放行古代（时代由所勾时代标签决定，不做强加约束）。
   - 验证：test_ideas_engine.mjs 扩至 130 断言（时代块 7 项 + 代价/时代正则含误伤负例 7 项）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-07
+- Context: Discovered by Agent while restructuring /ideas from prohibition-stacking to positive guidance (v1.4.72, response to 4th consecutive quality complaint)
+- Category: Troubleshooting & Debugging + Environment Configuration
+- Instructions:
+  - 连续四轮「加禁令+门禁」后质量仍被差评的根因是架构级的两条：① /ideas 生成调用从不传 temperature，被 llm.js chatDefaults 的 wantsJson=0.4 默认值锁死在最低创意温度——模型物理上只能输出统计学最安全的平庸开局；② 提示词只有限制没有正向引导：多个禁令块+唯一范例范例（古代系统文气质），模型注意力全花在合规，范例又只示范一种气质。教训：创意类生成任务温度至少 0.9+，且 prompt 里正例的示范作用大于禁令。
+  - v1.4.72 方案（减法+正向，未再新增任何禁令）：runLLMStream 透传 temperature + ideas 传 0.95；IDEAS_SYSTEM 头部加「先有趣再合规」第一原则；buildFunEngineBlock 趣味引擎槽位（FUN_ENGINE_POOL 16 种看点发动机按创意分配，与题材硬约束冲突时以题材为底线）；buildIdeaExamplesBlock 按题材家族配多标杆（现代灵异/都市言情/校园青春/玄幻，严禁复用人名情节）；清理所有提示词字符串内的"实锤vX"事故复盘叙事（只留在代码注释）。
+  - llm.js 温度解析：chat opts.temperature 优先 → wantsJson ? 0.4 : cfg.temperature || 0.9。任何 JSON 输出但需要创造性的调用都必须显式传 temperature，否则吃隐性降级（全文件搜 temperature 可盘点已显式传参位置，ideas 路径为 routes.js 两个调用点 + runLLMStream 三处透传）。
+  - 验证：test_ideas_engine.mjs 扩至 143 断言（趣味槽位不重复/标杆按家族命中/新增块零复盘词/IDEAS_SYSTEM 含第一原则）。
