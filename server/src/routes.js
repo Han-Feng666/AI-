@@ -56,7 +56,7 @@ getGenreGuide, getGenreGuides, buildPlanGenreConformity, buildAntiTropeBlock,
   detectIdeaCarrierDrift, hasTrueFantasyTag, buildIdeasEngineBlock,
   IDEAS_SUPERPOWER_RE, IDEAS_SYSTEM_LEAK_RE, IDEAS_TRANS_LEAK_RE,
   IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS,
-  bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE
+  bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
@@ -1936,7 +1936,12 @@ ${blocks.join('\n\n')}`;
     gfLabel = '金手指类型';
   } else if (isYouth) {
     GF_POOL = ['被埋没的学业/艺术天赋', '读人细节的观察习惯（非超感）', '天生的社交感染力', '逆境反弹韧性', '可训练的细节观察力', '出众的表达与创作才华', '突出体能/竞技特长（训练所得）', '关键人脉（师长/发小）'];
-    ID_POOL = ['高三学生', '大学新生', '转学生', '社恐学生', '才艺特长生', '学霸/尖子生', '问题少年', '留学生', '复读生', '校园风云人物'];
+    // 同时勾了都市：身份池混入校门外的年轻身份——纯学生池会把所有创意摁在校内
+    // （实锤 v1.4.70：校园+青春+都市+言情 → 三条全是校内行政争议，都市归零）
+    const urbanYouth = genreList.some((g) => /都市|职场/.test(g));
+    ID_POOL = urbanYouth
+      ? ['高三学生', '大学新生', '转学生', '才艺特长生', '刚毕业的打工人', '合租青年/毕业生', '夜市摆摊的年轻店主', '实习生', '裸辞后搞副业的青年', '小工作室主理人']
+      : ['高三学生', '大学新生', '转学生', '社恐学生', '才艺特长生', '学霸/尖子生', '问题少年', '留学生', '复读生', '校园风云人物'];
     gfLabel = '核心优势类型';
   } else {
     GF_POOL = ['信息差/内幕优势', '被埋没但可训练的手艺', '关键人脉关系网', '读人细节的观察习惯（非超感）', '商业直觉/创业经验', '突出体能/竞技特长（训练所得）', '家传手艺/特殊技艺', '人格魅力/社交天赋', '逆境反弹韧性', '细节记忆习惯/观察力'];
@@ -2051,6 +2056,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
   const antiTropeBlock = buildAntiTropeBlock(isSystem, genreList.join(' '));
   const engineBlock = buildIdeasEngineBlock(genreList, { isSystem, hasTrans });
   const xuanhuanCanonBlock = buildXuanhuanCanonBlock(genreList);
+  const coverageBlock = buildGenreCoverageBlock(genreList, ideaCount, { isMaleChannel: channel === '男频' });
 
   const seedBlock = seed
     ? `\n\n【用户核心想法（最高优先级）】
@@ -2059,7 +2065,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${xuanhuanCanonBlock}${seedBlock}${antiTropeBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${xuanhuanCanonBlock}${coverageBlock}${seedBlock}${antiTropeBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
@@ -2266,6 +2272,26 @@ ${axisBlock}
         });
       }
 
+      // 校园舞台撞车（v1.4.70）：同时勾了都市时，整批最多 1 个创意把主要舞台放在
+      // 校内——实锤「校园+青春+都市+言情」三条全挤教室/校长/投票，都市题材归零
+      const hasUrbanTag = genreList.some((g) => /都市|职场/.test(g));
+      if (isYouth && hasUrbanTag) {
+        const CAMPUS_STAGE_WORDS = ['校园', '学校', '教室', '班级', '班主任', '校长', '年级', '高考', '中考', '艺考', '早自习', '晚自习', '家长会', '运动会', '校服', '考场', '宿舍', '转学', '插班', '晨会', '社团', '公示栏', '广播站', '图书馆'];
+        let campusFirst = '';
+        list = list.filter((it) => {
+          const stageText = [it.title, it.hook, it.logline].map((s) => String(s || '')).join('｜');
+          const hits = CAMPUS_STAGE_WORDS.filter((w) => stageText.includes(w));
+          if (hits.length >= 2) {
+            if (campusFirst) {
+              send({ type: 'status', message: `已剔除舞台撞上校园线的创意「${it.title}」（校内元素 ${hits.slice(0, 3).join('/')}——已勾选都市，整批最多 1 个创意全在校门里，其余须把舞台放到校门外）` });
+              return false;
+            }
+            campusFirst = it.title;
+          }
+          return true;
+        });
+      }
+
       // 行业赛道撞车检查：同一衙门/行业赛道（粮仓/漕运/盐运等行政公事场景）
       // 整批只允许一个——两个创意同属粮政=无聊撞车。按行业分组匹配，同组即撞车。
       const SCENE_GROUPS = [
@@ -2274,6 +2300,7 @@ ${axisBlock}
         { label: '税务', words: ['税银', '税赋', '征税', '税关'] },
         { label: '驿站', words: ['驿站', '驿递', '铺递'] },
         { label: '河工', words: ['河工', '堤工', '筑堤', '修堤', '治水'] },
+        { label: '行政争议申辩翻盘', words: ['顶替', '申诉', '公示', '军令状', '联名', '罢免', '听证', '申辩', '投票', '解散'] }
       ];
       const seenScene = new Map();
       list = list.filter((it) => {

@@ -1079,3 +1079,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - 玄幻正统门禁：XUAN_CANON_RE（灵气|灵力|灵根|修炼|境界|筑基|金丹|炼气|元婴|宗门|功法|法宝|丹药|秘境|天劫|灵田|散修|御剑|渡劫|灵兽|飞剑，非全局），gateIdeas 中 !test 即剔除；猎奇自残代价用 closure 内 XUAN_GROTESQUE_RE 精准拦截（玄幻代价口径=灵力反噬/走火入魔/境界反跌/寿元/丹毒）。buildXuanhuanCanonBlock 注入 userPrompt；GF_POOL/ID_POOL isFantasy 分轨（xuan 用灵根/功法/法宝/丹道/灵兽槽位+外门杂役/散修/药童身份）。
   - 标杆范例污染：IDEAS_SYSTEM 标杆「陈若辰」是穿越+系统+朝堂气质，须在限域段明确「勾了玄幻就写修炼世界」。
   - 验证：test_ideas_engine.mjs 扩至 99 断言（家族放行 12 项、canon 门禁 8 项、反套路 60 抽零宗门泄漏等）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-07
+- Context: Discovered by Agent while fixing multi-genre coverage collapse (v1.4.70)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 题材多选塌陷教训：勾「校园+青春+都市+言情」时模型按最省力原则三条全写校内行政争议（顶名单申诉/解散军令状/图书馆投票），舞台、冲突骨架、情感基调三重同构，言情与都市双缺席。旧门禁全部漏拦：SCENE_GROUPS 只有古代衙门组、身份撞车只看无籍流民词、引擎同构检查的机制枚举把"制度维权"算过了。
+  - 修复三层：① prompts.js 新增 buildGenreCoverageBlock(genreList, ideaCount, {isMaleChannel})——校园+都市同勾强制舞台分轨（校内≤1）、言情勾选要求爱情线为至少 ceil(N*0.6) 个创意的核心引擎（男频豁免）、行政争议翻盘模板整批限一；注入 userPrompt（engineBlock 之后）。② isYouth 且勾都市时 ID_POOL 混入校门外年轻身份（毕业生/合租青年/摊主/实习生/副业青年），纯学生池是把创意摁在校内的源头。③ gateIdeas 新增校园舞台撞车门禁（校内词≥2 即算校内舞台，勾都市时整批限 1）+ SCENE_GROUPS 增「行政争议申辩翻盘」组（顶替/申诉/公示/军令状/投票/解散等）。
+  - 通用教训：多选题材必须在提示词里写"覆盖分配"（哪个创意扛哪条题材线），只靠"genre 字段从所选里选"不够——模型默认全写最熟悉的组合；撞车门禁词表要跟着新事故题材走，古代衙门组词表对校园冲突零覆盖。
+  - 验证：test_ideas_engine.mjs 扩至 115 断言（覆盖块 10 项 + 三条废稿门禁前提 6 项）。

@@ -3005,3 +3005,24 @@ export function buildIdeasEngineBlock(genreList = [], { isSystem = false, hasTra
   lines.push('- 批内引擎不得同构：三个创意的爽点发动机必须分属不同机制（经营错位 / 关系对撞 / 权谋翻盘 / 技艺兑现 / 制度钻空），不得整批都是"护醋+低冲突"或整批都是"调查破案"。');
   return '\n\n' + lines.join('\n');
 }
+
+// 多选题材覆盖硬约束（v1.4.70）：实锤「校园+青春+都市+言情」四选下三条创意
+// 全挤进校内行政争议（顶名单申诉/解散军令状/图书馆投票），言情都市双双缺席。
+// 题材多选时必须强制分轨：舞台别全在校内、言情线得当引擎、申辩翻盘模板整批限一。
+export function buildGenreCoverageBlock(genreList = [], ideaCount = 3, { isMaleChannel = false } = {}) {
+  const list = (Array.isArray(genreList) ? genreList : [genreList]).map((g) => String(g || ''));
+  const matched = (re) => list.some((g) => re.test(g));
+  const hasCampus = matched(/校园|青春|高中|初中/);
+  const hasUrban = matched(/都市|职场|现实/);
+  const hasRomance = matched(/言情|恋爱|甜宠|初恋|暗恋|爱情/);
+  if (!hasCampus && !hasUrban && !hasRomance) return '';
+  const lines = [];
+  if (hasCampus && hasUrban) {
+    lines.push(`- 「校园/青春」与「都市」同时勾选：本批 ${ideaCount} 个创意的舞台必须分轨——最多 1 个把主要舞台放在校内（教室/班主任/年级/高考倒计时/艺考排练/校运会），其余创意的主要舞台必须在校门外：合租与谋生、行业职场、城市夜市与小店、毕业生的社会初体验、同城漂泊者的交集。整批创意全写在校门里=换皮同构，一律废稿。`);
+  }
+  if (hasRomance && !isMaleChannel) {
+    lines.push(`- 勾选了言情：至少 ${Math.max(2, Math.ceil(ideaCount * 0.6))} 个创意必须以爱情线为核心叙事引擎——主角的关键选择由关系张力推动，事件冲突与感情线互相咬合（事件的每一次转折都改变双方关系的站位：试探/退缩/误会/并肩）。言情线只当背景点缀、全文围绕一个事件打转感情线一笔带过=废稿。`);
+  }
+  lines.push('- 「名额被顶→限期申诉、集体被裁→军令状、场子要被撤→拉票投票」这类行政争议申辩翻盘骨架，整批至多 1 个创意使用——三个创意同走「行政决定+限期翻盘」即是同构废稿。');
+  return `\n\n【多选题材覆盖硬约束（最高优先级，违反即废稿）】\n${lines.join('\n')}`;
+}
