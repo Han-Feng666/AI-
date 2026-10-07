@@ -56,7 +56,8 @@ getGenreGuide, getGenreGuides, buildPlanGenreConformity, buildAntiTropeBlock,
   detectIdeaCarrierDrift, hasTrueFantasyTag, buildIdeasEngineBlock,
   IDEAS_SUPERPOWER_RE, IDEAS_SYSTEM_LEAK_RE, IDEAS_TRANS_LEAK_RE,
   IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS,
-  bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock
+  bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock,
+  buildHorrorEraBlock, HORROR_ANCIENT_ERA_RE, HORROR_BODY_COUNTER_RE
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
@@ -2057,6 +2058,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
   const engineBlock = buildIdeasEngineBlock(genreList, { isSystem, hasTrans });
   const xuanhuanCanonBlock = buildXuanhuanCanonBlock(genreList);
   const coverageBlock = buildGenreCoverageBlock(genreList, ideaCount, { isMaleChannel: channel === '男频' });
+  const horrorEraBlock = buildHorrorEraBlock(genreList);
 
   const seedBlock = seed
     ? `\n\n【用户核心想法（最高优先级）】
@@ -2065,7 +2067,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${xuanhuanCanonBlock}${coverageBlock}${seedBlock}${antiTropeBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${xuanhuanCanonBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${antiTropeBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
@@ -2235,6 +2237,30 @@ ${axisBlock}
           const gro = String(text).match(XUAN_GROTESQUE_RE);
           if (gro) {
             send({ type: 'status', message: `已剔除猎奇自残金手指的创意「${it.title}」（${gro[0]}），玄幻代价须是灵力反噬/走火入魔/境界反跌` });
+            return false;
+          }
+          return true;
+        });
+      }
+
+      // 灵异时代锁（v1.4.71）：未勾古代向标签的现代灵异不得写成古代算命摊世界观；
+      // 「每算一卦碎一块骨头、只剩七次」式身体自残计数器代价一并拦截
+      if (horrorEraBlock) {
+        list = list.filter((it) => {
+          const text = [
+            it.title, it.hook, it.logline,
+            it.protagonist?.golden_finger,
+            it.protagonist?.identity,
+            ...(Array.isArray(it.outline_H5) ? it.outline_H5 : [])
+          ].filter(Boolean).join('\n');
+          const era = String(text).match(HORROR_ANCIENT_ERA_RE);
+          if (era) {
+            send({ type: 'status', message: `已剔除时代跑偏的创意「${it.title}」（出现古代元素「${era[0]}」——未勾选古代/穿越/架空题材，灵异故事默认现代当代）` });
+            return false;
+          }
+          const gore = String(text).match(HORROR_BODY_COUNTER_RE);
+          if (gore) {
+            send({ type: 'status', message: `已剔除猎奇计数器代价的创意「${it.title}」（「${gore[0]}」——恐怖代价须是因果债/规则反噬/执念盯人，数着骨头牙齿残的设定废稿）` });
             return false;
           }
           return true;

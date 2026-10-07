@@ -1089,3 +1089,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - 修复三层：① prompts.js 新增 buildGenreCoverageBlock(genreList, ideaCount, {isMaleChannel})——校园+都市同勾强制舞台分轨（校内≤1）、言情勾选要求爱情线为至少 ceil(N*0.6) 个创意的核心引擎（男频豁免）、行政争议翻盘模板整批限一；注入 userPrompt（engineBlock 之后）。② isYouth 且勾都市时 ID_POOL 混入校门外年轻身份（毕业生/合租青年/摊主/实习生/副业青年），纯学生池是把创意摁在校内的源头。③ gateIdeas 新增校园舞台撞车门禁（校内词≥2 即算校内舞台，勾都市时整批限 1）+ SCENE_GROUPS 增「行政争议申辩翻盘」组（顶替/申诉/公示/军令状/投票/解散等）。
   - 通用教训：多选题材必须在提示词里写"覆盖分配"（哪个创意扛哪条题材线），只靠"genre 字段从所选里选"不够——模型默认全写最熟悉的组合；撞车门禁词表要跟着新事故题材走，古代衙门组词表对校园冲突零覆盖。
   - 验证：test_ideas_engine.mjs 扩至 115 断言（覆盖块 10 项 + 三条废稿门禁前提 6 项）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-07
+- Context: Discovered by Agent while fixing modern 灵异 genre drifting to ancient worldbuilding (v1.4.71)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 年代维度是整个灵感系统从未锁定过的盲区：灵异/恐怖走 isFantasy 分轨后 engineBlock 返回空、题材贴合块只管元素不管时代——模型抽到玄学就默认脑补古代算命先生世界观（用户实锤：要现代灵异恐怖，产出古代背景+"每算一卦碎一块骨头只剩七次"）。教训：题材=元素+年代两个维度，只锁元素的贴合块拦不住时代跑偏。
+  - 修复：buildHorrorEraBlock(genreList)——勾灵异/恐怖且未勾穿越/架空/历史/古代/玄幻/民国时锁现代当代（手机/监控/网约车在场，舞台取老小区/地下车库/医院/出租屋）； HORROR_ANCIENT_ERA_RE（朝廷/衙门/钦天监/卦摊/长袍马褂等成建制古代政权词）做时代门禁；HORROR_BODY_COUNTER_RE 拦"每算命一次碎一块骨头"式身体自残计数器代价——恐怖代价口径=因果债/规则反噬/执念盯人/越接近真相越被盯上。
+  - 灵异+历史/穿越/民国组合仍放行古代（时代由所勾时代标签决定，不做强加约束）。
+  - 验证：test_ideas_engine.mjs 扩至 130 断言（时代块 7 项 + 代价/时代正则含误伤负例 7 项）。
