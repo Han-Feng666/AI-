@@ -58,7 +58,7 @@ getGenreGuide, getGenreGuides, buildPlanGenreConformity, buildAntiTropeBlock,
   IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS,
   bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock,
   buildHorrorEraBlock, HORROR_ANCIENT_ERA_RE, HORROR_BODY_COUNTER_RE,
-  buildFunEngineBlock, buildIdeaExamplesBlock
+  buildIdeaExamplesBlock
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
@@ -1887,7 +1887,7 @@ ${blocks.join('\n\n')}`;
   const presets = (Array.isArray(stylePresets) ? stylePresets : [])
     .map((s) => String(s).trim()).filter(Boolean);
   const presetBlock = presets.length
-    ? `\n\n【创作风格基调】${presets.join('、')}\n\n构思的创意应贴合这些风格基调（例如悬念、燃向、轻松日常等）。`
+    ? `\n\n【创作风格硬约束（最高优先级）】用户勾选的风格：${presets.join('、')}。每个创意的基调、冲突形态、结局气质必须贴合这些风格，不得自行改写成别的风格。伤感/虐恋/悲剧=错过与撕裂，不要翻盘爽文；燃向=争胜翻盘；轻松日常=生活质感与错位，不要强行高潮。未勾选的风格不要往创意里塞。`
     : '';
 
   // 随机差异化轴：为每个创意槽位分配不同的金手指类型 + 主角初始身份，
@@ -2063,8 +2063,6 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
   const xuanhuanCanonBlock = buildXuanhuanCanonBlock(genreList);
   const coverageBlock = buildGenreCoverageBlock(genreList, ideaCount, { isMaleChannel: channel === '男频' });
   const horrorEraBlock = buildHorrorEraBlock(genreList);
-  // v1.4.72 正向引导：趣味引擎槽位+多题材标杆——禁令拦废稿，范例立水准
-  const funBlock = buildFunEngineBlock(ideaCount);
   const examplesBlock = buildIdeaExamplesBlock(genreList);
 
   const seedBlock = seed
@@ -2078,8 +2076,8 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
-${funBlock}
- 请一次构思 ${ideaCount} 个彼此完全不同的小说创意，输出 JSON 数组。`;
+
+请一次构思 ${ideaCount} 个彼此完全不同的小说创意，输出 JSON 数组。`;
 
   try {
     // maxOut 按创意数缩放：6 个创意含 outline_H5 五章要点，8192 tokens 易截断

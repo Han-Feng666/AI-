@@ -1109,3 +1109,12 @@ Entries discovered by the Agent during task execution should follow this format:
   - v1.4.72 方案（减法+正向，未再新增任何禁令）：runLLMStream 透传 temperature + ideas 传 0.95；IDEAS_SYSTEM 头部加「先有趣再合规」第一原则；buildFunEngineBlock 趣味引擎槽位（FUN_ENGINE_POOL 16 种看点发动机按创意分配，与题材硬约束冲突时以题材为底线）；buildIdeaExamplesBlock 按题材家族配多标杆（现代灵异/都市言情/校园青春/玄幻，严禁复用人名情节）；清理所有提示词字符串内的"实锤vX"事故复盘叙事（只留在代码注释）。
   - llm.js 温度解析：chat opts.temperature 优先 → wantsJson ? 0.4 : cfg.temperature || 0.9。任何 JSON 输出但需要创造性的调用都必须显式传 temperature，否则吃隐性降级（全文件搜 temperature 可盘点已显式传参位置，ideas 路径为 routes.js 两个调用点 + runLLMStream 三处透传）。
   - 验证：test_ideas_engine.mjs 扩至 143 断言（趣味槽位不重复/标杆按家族命中/新增块零复盘词/IDEAS_SYSTEM 含第一原则）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-07
+- Context: Discovered by Agent after user rejected "make every idea fun" (v1.4.73)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 用户口径：灵感生成器只按勾选的题材和风格写，不要额外加「必须有趣/必须燃/必须翻盘」。伤感言情被爽点引擎绑架是 v1.4.72 的过纠。
+  - v1.4.73：IDEAS_SYSTEM 第一原则改为「只按用户勾选的题材和风格写」；六问②钩子形态跟风格走；presetBlock 升为【创作风格硬约束】；userPrompt 不再注入 funBlock（buildFunEngineBlock 退出生成路径）。
+  - 风格未勾选时 presetBlock 为空，不臆造基调。
