@@ -55,7 +55,8 @@ import {
 getGenreGuide, getGenreGuides, buildPlanGenreConformity, buildAntiTropeBlock,
   detectIdeaCarrierDrift, hasTrueFantasyTag, buildIdeasEngineBlock,
   IDEAS_SUPERPOWER_RE, IDEAS_SYSTEM_LEAK_RE, IDEAS_TRANS_LEAK_RE,
-  IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS
+  IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS,
+  bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE
 } from './prompts.js';
 import {
   createJob, updateJob, getJob, listJobsByNovel, getActiveJobByNovel,
@@ -1926,8 +1927,12 @@ ${blocks.join('\n\n')}`;
     ID_POOL = [];
     gfLabel = '核心优势类型';
   } else if (isFantasy) {
-    GF_POOL = ['血脉体质觉醒', '古老传承记忆', '器物法宝', '特殊技能天赋', '预知信息优势', '契约召唤', '规则因果操控', '战斗本能武学', '灵兽伙伴', '阵法符箓造诣'];
-    ID_POOL = ['底层草根', '落魄贵族后人', '隐世传人', '市井游民', '少年天才', '军方武力背景', '商贾之后', '工匠手艺人', '戴罪之身', '边军小卒'];
+    GF_POOL = isXuanhuanGenre(genreList.join(' '))
+      ? ['灵根异变/双灵根', '残缺功法补全', '本命法宝宝物', '丹道天赋', '灵兽契约', '剑意顿悟', '阵法入门', '血脉神通觉醒', '秘境机缘', '体修肉身']
+      : ['血脉体质觉醒', '古老传承记忆', '器物法宝', '特殊技能天赋', '预知信息优势', '契约召唤', '规则因果操控', '战斗本能武学', '灵兽伙伴', '阵法符箓造诣'];
+    ID_POOL = isXuanhuanGenre(genreList.join(' '))
+      ? ['外门杂役弟子', '散修少年', '丹房药童', '灵田农户', '坊市学徒', '宗门旁系', '秘境遗孤', '猎户出身修士', '边荒散修', '内门外门交界弟子']
+      : ['底层草根', '落魄贵族后人', '隐世传人', '市井游民', '少年天才', '军方武力背景', '商贾之后', '工匠手艺人', '戴罪之身', '边军小卒'];
     gfLabel = '金手指类型';
   } else if (isYouth) {
     GF_POOL = ['被埋没的学业/艺术天赋', '读人细节的观察习惯（非超感）', '天生的社交感染力', '逆境反弹韧性', '可训练的细节观察力', '出众的表达与创作才华', '突出体能/竞技特长（训练所得）', '关键人脉（师长/发小）'];
@@ -2006,11 +2011,7 @@ ${blocks.join('\n\n')}`;
   // 修复：历史+穿越+系统曾被判为"现实类"，生成"严禁穿越/系统元素"的矛盾指令，
   // 模型两头不讨好直接漂移到玄幻修仙。正确逻辑：用户选了什么就允许什么，
   // 没选的题材定义元素才进禁令清单。
-  const DEFINING_KEYWORDS = ['玄幻', '修仙', '修真', '仙侠', '系统', '穿越', '重生', '科幻',
-    '星际', '机甲', '末世', '灵气', '修炼', '魔法', '异能', '克苏鲁', '武侠', '仙'];
-  const bannedKws = DEFINING_KEYWORDS.filter(
-    (k) => !genreList.some((g) => g.includes(k) || k.includes(g))
-  );
+  const bannedKws = bannedDefiningKeywords(genreList);
   const genreConformityBlock = `\n\n【题材贴合硬约束（最高优先级）】
 - 所有创意必须严格属于用户选择的题材范围（${genreList.join('、')}），genre 字段必须从所选题材中选取或组合（如"历史+穿越+系统"），严禁输出用户未选择的题材。
 ${bannedKws.length ? `- 用户未选择以下题材元素，严禁作为主题材或核心设定出现在任何创意中：${bannedKws.join('、')}。` : ''}
@@ -2047,8 +2048,9 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 
   // 换皮对抗：每批随机抽 3 条"反套路禁令"注入（共享池见 prompts.js ANTI_TROPE_POOL），
   // 强制创意脱离 AI 默认套路分布；方案层（/novels/:id/plan）同样注入，防"创意反套路、方案又套路回去"
-  const antiTropeBlock = buildAntiTropeBlock(isSystem);
+  const antiTropeBlock = buildAntiTropeBlock(isSystem, genreList.join(' '));
   const engineBlock = buildIdeasEngineBlock(genreList, { isSystem, hasTrans });
+  const xuanhuanCanonBlock = buildXuanhuanCanonBlock(genreList);
 
   const seedBlock = seed
     ? `\n\n【用户核心想法（最高优先级）】
@@ -2057,7 +2059,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${seedBlock}${antiTropeBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${xuanhuanCanonBlock}${seedBlock}${antiTropeBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
@@ -2202,6 +2204,32 @@ ${axisBlock}
               send({ type: 'status', message: `已剔除调查主线偏题的创意「${it.title}」（${invHit[0]}），未勾选悬疑/推理` });
               return false;
             }
+          }
+          return true;
+        });
+      }
+
+      // 玄幻正统门禁：只勾玄幻时必须是修炼世界。实锤 v1.4.69 三条废稿——
+      // 刻符匠/侯府祭山/拾招忘记忆，全文无灵气无境界无宗门。
+      if (isXuanhuanGenre(genreList.join(' '))) {
+        const XUAN_GROTESQUE_RE = /把自己刻死|忘掉自己的一段记忆|把别人的伤|承接在自己身上|祭山|为太子分疾/;
+        list = list.filter((it) => {
+          const text = [
+            it?.protagonist?.golden_finger,
+            it?.protagonist2?.golden_finger,
+            it?.hook,
+            it?.logline,
+            it?.protagonist?.identity,
+            ...(Array.isArray(it?.outline_H5) ? it.outline_H5 : [])
+          ].filter(Boolean).join('\n');
+          if (!XUAN_CANON_RE.test(text)) {
+            send({ type: 'status', message: `已剔除偏离玄幻修炼世界的创意「${it.title}」（全文无灵气/境界/宗门/功法），可点击重新生成补齐` });
+            return false;
+          }
+          const gro = String(text).match(XUAN_GROTESQUE_RE);
+          if (gro) {
+            send({ type: 'status', message: `已剔除猎奇自残金手指的创意「${it.title}」（${gro[0]}），玄幻代价须是灵力反噬/走火入魔/境界反跌` });
+            return false;
           }
           return true;
         });
@@ -2846,7 +2874,7 @@ ${existingBlock ? `\n${existingBlock}\n` : ''}
   用户灵感是本作唯一真相来源。灵感中未提及的情节（如被家族打死、被嘲讽退婚、获得系统等），严禁在方案中自行添加。主角开局处境必须严格按灵感描述，不得额外添加恩怨/家族/机缘设定。
 
   【方案看点铁律】每一卷/每一段主线的推进必须绑定具体利害冲撞（人命、倾家荡产、权力翻转、恩义撕裂、情感对撞），严禁把方案写成行业流程与日常公务的流水账（查账/验粮/押运/筑堤这类公事只能当背景引信，炸点必须是具体的利害冲突）；系统惩罚规则严禁成为章节推进的主驱动力——主角的欲望与对手的冲撞才是。
- ${buildAntiTropeBlock(/系统|金手指|数据流|签到/.test(genre || novel.genre || ''))}
+  ${buildAntiTropeBlock(/系统|金手指|数据流|签到/.test(genre || novel.genre || ''), genre || novel.genre || '')}
  请输出创作方案骨架 JSON。`;
 
   if (presets.length) {

@@ -1068,3 +1068,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - 门禁顺序：题材 → 载体（MYSTICAL_CARRIER_RE）→ 引擎（SUPERPOWER / 未勾系统扫 SYSTEM_LEAK / 未勾穿越扫 TRANS_LEAK / 非悬疑扫 INVESTIGATION / 非系统现实金手指须含 REALISTIC_TOKENS）→ 身份撞车 → 赛道撞车。词表全部非全局，禁止 `.test()` 带 `g`。
   - 槽位去超凡：GF_POOL 青春/都市改为可训练现实优势；系统槽「信息溯源/破案达标」改为「情报汇编」。知识库块加失配警示：只借技法不借悬疑/超凡/系统打卡结构。
   - 验证：`NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs`（65 断言）。纯后端改动打补丁用 `node scripts/build-and-patch.cjs --bump --no-build`。
+
+[Project Knowledge Summary]
+- Date: 2026-10-07
+- Context: Discovered by Agent while fixing genre drift when only 玄幻 selected (v1.4.69)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 根因教训：题材动态禁令表必须按家族放行。DEFINING_KEYWORDS 平铺禁词在只勾「玄幻」时把灵气/修炼/仙侠/修仙/仙 一起禁掉，模型被迫写无灵气江湖权谋（刻符匠/接伤病/学招忘记忆三条废稿）。GENRE_FAMILIES + bannedDefiningKeywords：勾族内任一成员，同族词整体放行；跨族词照禁。
+  - 反套路池也是污染源：ANTI_TROPE_POOL 的「不得发生在宗门/学院/家族」「大陆/王国/宗门宏观切入」在玄幻抽中即拆正统舞台。buildAntiTropeBlock(isSystem, genre) 第二参传题材串，isXuanhuanGenre 命中时过滤含「宗门」条目；genre→家族判定正则需先于 ANTI_TROPE 使用（isXuanhuanGenre 导出自 prompts.js）。
+  - 玄幻正统门禁：XUAN_CANON_RE（灵气|灵力|灵根|修炼|境界|筑基|金丹|炼气|元婴|宗门|功法|法宝|丹药|秘境|天劫|灵田|散修|御剑|渡劫|灵兽|飞剑，非全局），gateIdeas 中 !test 即剔除；猎奇自残代价用 closure 内 XUAN_GROTESQUE_RE 精准拦截（玄幻代价口径=灵力反噬/走火入魔/境界反跌/寿元/丹毒）。buildXuanhuanCanonBlock 注入 userPrompt；GF_POOL/ID_POOL isFantasy 分轨（xuan 用灵根/功法/法宝/丹道/灵兽槽位+外门杂役/散修/药童身份）。
+  - 标杆范例污染：IDEAS_SYSTEM 标杆「陈若辰」是穿越+系统+朝堂气质，须在限域段明确「勾了玄幻就写修炼世界」。
+  - 验证：test_ideas_engine.mjs 扩至 99 断言（家族放行 12 项、canon 门禁 8 项、反套路 60 抽零宗门泄漏等）。
