@@ -53,7 +53,7 @@ import {
   IDEAS_SYSTEM,
   buildNovelContext, buildChapterSystem, buildPolishSystem,
   buildPolishWithIssues, buildPlotFixSystem, buildElevateSystem, extractJson, extractArray, buildReviseSystem,
-getGenreGuide, getGenreGuides, buildPlanGenreConformity, buildAntiTropeBlock,
+getGenreGuide, getGenreGuides, buildPlanGenreConformity,
   detectIdeaCarrierDrift, hasTrueFantasyTag, buildIdeasEngineBlock,
   IDEAS_SUPERPOWER_RE, IDEAS_SYSTEM_LEAK_RE, IDEAS_TRANS_LEAK_RE,
   IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS,
@@ -1888,7 +1888,7 @@ ${blocks.join('\n\n')}`;
   const presets = (Array.isArray(stylePresets) ? stylePresets : [])
     .map((s) => String(s).trim()).filter(Boolean);
   const presetBlock = presets.length
-    ? `\n\n【创作风格硬约束（最高优先级）】用户勾选的风格：${presets.join('、')}。每个创意的基调、冲突形态、结局气质必须贴合这些风格，不得自行改写成别的风格。伤感/虐恋/悲剧=错过与撕裂，不要翻盘爽文；燃向=争胜翻盘；轻松日常=生活质感与错位，不要强行高潮。未勾选的风格不要往创意里塞。`
+    ? `\n\n【创作风格硬约束】用户勾选的风格：${presets.join('、')}。每个创意的基调、冲突形态、结局气质必须贴合这些风格，不得自行改写成别的风格。伤感/虐恋/悲剧=错过与撕裂，不要翻盘爽文；燃向=争胜翻盘；轻松日常=生活质感与错位，不要强行高潮。未勾选的风格不要往创意里塞。`
     : '';
 
   // 随机差异化轴：为每个创意槽位分配不同的金手指类型 + 主角初始身份，
@@ -1983,7 +1983,7 @@ ${blocks.join('\n\n')}`;
   // 双女主：双人主角结构，优先级高于频道约束
   const isDualHeroine = genreList.some((g) => g.includes('双女主'));
   const dualBlock = isDualHeroine
-    ? `\n\n【双女主结构（最高优先级硬约束）】
+    ? `\n\n【双女主结构】
 - 每个创意必须有两位女性主角（双女主），双人对戏是全书核心：两人的性格、出身、能力、行事风格必须形成鲜明互补或对撞（如一个外放张扬一个内敛深沉、一个守规矩一个捅娄子）。
 - 两人各有独立的动机线与成长弧，剧情在双线交织中推进：既要有并肩站立的信任与默契，也要有立场、观念、利益上的摩擦与分歧。
 - 情感关系是核心卖点之一：可以是爱情线（含百合向，感情发展要细腻真实、有具体事件推动），也可以是姐妹/知己/搭档/亦敌亦友的羁绊线，由创意自身的题材组合与风格决定；无论哪种，关系变化都要渐进有层次，严禁一见如故的速成塑料情。
@@ -2023,7 +2023,7 @@ ${blocks.join('\n\n')}`;
   // 模型两头不讨好直接漂移到玄幻修仙。正确逻辑：用户选了什么就允许什么，
   // 没选的题材定义元素才进禁令清单。
   const bannedKws = bannedDefiningKeywords(genreList);
-  const genreConformityBlock = `\n\n【题材贴合硬约束（最高优先级）】
+  const genreConformityBlock = `\n\n【题材贴合硬约束】
 - 所有创意必须严格属于用户选择的题材范围（${genreList.join('、')}），genre 字段必须从所选题材中选取或组合（如"历史+穿越+系统"），严禁输出用户未选择的题材。
 ${bannedKws.length ? `- 用户未选择以下题材元素，严禁作为主题材或核心设定出现在任何创意中：${bannedKws.join('、')}。` : ''}
 - 主角的"${gfLabel}"必须与所选题材兼容（现实类题材用现实优势，严禁超自然设定；所选题材含系统/穿越/重生时按该设定展开）。${isYouth ? '\n- 主角必须是学生或年轻人（高中生/大学生/刚踏入社会的青年），严禁出现中年失业、单亲家长、职场老手等与青春校园题材不符的身份设定。' : ''}
@@ -2046,7 +2046,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
   // 以及现代职业直译成古代同类营生（运动员→纤夫、体育生→相扑手、鉴定师→当铺朝奉），
   // 一一对应毫无错位趣味，还把主角摁在最底层打工位上
   const transmigrationBlock = (isTransmigration || (isSystem && hasTrans))
-    ? `\n\n【穿越形态与开局处境锁定（最高优先级，违反即废稿）】
+    ? `\n\n【穿越形态与开局处境锁定】
 - 穿越方式锁定为身穿：主角以本人肉身与完整记忆穿越——他的身体就是他自己的现代身体（现代练出的体能/技能随身体带过去），原主、原主的家人、原主的债务、原主的技能记忆全部不存在。严禁魂穿、附身、夺舍、穿越成原主、"身体是原主的"——出现任何一种即废稿。
 - 每个创意的主角都必须是穿越者：严禁写成目标世界的本地人（"跑十年腿回乡的都市人""本地匠人"这类没穿越的设定一律废稿）。
 - 现代记忆必须完整：严禁失忆流（"想不起来自己怎么来的""忘了现代身份"都是废稿）——穿越者的全部看点就在现代人视角与古代场景的错位上。
@@ -2057,9 +2057,6 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 - 原生的现代人际关系（想念现代亲友）可以写，但只能是乡愁底色，严禁转化为古代世界的任务链。`
     : '';
 
-  // 换皮对抗：每批随机抽 3 条"反套路禁令"注入（共享池见 prompts.js ANTI_TROPE_POOL），
-  // 强制创意脱离 AI 默认套路分布；方案层（/novels/:id/plan）同样注入，防"创意反套路、方案又套路回去"
-  const antiTropeBlock = buildAntiTropeBlock(isSystem, genreList.join(' '));
   const engineBlock = buildIdeasEngineBlock(genreList, { isSystem, hasTrans });
   const xuanhuanCanonBlock = buildXuanhuanCanonBlock(genreList);
   const coverageBlock = buildGenreCoverageBlock(genreList, ideaCount, { isMaleChannel: channel === '男频' });
@@ -2067,13 +2064,13 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
   const examplesBlock = buildIdeaExamplesBlock(genreList);
 
   const seedBlock = seed
-    ? `\n\n【用户核心想法（最高优先级）】
+    ? `\n\n【用户核心想法】
 用户对这次创意有一个想法或方向要求，必须以此为出发点构思（在它的基础上展开差异化，严禁忽略或偏离）：
 「${seed}」
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${xuanhuanCanonBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}${antiTropeBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${xuanhuanCanonBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
@@ -2934,7 +2931,6 @@ ${existingBlock ? `\n${existingBlock}\n` : ''}
   用户灵感是本作唯一真相来源。灵感中未提及的情节（如被家族打死、被嘲讽退婚、获得系统等），严禁在方案中自行添加。主角开局处境必须严格按灵感描述，不得额外添加恩怨/家族/机缘设定。
 
   【方案看点铁律】每一卷/每一段主线的推进必须绑定具体利害冲撞（人命、倾家荡产、权力翻转、恩义撕裂、情感对撞），严禁把方案写成行业流程与日常公务的流水账（查账/验粮/押运/筑堤这类公事只能当背景引信，炸点必须是具体的利害冲突）；系统惩罚规则严禁成为章节推进的主驱动力——主角的欲望与对手的冲撞才是。
-  ${buildAntiTropeBlock(/系统|金手指|数据流|签到/.test(genre || novel.genre || ''), genre || novel.genre || '')}
  请输出创作方案骨架 JSON。`;
 
   if (presets.length) {

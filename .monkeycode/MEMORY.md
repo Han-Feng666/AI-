@@ -1136,3 +1136,12 @@ Entries discovered by the Agent during task execution should follow this format:
   - 正文去AI味不要再往 CHAPTER_SYSTEM 堆禁令清单。漏拦的是影视分镜腔（这一幕/目光落在/声音响起）、解释旁白（这意味着/这代表着）、简历式出场（约莫二十五岁、身材修长五官立体）。这三类旧扫描器全漏。
   - v1.4.75：lib.js 新增 scanCinematicNarration / scanExplainAside / scanResumeIntro，挂入 scanAiPatterns + 质量门 structureFixes；ANTI_AI_STYLE / POLISH_SYSTEM / AI_DETECT 只加对应短正例与 52-54 类。
   - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node --test server/test/scan_ai_patterns.test.js（13 断言）。纯后端改动打补丁用 `node scripts/build-and-patch.cjs --bump --no-build`。
+
+[Project Knowledge Summary]
+- Date: 2026-10-08
+- Context: Discovered by Agent while slimming /ideas prompts (v1.4.76)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 禁令块会抢注意力：IDEAS_SYSTEM 把穿越器物/死局限时/系统载体细则写进全题材后，都市言情也会先交差合规。穿越/系统细则只留给 transmigrationBlock 与 isSystem 题材贴合块；门禁正则仍拦泄漏。
+  - v1.4.76：IDEAS_SYSTEM 压到约 1700 字；砍「违反即废稿/最高优先级」叠床；buildAntiTropeBlock 退出 /ideas 与 /plan 生成路径（函数与测试池保留）。都市+校园+青春+言情静态块约 3161 字。
+  - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（151 断言）。纯后端改动打补丁用 `node scripts/build-and-patch.cjs --bump --no-build`。
