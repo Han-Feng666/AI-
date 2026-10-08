@@ -1118,3 +1118,12 @@ Entries discovered by the Agent during task execution should follow this format:
   - 用户口径：灵感生成器只按勾选的题材和风格写，不要额外加「必须有趣/必须燃/必须翻盘」。伤感言情被爽点引擎绑架是 v1.4.72 的过纠。
   - v1.4.73：IDEAS_SYSTEM 第一原则改为「只按用户勾选的题材和风格写」；六问②钩子形态跟风格走；presetBlock 升为【创作风格硬约束】；userPrompt 不再注入 funBlock（buildFunEngineBlock 退出生成路径）。
   - 风格未勾选时 presetBlock 为空，不臆造基调。
+
+[Project Knowledge Summary]
+- Date: 2026-10-08
+- Context: Discovered by Agent while fixing romance ideas drifting to labor/demolition/sports plots (v1.4.74)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 用户勾「都市+校园+青春+言情」仍产出讨薪/拆迁/冲线三条：根因是硬利害下限把「限期之约/当众冲突」当合格线，模型用外部事件交差，感情当配菜。覆盖块只写比例，没按创意锁槽位。
+  - v1.4.74：言情走单独硬利害（代价落在两人关系上，讨薪/拆迁/冲线只能当背景）；校园+都市+言情按创意发舞台槽位；外部事件翻盘模板整批限一。
+  - ideas 温度不再写死 0.95：用 config.temperature（用户开到最高时生效），缺省 0.9。写死温度会盖掉用户设置。

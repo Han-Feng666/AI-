@@ -2094,7 +2094,7 @@ ${axisBlock}
         const r = await chat({ config, messages: [
           { role: 'system', content: IDEAS_SYSTEM },
           { role: 'user', content: userPrompt }
-        ], maxTokens: maxOut, temperature: 0.95, timeout: 300000 });
+        ], maxTokens: maxOut, temperature: Number(config.temperature) || 0.9, timeout: 300000 });
         full = r?.content || '';
       } else {
         await runLLMStream(config, [
@@ -2103,7 +2103,7 @@ ${axisBlock}
         ], {
           ctrl,
           task: 'planning',
-          temperature: 0.95,
+          temperature: Number(config.temperature) || 0.9,
           maxTokens: maxOut,
           onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
         });
