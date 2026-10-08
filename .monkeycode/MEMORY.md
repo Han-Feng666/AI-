@@ -1127,3 +1127,12 @@ Entries discovered by the Agent during task execution should follow this format:
   - 用户勾「都市+校园+青春+言情」仍产出讨薪/拆迁/冲线三条：根因是硬利害下限把「限期之约/当众冲突」当合格线，模型用外部事件交差，感情当配菜。覆盖块只写比例，没按创意锁槽位。
   - v1.4.74：言情走单独硬利害（代价落在两人关系上，讨薪/拆迁/冲线只能当背景）；校园+都市+言情按创意发舞台槽位；外部事件翻盘模板整批限一。
   - ideas 温度不再写死 0.95：用 config.temperature（用户开到最高时生效），缺省 0.9。写死温度会盖掉用户设置。
+
+[Project Knowledge Summary]
+- Date: 2026-10-08
+- Context: Discovered by Agent while reducing AI flavor in generated prose (v1.4.75)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 正文去AI味不要再往 CHAPTER_SYSTEM 堆禁令清单。漏拦的是影视分镜腔（这一幕/目光落在/声音响起）、解释旁白（这意味着/这代表着）、简历式出场（约莫二十五岁、身材修长五官立体）。这三类旧扫描器全漏。
+  - v1.4.75：lib.js 新增 scanCinematicNarration / scanExplainAside / scanResumeIntro，挂入 scanAiPatterns + 质量门 structureFixes；ANTI_AI_STYLE / POLISH_SYSTEM / AI_DETECT 只加对应短正例与 52-54 类。
+  - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node --test server/test/scan_ai_patterns.test.js（13 断言）。纯后端改动打补丁用 `node scripts/build-and-patch.cjs --bump --no-build`。

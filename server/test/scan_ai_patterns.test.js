@@ -82,3 +82,39 @@ test('近距离重复用词被检出', () => {
   const words = hits.map((h) => h.word);
   assert.ok(words.some((w) => w.includes('近距离重复用词')), `words=${words.join('|')}`);
 });
+
+const PAD = '他沿着河边走，路灯把影子拉得老长，风从河面上过来，带着水腥气。摊主在收凳子，收音机里放着评书。'.repeat(8);
+
+test('影视分镜腔被检出', () => {
+  const txt = PAD + '这一幕映入眼帘。他的目光落在那张桌上。一个陌生的声音忽然响起。画面定格在门口。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('影视分镜腔')), `words=${words.join('|')}`);
+});
+
+test('解释旁白被检出', () => {
+  const txt = PAD + '这意味着他已经没有退路了。这代表着整件事翻不了盘。不难看出对方早有准备。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('解释旁白')), `words=${words.join('|')}`);
+});
+
+test('简历式介绍被检出', () => {
+  const txt = PAD + '他是一个约莫二十五岁的青年，身材修长，五官立体。她是一个年约三十岁的女子，面容清秀，五官精致。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('简历式介绍')), `words=${words.join('|')}`);
+});
+
+test('白描正文不误报分镜/旁白/简历', () => {
+  const txt = `老周把车支在路边，用袖子擦了擦车座。巷子里飘着谁家炖肉的香味，他咽了口唾沫，推车进了院。
+"回来啦？"屋里媳妇在剥豆角，头也没抬。
+"嗯。"他把车靠墙放好，从兜里摸出两张皱巴巴的票子放在桌上，"这个月奖金。"
+媳妇手停了一下，没说话，把豆角扔进盆里，水花溅出来几点。
+他脱了外套挂在门后，坐下，端起凉茶喝了一大口。茶是中午剩的，有点馊，他还是喝完了。
+王婶从巷口挑着两桶水回来，桶里晃着傍晚的云。他帮着把水倒进缸里，缸底的水花翻起来，又慢慢沉下去。
+火膛里柴火噼啪响，锅边结了一圈白碱。他拿筷子戳了戳红薯，还没熟，又把盖子扣回去。`.repeat(3);
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => /影视分镜腔|解释旁白|简历式介绍/.test(w)), `不应误报，实际: ${words.join('|')}`);
+});

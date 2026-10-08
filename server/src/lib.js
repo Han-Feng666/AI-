@@ -366,7 +366,12 @@ const AI_BLACKLIST = [
   '冷冷道', '淡漠道', '平静道', '淡然道', '缓缓道', '一字一句道', '开口道',
   // 2026-09 扩充：情绪反应模板词（AI 让角色用同一套身体反应表达震惊/紧张）
   '如遭雷击', '大脑一片空白', '心脏漏了一拍', '呼吸一窒', '浑身一僵', '瞳孔骤缩',
-  '喉结滚动', '指节捏得发白', '指节泛白', '周身一寒', '遍体生寒', '头皮发麻'
+  '喉结滚动', '指节捏得发白', '指节泛白', '周身一寒', '遍体生寒', '头皮发麻',
+  // 2026-10 扩充：影视分镜腔 / 解释旁白 / 说明书介绍
+  '这一幕', '这一画面', '镜头拉近', '镜头推进', '特写', '慢镜头',
+  '目光落在', '视线落在', '声音响起', '画面定格',
+  '这意味着', '这代表着', '这预示着', '这说明他',
+  '年约', '约莫二十', '约莫三十'
 ];
 
 // ---------- AI 高频句式模板（正则级，比词级黑名单更能抓"AI 腔调"） ----------
@@ -738,6 +743,9 @@ export function scanAiPatterns(text) {
   hits.push(...scanPunchlineExpand(text));
   hits.push(...scanSimileOveruse(text));
   hits.push(...scanShortSentenceChop(text));
+  hits.push(...scanCinematicNarration(text));
+  hits.push(...scanExplainAside(text));
+  hits.push(...scanResumeIntro(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -1922,6 +1930,60 @@ export function scanVagueAbstraction(text) {
   if (mixture >= 3) detail.push(`气息交织×${mixture}`);
   if (!detail.length) return [];
   return [`空泛抽象描写（${detail.join('、')}）——描写飘在概念里没有落在具体物上（"某种说不清的情绪""仿佛诉说着什么"是 AI 高频空转句）。改法：把感受换算成身体反应和具体物件（不说"一股说不清的情绪"，写"他喉结动了一下，把到嘴边的话咽了回去"），每个"某种/难以言喻"最多留一处，其余删掉直接写动作`];
+}
+
+// 影视分镜腔：AI 用镜头语言写小说（"这一幕""目光落在""声音响起""画面定格"）
+export function scanCinematicNarration(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const hits = [];
+  const count = (re) => (s.match(re) || []).length;
+  const shot = count(/这一幕|这一画面|这个画面|镜头(拉近|推进|切到|摇过)|特写|慢镜头|画面定格|定格在/g);
+  const gazeLand = count(/(目光|视线|眼神)(缓缓)?(落在|停在|扫过|掠过)/g);
+  const soundCue = count(/(一个|一阵)?(陌生的)?声音(忽然|突然)?响起|(忽然|突然)(传来|响起).{0,8}声音/g);
+  const total = shot + gazeLand + soundCue;
+  if (total >= 3) {
+    hits.push({
+      word: `影视分镜腔(${shot}处镜头词/${gazeLand}处"目光落在"/${soundCue}处"声音响起"。小说用角色动作带画面，删镜头术语，改"他看见/他听见")`,
+      count: total,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 解释旁白：AI 写完画面立刻替读者下结论（"这意味着""这代表着""不难看出"）
+export function scanExplainAside(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const hits = [];
+  const m = s.match(/这(意味着|代表着|预示着|说明(了|他|她)|表明|标志着)|不难看出|由此可见|换句话说|也就是说[^。]{0,12}(他|她|他们)/g) || [];
+  if (m.length >= 2) {
+    hits.push({
+      word: `解释旁白×${m.length}（如"${m.slice(0, 2).join('"、"')}"。画面写完立刻下结论是说明书腔，删掉解释句，让读者自己品）`,
+      count: m.length,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 简历式介绍：出场即报年龄职业外貌清单（"他是一个约莫二十五岁的青年，身材修长，五官立体"）
+export function scanResumeIntro(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const hits = [];
+  const resume = s.match(/(他|她|那人|来人)是一个?(约莫|大约|年约)?[一二三四五六七八九十\d]{1,3}岁的[\u4e00-\u9fff]{1,8}，[\u4e00-\u9fff]{2,20}，[\u4e00-\u9fff]{2,16}/g) || [];
+  const lookStack = s.match(/(身材|五官|面容|长相)(修长|匀称|立体|精致|清秀|冷峻)[，,][\u4e00-\u9fff]{0,8}(身材|五官|面容|长相|眉眼)/g) || [];
+  const total = resume.length + lookStack.length;
+  if (total >= 2) {
+    hits.push({
+      word: `简历式介绍×${total}（出场即报年龄职业外貌清单。改成别人看见他时的一个反应，或他自己正在做的一件事）`,
+      count: total,
+      template: true
+    });
+  }
+  return hits;
 }
 
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角
