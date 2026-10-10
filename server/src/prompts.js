@@ -161,6 +161,44 @@ export function analyzeConceptConstraints(concept = '') {
   };
 }
 
+export function formatIdeaAsConcept(idea = {}) {
+  const it = idea && typeof idea === 'object' ? idea : {};
+  const p = it.protagonist && typeof it.protagonist === 'object' ? it.protagonist : {};
+  const p2 = it.protagonist2 && typeof it.protagonist2 === 'object' ? it.protagonist2 : {};
+  const listOf = (v) => (Array.isArray(v)
+    ? v.map((s) => String(s || '').trim()).filter(Boolean)
+    : String(v || '').trim() ? [String(v).trim()] : []);
+  const sps = listOf(it.selling_point);
+  const h5 = listOf(it.outline_H5);
+  const lines = [];
+  const title = String(it.title || '').trim();
+  const genre = String(it.genre || '').trim();
+  const logline = String(it.logline || '').trim();
+  const hook = String(it.hook || '').trim();
+  if (title) lines.push(`书名倾向：${title}`);
+  if (genre) lines.push(`题材：${genre}`);
+  if (logline) lines.push(`一句话梗概：${logline}`);
+  if (hook) lines.push(`开篇钩子：${hook}`);
+  const pBits = [
+    p.name && `名${String(p.name).trim()}`,
+    p.identity && `身份：${String(p.identity).trim()}`,
+    p.personality && `性格：${String(p.personality).trim()}`,
+    p.golden_finger && `金手指：${String(p.golden_finger).trim()}`
+  ].filter(Boolean);
+  if (pBits.length) lines.push(`主角：${pBits.join('；')}`);
+  const p2Bits = [
+    p2.name && `名${String(p2.name).trim()}`,
+    p2.identity && `身份：${String(p2.identity).trim()}`,
+    p2.personality && `性格：${String(p2.personality).trim()}`,
+    p2.golden_finger && `能力：${String(p2.golden_finger).trim()}`,
+    p2.relation && `与主角：${String(p2.relation).trim()}`
+  ].filter(Boolean);
+  if (p2Bits.length) lines.push(`第二主角：${p2Bits.join('；')}`);
+  if (sps.length) lines.push(`核心卖点：${sps.map((s, i) => `${i + 1}.${s}`).join(' ')}`);
+  if (h5.length) lines.push(`前五章方向：${h5.map((s, i) => `第${i + 1}章 ${s}`).join('；')}`);
+  return lines.join('\n');
+}
+
 export function buildConceptFidelityRule(concept = '') {
   const t = String(concept || '').trim();
   const safeT = escapePromptInput(t);
@@ -360,6 +398,9 @@ export const NOVEL_PLAN_SYSTEM = `你是一位资深中文小说创作主编，�
 
 ${CONCEPT_FIDELITY_CORE}
 
+【灵感种子展开】
+灵感原文里已写明的主角身份、金手指、开篇钩子、卖点、前五章方向是锁定种子：必须写进 world_view / outline / 主角设定 / 开篇处境。方案的工作是把种子长成全书，不得另换金手指、另换开局身份、另换主冲突。
+
 【世界观构建要求 —— 扎实、立体、可生长】
 1. 核心规则：明确本作独有的核心设定与规则体系，如超自然规则、科技水平、社会等级等，每级/每层的特征与门槛。规则来源要有逻辑，体系要有上限和代价。
 2. 社会结构：谁统治？权力来源是什么？阶层如何划分？底层和顶层的矛盾核心是什么？
@@ -420,10 +461,12 @@ export const PLAN_SKELETON_SYSTEM = `你是一位资深中文小说创作主编�
 
 ${CONCEPT_FIDELITY_CORE}
 
+【灵感种子展开】
+灵感原文里已写明的主角身份、金手指、开篇钩子、卖点、前五章方向是锁定种子：必须写进 world_view / outline / 主角设定 / 开篇处境。方案的工作是把种子长成全书（分卷、配角、势力、暗线），不得另换金手指、另换开局身份、另换主冲突。
+
 【角色命名隔离铁律】
-- 灵感/风格/知识样本片段中出现的任何人物名，一律禁止用作本书角色名。样本是其他作品，里面的人名和本书无关。
-- 本书所有角色必须由你原创命名，不得直接复用、改写、谐音化样本中的任何角色名。
-- 若你想到的名字和样本中某角色名重合（即使巧合），必须换一个。
+- 风格库/知识库样本里的人名禁止用作本书角色名。那些是其他作品。
+- 用户灵感里写明的主角名必须沿用；其余角色由你原创命名，不得复用样本人名。
 
 【书名铁律 —— 先想书名，再构思其他】
 - 书名必须贴合所选题材气质、有辨识度、有记忆点，严禁与烂大街套路重名（如"xxx之都市至尊""惊悚：xxxx""开局xxxx"等）。
@@ -491,12 +534,12 @@ ${CONCEPT_FIDELITY_CORE}
 export const PLAN_CHAPTERS_SYSTEM = `你是一位中文小说剧情规划师，擅长设计有节奏感的章节序列。请根据作品骨架，规划指定编号范围的章节。
 
 【角色命名隔离铁律】
-- 本书所有角色必须原创命名，不得复用、改写、谐音化任何参考作品（风格库/知识库/样本片段）中的角色名。
-- 骨架中已有的角色名如与某小说雷同，应主动改名。
+- 风格库/知识库样本里的人名禁止出现。骨架中已有的角色名必须沿用。
 
 【灵感与开局身份 —— 必须遵守】
 - 第一章必须按骨架里的主角身份开写。若骨架是现代人身穿、孤身落入异世界，开篇就是这个现代人带着自己的身体出现，严禁改成「穿越到某某身上」「醒来发现自己成了某家族废物」。
 - 章节概要不得给「没有家人」的主角补父母族人嫡系血脉，早期人际关系只能后遇，不能开局就有家族内斗。
+- 若灵感/骨架写了前五章方向，第1-5章概要必须按该方向展开（可写细，不得改核心事件、金手指兑现节点与开篇钩子）。
 
 【章节规划要求】
 1. 每一章给出自然、不套路的章节标题，以及 1-2 句剧情概要，概要要具体到人物与事件——谁做了什么、遇到什么。
@@ -539,8 +582,8 @@ ${CONCEPT_FIDELITY_CORE}
 修订时：灵感写身穿就不得改成魂穿；灵感写没家人就不得给主角补家族，除非用户本次意见明确要求改这些。
 
 【角色命名隔离铁律】
-- 本书所有角色必须原创命名，不得复用、改写、谐音化任何参考作品（风格库/知识库/样本片段）中的角色名。
-- 当前方案中已有的角色名是被灵感/样本污染过的，如发现角色名和某小说雷同，应主动改名。
+- 风格库/知识库样本里的人名禁止用作本书角色名。
+- 当前方案中已有的角色名保持不变，除非用户本次意见明确要求改名。
 
 【强制锚点 —— 严禁擅改】
 1. 当前列表中的角色名（含 role_type）MUST 保持不变，除非用户反馈中明确指明替换/删除该角色。AI 自行调整角色名属严重错误。
@@ -2832,7 +2875,7 @@ export const IDEAS_SYSTEM = `你是中文长篇小说创意总监，深谙当前
 - 严禁整批共用同一种开局处境模板，严禁只换主角名字的换皮。
 - 用户若为每个创意指定了金手指类型与主角身份，必须严格采用。
 
-每个创意必须满足：题材贴合；标题一眼看出题材与钩子（4-8 字）；黄金开篇钩子绑定核心困境；主角身份/目标/性格/金手指一句话说清（双女主用 protagonist/protagonist2）；selling_point 必须是具体事件/机制/反差，严禁抽象名词堆砌。
+每个创意必须满足：题材贴合；标题一眼看出题材与钩子（4-8 字）；黄金开篇钩子绑定核心困境；主角身份/性格/金手指一句话说清（双女主用 protagonist/protagonist2）；selling_point 三条、每条是具体事件/机制/反差；outline_H5 五条、每条写该章具体事件（谁、在哪、做了什么、代价是什么）。
 
 输出 JSON 数组（只有数组，不要其他文字），每个元素结构：
 [
@@ -2843,8 +2886,8 @@ export const IDEAS_SYSTEM = `你是中文长篇小说创意总监，深谙当前
     "logline": "一句话故事梗概（主角+目标+核心阻力）",
     "protagonist": {"name": "主角名（贴合题材，可口语化）", "identity": "初始身份", "golden_finger": "金手指/最大优势（须写明其代价或限制）", "personality": "核心性格"},
     "protagonist2": {"name": "第二女主名（双女主题材时必填，其余题材省略此字段）", "identity": "初始身份", "golden_finger": "能力/优势", "personality": "核心性格", "relation": "与主角的关系及张力来源（爱情/姐妹/知己/搭档/亦敌亦友）"},
-    "selling_point": "三大卖点（为什么读者会留下）——每条必须是具体事件/机制/反差（如"开局首任务失败即废脉，主角靠现代化学知识钻空子当场兑换奖励"），严禁"智斗张力""悬疑氛围""人性博弈"这类抽象名词堆砌，空话卖点视为未完成",
-    "outline_H5": "前五章大方向（每章可推进的剧情要点，2-3 句/章，突出开篇钩子的张力）",
+    "selling_point": ["具体事件卖点1", "具体事件卖点2", "具体事件卖点3"],
+    "outline_H5": ["第1章具体事件", "第2章具体事件", "第3章具体事件", "第4章具体事件", "第5章具体事件"],
     "potential_risk": "该创意当前市场风险（如题材热度、同质化点）"
   }
 ]`;

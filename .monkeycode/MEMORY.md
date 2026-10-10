@@ -1145,3 +1145,12 @@ Entries discovered by the Agent during task execution should follow this format:
   - 禁令块会抢注意力：IDEAS_SYSTEM 把穿越器物/死局限时/系统载体细则写进全题材后，都市言情也会先交差合规。穿越/系统细则只留给 transmigrationBlock 与 isSystem 题材贴合块；门禁正则仍拦泄漏。
   - v1.4.76：IDEAS_SYSTEM 压到约 1700 字；砍「违反即废稿/最高优先级」叠床；buildAntiTropeBlock 退出 /ideas 与 /plan 生成路径（函数与测试池保留）。都市+校园+青春+言情静态块约 3161 字。
   - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（151 断言）。纯后端改动打补丁用 `node scripts/build-and-patch.cjs --bump --no-build`。
+
+[Project Knowledge Summary]
+- Date: 2026-10-09
+- Context: Discovered by Agent while fixing idea-card → plan handoff (v1.4.77)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 灵感卡片质量低、选完后大纲也低的根因是交接断链：前端 `createFromIdea` 只把 logline+hook 写入 novels.concept；方案层 `CONCEPT_FIDELITY_CORE` +「未提及严禁添加」把金手指/身份/H5 当禁补项丢掉。
+  - v1.4.77：`formatIdeaAsConcept`（prompts.js 与 web/src/utils/format.js 各一份）把主角身份/金手指/卖点/前五章拼进 concept；`POST /novels` 收 `idea` 对象并落 `protagonist_name`；方案层改为「种子锁定+允许展开」；命名隔离不再把灵感主角名当样本禁掉。改前端必须去掉 `--no-build`。
+  - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（167 断言）。

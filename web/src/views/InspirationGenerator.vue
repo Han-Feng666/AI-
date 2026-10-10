@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import api from '../api';
-import { GENRES, PRESET_STYLES } from '../utils/format';
+import { GENRES, PRESET_STYLES, formatIdeaAsConcept } from '../utils/format';
 
 defineOptions({ name: 'InspirationGenerator' });
 
@@ -124,7 +124,7 @@ function chooseAdjust() {
     genre: it.genre || genres.value[0] || '玄幻',
     logline: it.logline || '',
     hook: it.hook || '',
-    concept: `${it.logline || ''}${it.hook ? `（开篇钩子：${it.hook}）` : ''}`,
+    concept: formatIdeaAsConcept(it),
     protagonistName: it.protagonist?.name || '',
     goldenFinger: it.protagonist?.golden_finger || ''
   };
@@ -137,9 +137,23 @@ async function confirmAdjust() {
   if (adjustSaving.value) return;
   adjustSaving.value = true;
   try {
-    const concept = adjustForm.value.concept.trim() ||
-      `${adjustForm.value.logline || ''}${adjustForm.value.hook ? `（开篇钩子：${adjustForm.value.hook}）` : ''}`;
-    const idea = { title: adjustForm.value.title, genre: adjustForm.value.genre, logline: adjustForm.value.logline, hook: adjustForm.value.hook, protagonist: { name: adjustForm.value.protagonistName, golden_finger: adjustForm.value.goldenFinger } };
+    const orig = selectedIdea.value || {};
+    const idea = {
+      title: adjustForm.value.title,
+      genre: adjustForm.value.genre,
+      logline: adjustForm.value.logline,
+      hook: adjustForm.value.hook,
+      protagonist: {
+        ...(orig.protagonist || {}),
+        name: adjustForm.value.protagonistName,
+        golden_finger: adjustForm.value.goldenFinger
+      },
+      protagonist2: orig.protagonist2 || null,
+      selling_point: orig.selling_point,
+      outline_H5: orig.outline_H5,
+      potential_risk: orig.potential_risk
+    };
+    const concept = adjustForm.value.concept.trim() || formatIdeaAsConcept(idea);
     adjustOpen.value = false;
     await buildNovelFromIdea(idea, concept);
   } catch (e) {
@@ -152,8 +166,7 @@ async function confirmAdjust() {
 async function createFromIdea(id) {
   const it = ideas.value.find((x) => x.id === id);
   if (!it) return;
-  const concept = `${it.logline || ''}${it.hook ? `（开篇钩子：${it.hook}）` : ''}`;
-  await buildNovelFromIdea(it, concept);
+  await buildNovelFromIdea(it, formatIdeaAsConcept(it));
 }
 
 async function buildNovelFromIdea(idea, concept) {
@@ -163,7 +176,9 @@ async function buildNovelFromIdea(idea, concept) {
     const novel = await api.createNovel({
       title: idea.title,
       genre: idea.genre || genres.value[0] || '玄幻',
-      concept,
+      concept: concept || formatIdeaAsConcept(idea),
+      idea,
+      protagonistName: idea.protagonist?.name || '',
       chapterWordCount: 2000,
       targetChapters: 20,
       stylePresets: stylePresets.value,
@@ -284,6 +299,10 @@ onMounted(loadStyleLibrary);
         </div>
         <div class="idea-logline">{{ it.logline }}</div>
         <div class="idea-hook">开篇钩子：{{ it.hook }}</div>
+        <div v-if="it.protagonist && (it.protagonist.identity || it.protagonist.golden_finger)" class="idea-meta">
+          <span v-if="it.protagonist.identity">{{ it.protagonist.identity }}</span>
+          <span v-if="it.protagonist.golden_finger">金手指：{{ it.protagonist.golden_finger }}</span>
+        </div>
         <el-button
           text type="primary" size="small"
           class="idea-toggle"
@@ -517,6 +536,15 @@ onMounted(loadStyleLibrary);
   font-size: 13px;
   color: #6b7280;
   line-height: 1.6;
+  margin-bottom: 6px;
+}
+.idea-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: 12.5px;
+  color: #4b5563;
+  line-height: 1.5;
   margin-bottom: 6px;
 }
 .idea-toggle {

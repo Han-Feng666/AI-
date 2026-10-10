@@ -36,7 +36,7 @@ import {
 } from './model_router.js';
 import {
   NOVEL_PLAN_SYSTEM, PLAN_SKELETON_SYSTEM, PLAN_CHAPTERS_SYSTEM, PLAN_REVISE_SYSTEM,
-  buildConceptFidelityRule, detectConceptViolations, analyzeConceptConstraints,
+  buildConceptFidelityRule, detectConceptViolations, analyzeConceptConstraints, formatIdeaAsConcept,
   CONCEPT_FAMILY_CHECK_SYSTEM, ADVANCE_CHECK_SYSTEM, CHARACTER_STATE_SYSTEM, OPENING_JUDGE_SYSTEM, KIN_RE, detectKinMentions,
   PLAN_COHERENCE_CHECK_SYSTEM,
   CHAPTER_SYSTEM, CHAPTER_TITLE_SYSTEM,
@@ -1758,9 +1758,13 @@ router.post('/novels', async (req, res) => {
     ? JSON.stringify(skillIds.map(Number).filter(Boolean))
     : '[]';
   const memeElements = String((req.body || {}).memeElements || '').trim();
+  const ideaObj = (req.body || {}).idea;
+  const conceptFromIdea = ideaObj && typeof ideaObj === 'object' ? formatIdeaAsConcept(ideaObj) : '';
+  const conceptText = String(concept || conceptFromIdea || '').trim();
+  const protagonistName = String((req.body || {}).protagonistName || (req.body || {}).protagonist_name || ideaObj?.protagonist?.name || '').trim();
   const info = db.prepare(
-    'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, style_ids, knowledge_corpus_ids, skill_ids, meme_elements) VALUES (?,?,?,?,?,?,?,?,?,?)'
-  ).run(title, genreStr, concept, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr, skillIdsStr, memeElements);
+    'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, style_ids, knowledge_corpus_ids, skill_ids, meme_elements, protagonist_name) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
+  ).run(title, genreStr, conceptText, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr, skillIdsStr, memeElements, protagonistName);
   const novel = getNovel(info.lastInsertRowid);
   // 创建独立作品文件夹（以小说名命名）
   try {
@@ -2927,8 +2931,8 @@ ${existingBlock ? `\n${existingBlock}\n` : ''}
 【题材边界强调】所选类型为：${genre || novel.genre || '未指定'}。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等超凡标签，则本书为现实向，力量体系只能是武功谋略，严禁把"学习/修炼"写成玄幻修仙境界（灵气、金丹、元婴、御剑等等一概禁止），严禁掺入血脉觉醒、灵根、传承记忆等玄幻绑定型设定；意外死亡穿越也不是获得超凡能力的理由。${/系统|金手指|数据流/.test(genre || novel.genre || '') ? '用户已勾选系统题材：系统/面板/任务等金手指机制按所选设定展开（纯系统载体，严禁掺血脉/灵根/法宝等玄幻元素）。' : /穿越|重生/.test(genre || novel.genre || '') ? '用户勾选了穿越/重生但未勾选系统与玄幻题材：主角的全部优势必须落在现代人知识/技能/记忆/信息差上，且知识边界要写实（懂什么、不懂什么、为什么懂）。穿越主角开局必须举目无亲：没有亲人朋友家人、没有任何恩情仇恨等既有关系，穿越是身穿而非魂穿/夺舍/附身（孤家寡人是穿越文硬底线，违反即废稿）。严禁出现神秘人物/神秘老人/残魂/器物有灵/神秘力量交换等超自然载体——"神秘老商人帮主角、每帮一次老去一岁"这类设定就是超自然载体，属于废稿。' : ''}
  ${buildPlanGenreConformity(genre || novel.genre || '')}
  
- 【严禁止凭空编造——灵感唯一性铁律】
-  用户灵感是本作唯一真相来源。灵感中未提及的情节（如被家族打死、被嘲讽退婚、获得系统等），严禁在方案中自行添加。主角开局处境必须严格按灵感描述，不得额外添加恩怨/家族/机缘设定。
+ 【灵感种子锁定】
+   用户灵感是本作锁定种子。灵感已写明的主角身份、金手指、开篇钩子、卖点、前五章方向必须原样进入方案（world_view / outline / 主角设定 / 开篇处境）。方案负责把种子展开成全书分卷、配角、势力与暗线；严禁另换金手指、另换开局身份、另换主冲突。灵感写了「没有/不要」的内容保持没有。灵感未写的后遇配角与中后期卷可以补，但不得覆盖种子。
 
   【方案看点铁律】每一卷/每一段主线的推进必须绑定具体利害冲撞（人命、倾家荡产、权力翻转、恩义撕裂、情感对撞），严禁把方案写成行业流程与日常公务的流水账（查账/验粮/押运/筑堤这类公事只能当背景引信，炸点必须是具体的利害冲突）；系统惩罚规则严禁成为章节推进的主驱动力——主角的欲望与对手的冲撞才是。
  请输出创作方案骨架 JSON。`;
@@ -3176,7 +3180,7 @@ ${parts.join('\n\n')}
       const allIssues = [...violations, ...coherenceIssues];
       if (allIssues.length) {
         send({ type: `status`, message: `骨架问题：${allIssues.join('；')}，正在按灵感重生成…` });
-        const retryPrompt = userPrompt + `\n\n【强制修正】上一次骨架存在以下问题：${allIssues.join('；')}。请严格按灵感重写方案，灵感中写明的设定（物件/能力/职业/组织/人物处境）必须原样保留，灵感未提及的情节严禁添加。角色设定与剧情行为必须自洽：角色的学识/技能/职业背景与其展现的能力必须匹配，穿越者的知识边界要写实（懂什么、不懂什么、为什么懂）。`;
+        const retryPrompt = userPrompt + `\n\n【强制修正】上一次骨架存在以下问题：${allIssues.join('；')}。请严格按灵感重写方案，灵感中写明的主角身份、金手指、开篇钩子、卖点、前五章方向必须原样保留。方案负责把种子展开成全书，不得另换金手指或开局身份。角色设定与剧情行为必须自洽：角色的学识/技能/职业背景与其展现的能力必须匹配，穿越者的知识边界要写实（懂什么、不懂什么、为什么懂）。`;
         const retry = await jsonFrom(
           [
             { role: 'system', content: trimmedSys },

@@ -253,6 +253,44 @@ export const LENGTH_CLASSES = [
   }
 ];
 
+export function formatIdeaAsConcept(idea = {}) {
+  const it = idea && typeof idea === 'object' ? idea : {};
+  const p = it.protagonist && typeof it.protagonist === 'object' ? it.protagonist : {};
+  const p2 = it.protagonist2 && typeof it.protagonist2 === 'object' ? it.protagonist2 : {};
+  const listOf = (v) => (Array.isArray(v)
+    ? v.map((s) => String(s || '').trim()).filter(Boolean)
+    : String(v || '').trim() ? [String(v).trim()] : []);
+  const sps = listOf(it.selling_point);
+  const h5 = listOf(it.outline_H5);
+  const lines = [];
+  const title = String(it.title || '').trim();
+  const genre = String(it.genre || '').trim();
+  const logline = String(it.logline || '').trim();
+  const hook = String(it.hook || '').trim();
+  if (title) lines.push(`书名倾向：${title}`);
+  if (genre) lines.push(`题材：${genre}`);
+  if (logline) lines.push(`一句话梗概：${logline}`);
+  if (hook) lines.push(`开篇钩子：${hook}`);
+  const pBits = [
+    p.name && `名${String(p.name).trim()}`,
+    p.identity && `身份：${String(p.identity).trim()}`,
+    p.personality && `性格：${String(p.personality).trim()}`,
+    p.golden_finger && `金手指：${String(p.golden_finger).trim()}`
+  ].filter(Boolean);
+  if (pBits.length) lines.push(`主角：${pBits.join('；')}`);
+  const p2Bits = [
+    p2.name && `名${String(p2.name).trim()}`,
+    p2.identity && `身份：${String(p2.identity).trim()}`,
+    p2.personality && `性格：${String(p2.personality).trim()}`,
+    p2.golden_finger && `能力：${String(p2.golden_finger).trim()}`,
+    p2.relation && `与主角：${String(p2.relation).trim()}`
+  ].filter(Boolean);
+  if (p2Bits.length) lines.push(`第二主角：${p2Bits.join('；')}`);
+  if (sps.length) lines.push(`核心卖点：${sps.map((s, i) => `${i + 1}.${s}`).join(' ')}`);
+  if (h5.length) lines.push(`前五章方向：${h5.map((s, i) => `第${i + 1}章 ${s}`).join('；')}`);
+  return lines.join('\n');
+}
+
 export function splitGenres(genre) {
   return String(genre || '')
     .split(',')
