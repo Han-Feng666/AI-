@@ -56,6 +56,7 @@ import {
 getGenreGuide, getGenreGuides, buildPlanGenreConformity,
   detectIdeaCarrierDrift, hasTrueFantasyTag, buildIdeasEngineBlock,
   IDEAS_SUPERPOWER_RE, IDEAS_SYSTEM_LEAK_RE, IDEAS_TRANS_LEAK_RE,
+  XUAN_MODERN_LEAK_RE, XUAN_NON_CULTIVATION_RE,
   IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS,
   bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock,
   buildHorrorEraBlock, HORROR_ANCIENT_ERA_RE, HORROR_BODY_COUNTER_RE,
@@ -1994,6 +1995,17 @@ ${blocks.join('\n\n')}`;
   // "亡故长辈留遗物/遗言 → 低阶少年凭能力收集/交付"同一种开局骨架。
   // 前几轴管的是"用什么能力、什么身份、什么冲突"，管不到"为什么故事从这一刻开始"。
   // 把开场驱动按创意强制分散，「遗志继承」默认不派发（除非创意数超池子），从源头掐掉趋同。
+  // 玄幻/真超凡题材用修炼世界内味的驱动池（v1.4.83：通用措辞"契约交易/立足求生"曾被
+  // 弱模型带出现代契约剧味，跑题轴的措辞必须落在题材世界观内）
+  const OPENING_DRIVES_FANTASY = [
+    '当场利害：开局撞进一场正在进行的修炼界冲突（灵脉被夺/丹炉被砸/被追杀夺宝/替人顶罪），主角当场出手',
+    '意外卷入：开局捡到或撞见一件烫手的灵物或一桩修真界的秘密，被动卷入宗门纷争',
+    '野心求取：主角主动去争一个修炼资源/名额/排名（灵脉/丹药/入宗资格/大比名次），开局即出手',
+    '关系守护：开局为护住一个活着的同门/亲人/一面之缘者，当众硬撼强者',
+    '契约交易：开局与修士/宗门立下一桩当场兑现的交易或赌约（以灵物/功法/护山为注）',
+    '错位误会：开局被误认成某人（同貌/同名/顶替）、被扣上不属于自己的罪名或身份',
+    '立足求生：开局困在修炼界最底层（灵根残缺/被逐出宗门/丹毒缠身/灵田欠债），为求一条修行路干一件冒险的事'
+  ];
   const OPENING_DRIVES = [
     '当场利害：开局就撞进一场正在进行、必须立刻应对的冲突（被追杀/被逼债/顶罪/夺宝），主角当场出手',
     '意外卷入：开局捡到或撞见一件烫手之物或一桩秘密，被动卷入纷争',
@@ -2003,7 +2015,8 @@ ${blocks.join('\n\n')}`;
     '错位误会：开局被误认成某人、被扣上不属于自己的事或身份',
     '立足求生：开局困在最底层处境（欠债/被逐/断粮/重伤），为活下去干一件冒险的事'
   ];
-  const driveSlots = shuffle(OPENING_DRIVES).slice(0, ideaCount);
+  const drivePool = hasTrueFantasyTag(genreList.join(' ')) ? OPENING_DRIVES_FANTASY : OPENING_DRIVES;
+  const driveSlots = shuffle(drivePool).slice(0, ideaCount);
   const axisBlock = gfSlots.map((gf, i) => {
     const conflictNote = conflictSlots[i] ? `，核心冲突机制必须围绕「${conflictSlots[i]}」展开（金手指是破局工具，不是冲突本身）` : '';
     const driveNote = driveSlots[i] ? `，开场驱动形态必须是「${driveSlots[i]}」` : '';
@@ -2175,6 +2188,7 @@ ${axisBlock}
         genre: String(it.genre || ''),
         hook: String(it.hook || ''),
         logline: String(it.logline || ''),
+        story_engine: (it.story_engine && typeof it.story_engine === 'object') ? it.story_engine : null,
         protagonist: it.protagonist || {},
         protagonist2: it.protagonist2 || null,
         selling_point: Array.isArray(it.selling_point) ? it.selling_point : [String(it.selling_point || '')],
@@ -2332,6 +2346,24 @@ ${axisBlock}
           const tpl = String(text).match(XUAN_TEMPLATE_RE);
           if (tpl) {
             send({ type: 'status', message: `已剔除模板开局的创意「${it.title}」（撞上「${tpl[0]}」这类十年前的套路），玄幻开篇必须靠金手指规则主动破局` });
+            return false;
+          }
+          // 现代词/武侠词泄漏门禁（v1.4.83）：CANON_RE 只要一个修炼词就放行，
+          // 「开着货车送货，梦里修炼过一次」这类现代混血样本能骗过门。
+          // story_engine 的对抗轴/升阶也一起扫——对抗轴写"公司董事会"照样跑题
+          const fullBlob = [
+            text,
+            it.story_engine?.central_question, it.story_engine?.antagonist,
+            it.story_engine?.escalation, it.story_engine?.inner_need
+          ].filter(Boolean).join('\n');
+          const modernHit = String(fullBlob).match(XUAN_MODERN_LEAK_RE);
+          if (modernHit) {
+            send({ type: 'status', message: `已剔除混入现代场景的创意「${it.title}」（出现「${modernHit[0]}」——只勾玄幻时世界观必须是修炼世界），可点击重新生成补齐` });
+            return false;
+          }
+          const wuxiaHit = String(fullBlob).match(XUAN_NON_CULTIVATION_RE);
+          if (wuxiaHit) {
+            send({ type: 'status', message: `已剔除写成武侠江湖的创意「${it.title}」（出现「${wuxiaHit[0]}」——玄幻是修仙世界，不是无灵气的武林），可点击重新生成补齐` });
             return false;
           }
           return true;
@@ -2501,25 +2533,44 @@ ${axisBlock}
       return gateIdeas(roundIdeas);
     };
 
+    // 故事引擎补全（v1.4.83）：种子若只有"差事"（收集/交付/查案），缺中心问题、持续对抗的
+    // 对手与主角内在弧光，下游方案层受"不得另换主冲突"约束也长不出小说。不硬剔除
+    // （弱模型可能整批产不出→全灭），而是带反馈补一轮；补回引擎更全的批次才采用
+    const SE_FIELDS = ['central_question', 'antagonist', 'escalation', 'inner_need'];
+    const storyEngineOk = (it) => {
+      const se = it?.story_engine;
+      if (!se || typeof se !== 'object') return false;
+      return SE_FIELDS.every((k) => String(se[k] || '').trim().length >= 8);
+    };
+    const engineGap = (list) => list.filter((it) => !storyEngineOk(it)).length;
+    const ensureStoryEngine = async (list) => {
+      if (!list.length || engineGap(list) === 0) return list;
+      send({ type: 'status', message: `本批有 ${engineGap(list)} 个创意缺少故事引擎（中心问题/对抗轴/赌注升阶/内在需求），正在自动补全…` });
+      const rescued = await rescueRound('上一轮创意缺少 story_engine 或写得不完整。请重新输出整批创意，为每个创意补全 story_engine 硬字段：central_question（全书要回答的"主角能否……"）、antagonist（具体的人或组织 + 其自身目标 + 为何无法被快速解决）、escalation（赌注如何从个人/局部升到势力/天下）、inner_need（主角内在缺失/执念与全书要完成的变化）。只是收集/交付/查案的任务式前提，必须补上持续对抗的对手与主角内在弧光。');
+      if (rescued && rescued.ideas.length && engineGap(rescued.ideas) < engineGap(list)) return rescued.ideas;
+      return list;
+    };
+
     if (Array.isArray(ideas)) {
       const gated = gateIdeas(ideas);
       // 全部被门禁剔除时：先带反馈自动补一轮，仍全灭才短路报错。短路语义保留（实锤
       // v1.4.56）：修复路径会把刚被剔除的违规创意原样解析回来，门禁形同虚设
       if (gated.hadCandidates && gated.ideas.length === 0) {
         const rescued = await rescueRound('上一轮全部创意偏离所选题材或金手指载体跑偏，被题材门禁整批剔除。本轮必须严格贴合所选题材的核心设定与世界观生态，金手指按题材规则写。');
-        if (rescued && rescued.ideas.length) return end({ type: 'done', data: { ideas: rescued.ideas } });
+        if (rescued && rescued.ideas.length) return end({ type: 'done', data: { ideas: await ensureStoryEngine(rescued.ideas) } });
         return end({ type: 'error', message: GATE_BLOCKED_MSG });
       }
       if (gated.ideas.length) {
-        const uncovered = checkCoverage(gated.ideas);
-        if (!uncovered.length) return end({ type: 'done', data: { ideas: gated.ideas } });
+        const finalIdeas = await ensureStoryEngine(gated.ideas);
+        const uncovered = checkCoverage(finalIdeas);
+        if (!uncovered.length) return end({ type: 'done', data: { ideas: finalIdeas } });
         // 覆盖缺口：带反馈补一轮，新批次覆盖更全才采用；仍未补齐则原样返回并提示
         const rescued = await rescueRound(`上一轮创意未覆盖勾选题材：${uncovered.join('、')}。本轮每个勾选题材至少出一个创意，内容必须贴合该题材的核心设定与生态，题材字段直接标注对应题材。`);
         if (rescued && rescued.ideas.length && checkCoverage(rescued.ideas).length < uncovered.length) {
           return end({ type: 'done', data: { ideas: rescued.ideas } });
         }
         send({ type: 'status', message: `提示：本次创意未覆盖勾选题材「${uncovered.join('、')}」，可点击重新生成补齐` });
-        return end({ type: 'done', data: { ideas: gated.ideas } });
+        return end({ type: 'done', data: { ideas: finalIdeas } });
       }
       // hadCandidates=false 且无产出：全是残缺半成品，落入下方修复路径
     }
