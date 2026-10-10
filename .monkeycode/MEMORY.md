@@ -1184,3 +1184,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - v1.4.80：buildYouthEngineBlock（身份锁学生/刚毕业年轻人、恋爱双方必须同龄、长线发动机五选一、反模板、青春质感）；身份双闸 YOUTH_ADULT_RE（黑名单：主编/经理/老师/班主任/校长/家长等）+ YOUTH_OK_RE 白名单（含都市青年池：主理人/摆摊/裸辞/副业/合租，防误伤）；YOUTH_CREEP_RE 拦成年人情感线（间隔类必须允许逗号——「报社主编，他的工作是……写情书」跨逗号命中）。
   - 门禁位置：gateIdeas 内玄幻门禁之后、灵异时代锁之前；正则与引擎块都放 prompts.js 导出（与 IDEAS_*_RE 同模式），routes.js 只导入使用。
   - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（224 断言）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-10
+- Context: Discovered by Agent while进一步去跑题/去雷同、拉高灵感质量 (v1.4.81)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 跑题两类根因：①题材覆盖靠 genre 字段合规，不保证正文有该题材核心内容（贴错标签式跑题：科幻标签写都市恋爱）；②雷同根因是固定 GF_POOL×ID_POOL 槽位，同题材用户跨批次必撞。
+  - v1.4.81 三件套：①GENRE_CONTENT_TAGS 正向题材内容门禁（prompts.js 导出；genreRe 认领家族+contentRe 校验正文+notGenreRe 真超凡豁免），挂在 gateIdeas 的 genreAllowed 之后；②第三差异化轴 conflictSlots（通用/言情关系型两池，shuffle 后按 creative 注入「核心冲突机制必须围绕…展开」）；③句式反同构（IDEAS_SYSTEM 差异化加禁令 + 标杆块加「严禁套用范例句式模板」）。
+  - 跨批次去重 excludeBlock 增强：字段加 hook、上限 12→20。
+  - 门禁正则禁带 g 标志；IDEAS_SYSTEM 须 <2400 字（加句式禁令后仍达标）。
+  - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（236 断言）+ node --test server/test/scan_ai_patterns.test.js（13）。
