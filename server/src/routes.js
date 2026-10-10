@@ -1990,13 +1990,28 @@ ${blocks.join('\n\n')}`;
   const CONFLICT_RELATIONAL = ['暗恋被当众拆穿', '重逢却认不出彼此', '身份或处境的悬殊隐瞒', '错过的时机制造遗憾', '双向心动但时机总错开', '旧情与现任的拉扯', '一场关于关系的公开对决', '替对方背下黑锅', '误会到和解的关口', '距离或异地的抉择'];
   const conflictPool = isRomance ? CONFLICT_RELATIONAL : CONFLICT_GENERAL;
   const conflictSlots = shuffle(conflictPool).slice(0, ideaCount);
+  // 第四差异化轴：开场驱动形态（v1.4.82）。实锤——只勾玄幻时，整批都是
+  // "亡故长辈留遗物/遗言 → 低阶少年凭能力收集/交付"同一种开局骨架。
+  // 前几轴管的是"用什么能力、什么身份、什么冲突"，管不到"为什么故事从这一刻开始"。
+  // 把开场驱动按创意强制分散，「遗志继承」默认不派发（除非创意数超池子），从源头掐掉趋同。
+  const OPENING_DRIVES = [
+    '当场利害：开局就撞进一场正在进行、必须立刻应对的冲突（被追杀/被逼债/顶罪/夺宝），主角当场出手',
+    '意外卷入：开局捡到或撞见一件烫手之物或一桩秘密，被动卷入纷争',
+    '野心求取：主角主动去争一个名额/名次/宝物/资格，开局即出手',
+    '关系守护：开局为护住某个活着的人（同伴/亲人/一面之缘者）而当众行动',
+    '契约交易：开局与人立下一个当场就要兑现的交易或赌约',
+    '错位误会：开局被误认成某人、被扣上不属于自己的事或身份',
+    '立足求生：开局困在最底层处境（欠债/被逐/断粮/重伤），为活下去干一件冒险的事'
+  ];
+  const driveSlots = shuffle(OPENING_DRIVES).slice(0, ideaCount);
   const axisBlock = gfSlots.map((gf, i) => {
     const conflictNote = conflictSlots[i] ? `，核心冲突机制必须围绕「${conflictSlots[i]}」展开（金手指是破局工具，不是冲突本身）` : '';
+    const driveNote = driveSlots[i] ? `，开场驱动形态必须是「${driveSlots[i]}」` : '';
     if (needsFreeIdentity) {
-      return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}${conflictNote}，主角开局举目无亲、无人可靠（身穿异世，无原主遗留身份），开局身份不预设——身份与地位因契机或随故事发展获得（具体怎么起家由你自由构思，严禁开局处于给人打工受人使唤的状态，严禁把现代职业直译成古代同类营生——商人管军饷国库、刑警翻案、厨师开酒楼这种一一对应缺乏错位趣味，一律废稿）`;
+      return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}${conflictNote}${driveNote}，主角开局举目无亲、无人可靠（身穿异世，无原主遗留身份），开局身份不预设——身份与地位因契机或随故事发展获得（具体怎么起家由你自由构思，严禁开局处于给人打工受人使唤的状态，严禁把现代职业直译成古代同类营生——商人管军饷国库、刑警翻案、厨师开酒楼这种一一对应缺乏错位趣味，一律废稿）`;
     }
-    return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}，主角初始身份必须是「${idSlots[i]}」${conflictNote}`;
-  }).join('\n');
+    return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}，主角初始身份必须是「${idSlots[i]}」${conflictNote}${driveNote}`;
+  }).join('\n') + '\n（每条创意的开场事件必须严格按上面分配的开场驱动来写；严禁把"亡故长辈留下遗物/遗言/托付"当作默认开场——未分配到该驱动的创意不得用亡故托付开局。）';
 
   // 男频/女频：目标读者频道，影响主角性别、爽点结构与情感线比重
   const channel = String((req.body || {}).channel || '').trim();
@@ -2197,6 +2212,21 @@ ${axisBlock}
           ].filter(Boolean).join('\n');
           if (tag.contentRe.test(text)) return true;
           send({ type: 'status', message: `已剔除贴错题材标签的创意「${it.title}」（标了「${tag.label}」但正文没有该题材的核心内容），可点击重新生成补齐` });
+          return false;
+        });
+      }
+
+      // 开场驱动收敛闸（v1.4.82）：整批都开在"亡故长辈留遗物/遗言→少年凭能力收集/交付"
+      // 这一种骨架上（用户实报）。同一批里"遗志继承"式开场最多保留一个，其余剔除重生
+      if (list.length > 1) {
+        const LEGACY_OPEN_RE = /临终|咽气|遗言|遗物|遗志|亡父|亡母|亡故|灭门.{0,4}(遗孤|孤儿)|师父[^。！？\n]{0,6}(给|塞|留|托|塞进)/;
+        let seenLegacy = 0;
+        list = list.filter((it) => {
+          const text = [it.hook, it.logline].filter(Boolean).join('\n');
+          if (!LEGACY_OPEN_RE.test(text)) return true;
+          seenLegacy += 1;
+          if (seenLegacy === 1) return true;
+          send({ type: 'status', message: `已剔除开场驱动重复的创意「${it.title}」（整批都是"亡故长辈托付"式开局），可点击重新生成补齐` });
           return false;
         });
       }
