@@ -1154,3 +1154,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - 灵感卡片质量低、选完后大纲也低的根因是交接断链：前端 `createFromIdea` 只把 logline+hook 写入 novels.concept；方案层 `CONCEPT_FIDELITY_CORE` +「未提及严禁添加」把金手指/身份/H5 当禁补项丢掉。
   - v1.4.77：`formatIdeaAsConcept`（prompts.js 与 web/src/utils/format.js 各一份）把主角身份/金手指/卖点/前五章拼进 concept；`POST /novels` 收 `idea` 对象并落 `protagonist_name`；方案层改为「种子锁定+允许展开」；命名隔离不再把灵感主角名当样本禁掉。改前端必须去掉 `--no-build`。
   - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（167 断言）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-10
+- Context: Discovered by Agent while fixing plan quality complaints: genre mismatch / no selling points / duplicate regenerations (v1.4.78)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 方案与勾选题材不符的根因：`buildNovelFromIdea` 只传卡片单一题材，勾选全集在建书时丢失。v1.4.78：前端传 `checkedGenres`，`POST /novels` 落 `novels.checked_genres`（ensureColumn），方案 prompt 注入【勾选题材全集】块（主题材定基调，其余以副线/舞台/关系线融入）。
+  - 方案重复生成雷同的根因：方案层 LLM 调用没传 temperature，被 llm.js `wantsJson` 默认 0.4 锁死（近乎确定性输出）。v1.4.78：`planTemp = Number(config.temperature) || 0.7` 传入 streamCollect 两路 + jsonFrom 两路降级重试。
+  - 方案没看点的机器校验盲区：`detectSeedLoss` 只认引号短语/能力句，解析不到 `formatIdeaAsConcept` 的结构化行。v1.4.78：解析「核心卖点：1.」与「前五章方向：第N章」条目，全组零命中即报 violation 进重试；PLAN_SKELETON_SYSTEM 加「核心卖点逐条落位」铁律。
+  - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（183 断言）+ server/test/scan_ai_patterns.test.js（13）。
