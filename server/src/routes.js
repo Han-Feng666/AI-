@@ -1758,13 +1758,17 @@ router.post('/novels', async (req, res) => {
     ? JSON.stringify(skillIds.map(Number).filter(Boolean))
     : '[]';
   const memeElements = String((req.body || {}).memeElements || '').trim();
+  // 勾选题材全集：灵感生成器勾选的全部题材随建书落库，方案生成时用于题材边界校验
+  const checkedGenres = Array.isArray((req.body || {}).checkedGenres)
+    ? (req.body || {}).checkedGenres.map((s) => String(s).trim()).filter(Boolean).join(',')
+    : String((req.body || {}).checkedGenres || '').trim();
   const ideaObj = (req.body || {}).idea;
   const conceptFromIdea = ideaObj && typeof ideaObj === 'object' ? formatIdeaAsConcept(ideaObj) : '';
   const conceptText = String(concept || conceptFromIdea || '').trim();
   const protagonistName = String((req.body || {}).protagonistName || (req.body || {}).protagonist_name || ideaObj?.protagonist?.name || '').trim();
   const info = db.prepare(
-    'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, style_ids, knowledge_corpus_ids, skill_ids, meme_elements, protagonist_name) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
-  ).run(title, genreStr, conceptText, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr, skillIdsStr, memeElements, protagonistName);
+    'INSERT INTO novels (title, genre, concept, chapter_word_count, target_chapters, style_presets, style_ids, knowledge_corpus_ids, skill_ids, meme_elements, protagonist_name, checked_genres) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
+  ).run(title, genreStr, conceptText, chapterWordCount, targetChapters, stylePresetsStr, styleIdsStr, knowledgeIdsStr, skillIdsStr, memeElements, protagonistName, checkedGenres);
   const novel = getNovel(info.lastInsertRowid);
   // 创建独立作品文件夹（以小说名命名）
   try {
@@ -2916,6 +2920,13 @@ router.post('/novels/:id/plan', async (req, res) => {
 
 const conceptText = concept || novel.concept || '';
 const conceptRule = buildConceptFidelityRule(conceptText);
+// 勾选题材全集（灵感生成器勾选的全部题材）：主题材决定基调，其余勾选题材必须以副线/舞台/关系线融入
+const mainGenre = String(genre || novel.genre || '').trim();
+const checkedList = String(novel.checked_genres || '').split(',').map((s) => s.trim()).filter(Boolean);
+const extraChecked = mainGenre ? checkedList.filter((g) => !mainGenre.includes(g)) : checkedList;
+const checkedGenresBlock = extraChecked.length
+  ? `\n【勾选题材全集】用户为本书勾选的题材：${checkedList.join('、')}。本书主题材为：${mainGenre}。主题材决定全书基调与主线，其余勾选题材必须以副线、舞台或关系线的形式自然融入方案（在 world_view/outline/人物中可见），严禁只写主题材而丢掉其余勾选题材，也严禁引入勾选范围之外的题材元素。`
+  : '';
 const userPrompt = `${conceptRule}
 ${existingBlock ? `\n${existingBlock}\n` : ''}
 【方案参数】
@@ -2929,9 +2940,10 @@ ${existingBlock ? `\n${existingBlock}\n` : ''}
   ${novel.meme_elements ? `\n【网络梗/元素要求】本书需要融入以下网络梗或趣味元素：${novel.meme_elements}。请在剧情、对话或角色设定中自然融入这些元素，让小说更具网感和趣味性。梗的使用要自然不生硬，可以化用、变体，不要生搬硬套。` : ''}
 
 【题材边界强调】所选类型为：${genre || novel.genre || '未指定'}。若其中不含玄幻/仙侠/修真/修仙/灵异/异能/科幻/西幻等超凡标签，则本书为现实向，力量体系只能是武功谋略，严禁把"学习/修炼"写成玄幻修仙境界（灵气、金丹、元婴、御剑等等一概禁止），严禁掺入血脉觉醒、灵根、传承记忆等玄幻绑定型设定；意外死亡穿越也不是获得超凡能力的理由。${/系统|金手指|数据流/.test(genre || novel.genre || '') ? '用户已勾选系统题材：系统/面板/任务等金手指机制按所选设定展开（纯系统载体，严禁掺血脉/灵根/法宝等玄幻元素）。' : /穿越|重生/.test(genre || novel.genre || '') ? '用户勾选了穿越/重生但未勾选系统与玄幻题材：主角的全部优势必须落在现代人知识/技能/记忆/信息差上，且知识边界要写实（懂什么、不懂什么、为什么懂）。穿越主角开局必须举目无亲：没有亲人朋友家人、没有任何恩情仇恨等既有关系，穿越是身穿而非魂穿/夺舍/附身（孤家寡人是穿越文硬底线，违反即废稿）。严禁出现神秘人物/神秘老人/残魂/器物有灵/神秘力量交换等超自然载体——"神秘老商人帮主角、每帮一次老去一岁"这类设定就是超自然载体，属于废稿。' : ''}
- ${buildPlanGenreConformity(genre || novel.genre || '')}
- 
- 【灵感种子锁定】
+  ${buildPlanGenreConformity(genre || novel.genre || '')}
+  ${checkedGenresBlock}
+  
+  【灵感种子锁定】
    用户灵感是本作锁定种子。灵感已写明的主角身份、金手指、开篇钩子、卖点、前五章方向必须原样进入方案（world_view / outline / 主角设定 / 开篇处境）。方案负责把种子展开成全书分卷、配角、势力与暗线；严禁另换金手指、另换开局身份、另换主冲突。灵感写了「没有/不要」的内容保持没有。灵感未写的后遇配角与中后期卷可以补，但不得覆盖种子。
 
   【方案看点铁律】每一卷/每一段主线的推进必须绑定具体利害冲撞（人命、倾家荡产、权力翻转、恩义撕裂、情感对撞），严禁把方案写成行业流程与日常公务的流水账（查账/验粮/押运/筑堤这类公事只能当背景引信，炸点必须是具体的利害冲突）；系统惩罚规则严禁成为章节推进的主驱动力——主角的欲望与对手的冲撞才是。
@@ -2957,12 +2969,15 @@ ${existingBlock ? `\n${existingBlock}\n` : ''}
   // 单批次 idle 超时：3 分钟无数据则判定超时
   // 记录最近一次流式调用的 finish_reason：length=输出被截断（换截断专用提示词与话术，与格式错误分流）
   let lastFinishReason = '';
+  // 方案生成的温度：读用户配置（用户通常已开高），未配置时给 0.7 兜底。
+  // 此前未传 temperature，被 llm.js 的 wantsJson 默认 0.4 锁死——几乎确定性输出，是"重复生成方案雷同"的直接根因
+  const planTemp = Number(config.temperature) || 0.7;
   const streamCollect = async (messages, label, mt = maxOut) => {
     let full = '';
     send({ type: 'status', message: label });
     lastFinishReason = '';
     if (config?.forceNonStreaming) {
-      const r = await chat({ config, messages, maxTokens: mt, timeout: 300000, wantsJson: true });
+      const r = await chat({ config, messages, maxTokens: mt, timeout: 300000, wantsJson: true, temperature: planTemp });
       full = r?.content || '';
       lastFinishReason = r?.finishReason || '';
     } else {
@@ -2971,6 +2986,7 @@ ${existingBlock ? `\n${existingBlock}\n` : ''}
         task: 'planning',
         maxTokens: mt,
         wantsJson: true,
+        temperature: planTemp,
         onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
       });
       lastFinishReason = r?.finishReason || '';
@@ -3012,7 +3028,7 @@ ${existingBlock ? `\n${existingBlock}\n` : ''}
           if (!ctrl.signal.aborted) {
             send({ type: 'status', message: `流式响应超时，正在用非流式重试（第 ${attempt} 次）…` });
             try {
-              const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 150000, wantsJson: true });
+              const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 150000, wantsJson: true, temperature: planTemp });
               lastText = retry?.content || '';
             } catch (e2) {
               if (e2.name === 'AbortError' && !ctrl.signal.aborted) {
@@ -3038,7 +3054,7 @@ ${existingBlock ? `\n${existingBlock}\n` : ''}
         } else {
           send({ type: 'status', message: `流式请求失败，正在用非流式重试（第 ${attempt} 次）…` });
           try {
-            const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 150000, wantsJson: true });
+            const retry = await chat({ config, messages: useMessages, maxTokens: mt, timeout: 150000, wantsJson: true, temperature: planTemp });
             lastText = retry?.content || '';
           } catch (e2) {
             if (e2.name === 'AbortError' && !ctrl.signal.aborted) {

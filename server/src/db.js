@@ -578,6 +578,7 @@ ensureColumn('novels', 'expanded_world', "expanded_world TEXT DEFAULT ''");
 ensureColumn('novels', 'protagonist_name', "protagonist_name TEXT DEFAULT ''");
 ensureColumn('novels', 'heroine_name', "heroine_name TEXT DEFAULT ''");
 ensureColumn('novels', 'meme_elements', "meme_elements TEXT DEFAULT ''");
+ensureColumn('novels', 'checked_genres', "checked_genres TEXT DEFAULT ''");
 
 // ===== 整本改编（TXT 导入底稿 + 逐章候选） =====
 db.exec(`

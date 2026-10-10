@@ -372,9 +372,29 @@ export function detectSeedLoss(concept, plan) {
   const abilities = [];
   for (const m of t.matchAll(/(?:能|会|可以|拥有)[^，。！？\n"'」』]{3,18}/g)) abilities.push(m[0].trim());
 
+  // 结构化简报（formatIdeaAsConcept）解析：核心卖点 / 前五章方向。
+  // 旧逻辑只认引号短语与能力句，结构化行里的卖点/H5 完全解析不到——
+  // 卖点被模型丢光也不会触发重试，正是"方案没有看点"的机器校验盲区
+  const structured = [];
+  const spMatch = t.match(/核心卖点：([^\n]+)/);
+  if (spMatch) {
+    const sps = spMatch[1].split(/(?=\d+\.)/)
+      .map((s) => s.replace(/^\d+\./, '').trim())
+      .filter((s) => s.length >= 4);
+    if (sps.length) structured.push({ label: '灵感列出的核心卖点', keys: sps.slice(0, 3) });
+  }
+  const h5Match = t.match(/前五章方向：([^\n]+)/);
+  if (h5Match) {
+    const beats = h5Match[1].split(/[；;]/)
+      .map((s) => s.replace(/^第?\d+章\s*/, '').trim())
+      .filter((s) => s.length >= 4);
+    if (beats.length) structured.push({ label: '灵感规划的前五章事件', keys: beats.slice(0, 5) });
+  }
+
   const checks = [];
   if (quoted.length) checks.push({ label: '灵感强调的设定', keys: quoted.slice(0, 5) });
   if (abilities.length) checks.push({ label: '灵感描述的核心能力', keys: abilities.slice(0, 3) });
+  checks.push(...structured);
 
   for (const { label, keys } of checks) {
     // 命中判定：短语整体出现，或其任意 4 字连续片段出现（容许模型部分复述）
@@ -399,7 +419,7 @@ export const NOVEL_PLAN_SYSTEM = `你是一位资深中文小说创作主编，�
 ${CONCEPT_FIDELITY_CORE}
 
 【灵感种子展开】
-灵感原文里已写明的主角身份、金手指、开篇钩子、卖点、前五章方向是锁定种子：必须写进 world_view / outline / 主角设定 / 开篇处境。方案的工作是把种子长成全书，不得另换金手指、另换开局身份、另换主冲突。
+灵感原文里已写明的主角身份、金手指、开篇钩子、卖点、前五章方向是锁定种子：必须写进 world_view / outline / 主角设定 / 开篇处境。方案的工作是把种子长成全书，不得另换金手指、另换开局身份、另换主冲突。核心卖点逐条落位到 outline 与前几章剧情，前五章方向直接作为第 1-5 章的分章骨架。
 
 【世界观构建要求 —— 扎实、立体、可生长】
 1. 核心规则：明确本作独有的核心设定与规则体系，如超自然规则、科技水平、社会等级等，每级/每层的特征与门槛。规则来源要有逻辑，体系要有上限和代价。
@@ -463,6 +483,7 @@ ${CONCEPT_FIDELITY_CORE}
 
 【灵感种子展开】
 灵感原文里已写明的主角身份、金手指、开篇钩子、卖点、前五章方向是锁定种子：必须写进 world_view / outline / 主角设定 / 开篇处境。方案的工作是把种子长成全书（分卷、配角、势力、暗线），不得另换金手指、另换开局身份、另换主冲突。
+核心卖点必须逐条落位：每一条卖点都要能在 outline（分卷）或前几章剧情中找到对应的具体情节与利害冲撞，卖点在方案里找不到对应情节=看点丢失，视为未完成；前五章方向就是第 1-5 章的分章骨架，直接按它展开。
 
 【角色命名隔离铁律】
 - 风格库/知识库样本里的人名禁止用作本书角色名。那些是其他作品。

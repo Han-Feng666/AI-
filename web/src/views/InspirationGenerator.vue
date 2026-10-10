@@ -176,6 +176,8 @@ async function buildNovelFromIdea(idea, concept) {
     const novel = await api.createNovel({
       title: idea.title,
       genre: idea.genre || genres.value[0] || '玄幻',
+      // 勾选题材全集随建书落库：方案生成的题材边界校验依赖它，只传卡片题材会让其余勾选题材丢失
+      checkedGenres: [...genres.value],
       concept: concept || formatIdeaAsConcept(idea),
       idea,
       protagonistName: idea.protagonist?.name || '',
