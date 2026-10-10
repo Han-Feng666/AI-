@@ -1206,3 +1206,17 @@ Entries discovered by the Agent during task execution should follow this format:
   - v1.4.82 三件套：①第四差异化轴 OPENING_DRIVES（7 型非遗志驱动：当场利害/意外卷入/野心求取/关系守护/契约交易/错位误会/立足求生），shuffle 按创意分配，遗志继承默认不派发；axisBlock 追加"严禁把亡故长辈遗物/遗言/托付当默认开场"；②开场驱动收敛闸（LEGACY_OPEN_RE 命中"临终/咽气/遗言/遗物/亡父/亡母/师父给塞留托"式开局，整批>1 剔重）；③IDEAS_SYSTEM 加"文笔底线"（禁名词堆叠/语义乱搭/病句，给反例）。
   - 位置：OPENING_DRIVES/driveSlots 在 routes.js conflictSlots 之后；收敛闸在 gateIdeas 正向题材门禁之后。
   - 验证：test_ideas_engine.mjs（242 断言）+ scan_ai_patterns.test.js（13）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-10
+- Context: Discovered by Agent while用户实报"故事撑不起一部小说/勾玄幻仍跑题/题材间都相似" (v1.4.83)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - "撑不起小说"根因：创意 JSON 没有对抗轴/中心问题/内在弧光，种子是"差事"（收集/交付），方案层受"不得另换主冲突"约束也长不出小说。
+  - v1.4.83 故事引擎：创意 schema 加 story_engine 四字段（central_question/antagonist/escalation/inner_need）；IDEAS_SYSTEM ⑦ 改写为"故事引擎不是差事"；formatIdeaAsConcept 渲染进 concept 传给方案层；方案层种子锁定同步把故事引擎列为主心骨（world_view 对抗格局/outline 主线主题/人物弧光）。
+  - 引擎补全轮 ensureStoryEngine：不硬剔除（弱模型整批产不出会全灭短路），带反馈补一轮，引擎更全的批次才采用。
+  - "勾玄幻仍跑题"根因实锤：XUAN_CANON_RE 只要有 1 个修炼词就放行——「开着货车送货，梦里修炼过一次」能过门。新增 XUAN_MODERN_LEAK_RE（现代专有语汇黑名单，营生词"摆摊/打工"不收防误伤）+ XUAN_NON_CULTIVATION_RE（武侠词：内功/镖局/衙门等，侠不等于仙），挂玄幻门禁内，扫全 blob 含 story_engine。
+  - 开场驱动轴玄幻换题材内味池 OPENING_DRIVES_FANTASY：通用措辞「契约交易/立足求生」曾被弱模型带出现代契约剧味，驱动措辞必须落在题材世界观内。
+  - IDEAS_SYSTEM 2400 上限：加 story_engine 后曾到 2459，靠压缩 ⑦ 尾句/文笔底线反例/必满足行压回 2377。
+  - 测试注意：玄幻标杆 3 条随机抽 2，断言"标杆块含断剑"会翻车，须断言 EXAMPLE_BANK 库级。
+  - 验证：test_ideas_engine.mjs（252 断言）+ scan_ai_patterns.test.js（13）。
