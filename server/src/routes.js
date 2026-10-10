@@ -60,6 +60,7 @@ getGenreGuide, getGenreGuides, buildPlanGenreConformity,
   bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock,
   buildHorrorEraBlock, HORROR_ANCIENT_ERA_RE, HORROR_BODY_COUNTER_RE,
   buildYouthEngineBlock, YOUTH_ADULT_RE, YOUTH_OK_RE, YOUTH_CREEP_RE,
+  GENRE_CONTENT_TAGS,
   buildIdeaExamplesBlock
 } from './prompts.js';
 import {
@@ -1981,11 +1982,20 @@ ${blocks.join('\n\n')}`;
   // 职业槽位会直接引导模型生成"商人管军饷/刑警翻案"的职业直译套路，
   // 与 transmigrationBlock"禁职业直译"自相矛盾。身份靠硬底线管，差异化靠金手指轴。
   const needsFreeIdentity = isTransmigration || (isSystem && hasTrans);
+  // 第三差异化轴：核心冲突机制（v1.4.81）。前两轴（金手指×身份）池子有限，
+  // 跨批次仍会撞车；冲突轴让同一 GF×ID 组合也能长出不同故事，是雷同的结构性补丁。
+  // 言情向用关系型冲突池（避免主冲突漂到外部事件）；其余用通用冲突池
+  const isRomance = genreList.some((g) => /言情|恋爱|甜宠|初恋|暗恋|爱情/.test(g));
+  const CONFLICT_GENERAL = ['守约与背约（一个必须兑现的承诺或契约）', '身份冒充与被揭穿', '被公开的秘密', '期限逼迫（限期内完成或阻止一件事）', '旧案重启（多年前的恩怨翻起）', '同伴或师长的背叛', '规则漏洞（用体系允许的方式钻空子翻盘）', '守护与牺牲（为保某人某物必须付出代价）', '错认与错过', '稀缺资源的定价权争夺'];
+  const CONFLICT_RELATIONAL = ['暗恋被当众拆穿', '重逢却认不出彼此', '身份或处境的悬殊隐瞒', '错过的时机制造遗憾', '双向心动但时机总错开', '旧情与现任的拉扯', '一场关于关系的公开对决', '替对方背下黑锅', '误会到和解的关口', '距离或异地的抉择'];
+  const conflictPool = isRomance ? CONFLICT_RELATIONAL : CONFLICT_GENERAL;
+  const conflictSlots = shuffle(conflictPool).slice(0, ideaCount);
   const axisBlock = gfSlots.map((gf, i) => {
+    const conflictNote = conflictSlots[i] ? `，核心冲突机制必须围绕「${conflictSlots[i]}」展开（金手指是破局工具，不是冲突本身）` : '';
     if (needsFreeIdentity) {
-      return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}，主角开局举目无亲、无人可靠（身穿异世，无原主遗留身份），开局身份不预设——身份与地位因契机或随故事发展获得（具体怎么起家由你自由构思，严禁开局处于给人打工受人使唤的状态，严禁把现代职业直译成古代同类营生——商人管军饷国库、刑警翻案、厨师开酒楼这种一一对应缺乏错位趣味，一律废稿）`;
+      return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}${conflictNote}，主角开局举目无亲、无人可靠（身穿异世，无原主遗留身份），开局身份不预设——身份与地位因契机或随故事发展获得（具体怎么起家由你自由构思，严禁开局处于给人打工受人使唤的状态，严禁把现代职业直译成古代同类营生——商人管军饷国库、刑警翻案、厨师开酒楼这种一一对应缺乏错位趣味，一律废稿）`;
     }
-    return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}，主角初始身份必须是「${idSlots[i]}」`;
+    return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}，主角初始身份必须是「${idSlots[i]}」${conflictNote}`;
   }).join('\n');
 
   // 男频/女频：目标读者频道，影响主角性别、爽点结构与情感线比重
@@ -2015,16 +2025,17 @@ ${blocks.join('\n\n')}`;
 - 文笔细腻，重视人物内心与关系细节的刻画。`
       : '';
 
-  // 跨批次去重：把用户已生成过的创意（标题/梗概/金手指）列入禁重清单
+  // 跨批次去重：把用户已生成过的创意（标题/梗概/金手指/钩子）列入禁重清单
   const excluded = (Array.isArray(excludeIdeas) ? excludeIdeas : [])
     .map((it) => {
       if (!it || typeof it !== 'object') return null;
       const t = String(it.title || '').trim();
       const l = String(it.logline || '').trim();
       const gf = String(it.golden_finger || it.protagonist?.golden_finger || '').trim();
-      return [t, l, gf].filter(Boolean).join('｜');
+      const hk = String(it.hook || '').trim();
+      return [t, l, hk, gf].filter(Boolean).join('｜');
     })
-    .filter(Boolean).slice(0, 12);
+    .filter(Boolean).slice(0, 20);
   const excludeBlock = excluded.length
     ? `\n\n【已生成过的创意——本次构思必须与之明显不同（金手指/世界观/核心冲突/主角身份至少3项不同），严禁只换名字或换皮】\n${excluded.map((e, i) => `${i + 1}. ${e}`).join('\n')}`
     : '';
@@ -2171,6 +2182,24 @@ ${axisBlock}
         send({ type: 'status', message: `已剔除偏离所选题材的创意「${it.title}」（题材：${it.genre || '空'}），可点击重新生成补齐` });
         return false;
       });
+
+      // 正向题材内容门禁（v1.4.81）：genre 标签合规但正文没有该题材的核心内容，
+      // 属于"贴错标签式跑题"——科幻标签写成都市恋爱、西幻标签零魔法元素、
+      // 历史标签落在现代都市。按创意认领的题材家族校验正文内容特征
+      for (const tag of GENRE_CONTENT_TAGS) {
+        list = list.filter((it) => {
+          if (!tag.genreRe.test(String(it.genre || ''))) return true;
+          if (tag.notGenreRe && tag.notGenreRe.test(String(it.genre || ''))) return true;
+          const text = [
+            it.title, it.hook, it.logline,
+            it.protagonist?.golden_finger, it.protagonist?.identity,
+            ...(Array.isArray(it.outline_H5) ? it.outline_H5 : [])
+          ].filter(Boolean).join('\n');
+          if (tag.contentRe.test(text)) return true;
+          send({ type: 'status', message: `已剔除贴错题材标签的创意「${it.title}」（标了「${tag.label}」但正文没有该题材的核心内容），可点击重新生成补齐` });
+          return false;
+        });
+      }
 
       // 载体门禁（生成后校验）：genre 标签合规但金手指内容跑偏——
       // 所有现实向世界观（系统/穿越/纯现实，未勾玄幻/灵异）都查玄幻载体：
