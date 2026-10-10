@@ -59,6 +59,7 @@ getGenreGuide, getGenreGuides, buildPlanGenreConformity,
   IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS,
   bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock,
   buildHorrorEraBlock, HORROR_ANCIENT_ERA_RE, HORROR_BODY_COUNTER_RE,
+  buildYouthEngineBlock, YOUTH_ADULT_RE, YOUTH_OK_RE, YOUTH_CREEP_RE,
   buildIdeaExamplesBlock
 } from './prompts.js';
 import {
@@ -2068,6 +2069,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
     : '';
 
   const engineBlock = buildIdeasEngineBlock(genreList, { isSystem, hasTrans });
+  const youthEngineBlock = buildYouthEngineBlock(genreList);
   const xuanhuanCanonBlock = buildXuanhuanCanonBlock(genreList);
   const coverageBlock = buildGenreCoverageBlock(genreList, ideaCount, { isMaleChannel: channel === '男频' });
   const horrorEraBlock = buildHorrorEraBlock(genreList);
@@ -2080,7 +2082,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${xuanhuanCanonBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${youthEngineBlock}${xuanhuanCanonBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
@@ -2271,6 +2273,32 @@ ${axisBlock}
           const tpl = String(text).match(XUAN_TEMPLATE_RE);
           if (tpl) {
             send({ type: 'status', message: `已剔除模板开局的创意「${it.title}」（撞上「${tpl[0]}」这类十年前的套路），玄幻开篇必须靠金手指规则主动破局` });
+            return false;
+          }
+          return true;
+        });
+      }
+
+      // 校园/青春身份与恋爱线门禁（v1.4.80）：主角必须是学生或年轻人，成年人情感线直接废稿。
+      // 实锤：勾校园言情，主角是"报社主编给校园女生写情书，一天一封"——身份跑题+变态设定
+      if (isYouth) {
+        list = list.filter((it) => {
+          const identity = String(it?.protagonist?.identity || '');
+          const creepText = [
+            identity, it?.hook, it?.logline,
+            ...(Array.isArray(it?.selling_point) ? it.selling_point : [])
+          ].filter(Boolean).join('\n');
+          if (identity && YOUTH_ADULT_RE.test(identity)) {
+            send({ type: 'status', message: `已剔除身份跑题的创意「${it.title}」（主角身份「${identity}」是成年人/职场人——校园青春的主角必须是学生或刚入社会的年轻人）` });
+            return false;
+          }
+          if (identity && !YOUTH_OK_RE.test(identity)) {
+            send({ type: 'status', message: `已剔除身份跑题的创意「${it.title}」（身份「${identity}」看不出学生或年轻人——校园青春主角须锁定学生/刚毕业年轻人）` });
+            return false;
+          }
+          const creep = String(creepText).match(YOUTH_CREEP_RE);
+          if (creep) {
+            send({ type: 'status', message: `已剔除变态情感线的创意「${it.title}」（「${creep[0].slice(0, 20)}」——成年人对校园学生的情感线直接废稿，恋爱双方必须同龄）` });
             return false;
           }
           return true;

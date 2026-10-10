@@ -1,6 +1,6 @@
 {
   "name": "novel-studio-server",
-  "version": "1.4.79",
+  "version": "1.4.80",
   "private": true,
   "type": "module",
   "main": "index.js",
