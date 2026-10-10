@@ -1164,3 +1164,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - 方案重复生成雷同的根因：方案层 LLM 调用没传 temperature，被 llm.js `wantsJson` 默认 0.4 锁死（近乎确定性输出）。v1.4.78：`planTemp = Number(config.temperature) || 0.7` 传入 streamCollect 两路 + jsonFrom 两路降级重试。
   - 方案没看点的机器校验盲区：`detectSeedLoss` 只认引号短语/能力句，解析不到 `formatIdeaAsConcept` 的结构化行。v1.4.78：解析「核心卖点：1.」与「前五章方向：第N章」条目，全组零命中即报 violation 进重试；PLAN_SKELETON_SYSTEM 加「核心卖点逐条落位」铁律。
   - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（183 断言）+ server/test/scan_ai_patterns.test.js（13）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-10
+- Context: Discovered by Agent while raising idea quality to top-10 web-novel level and hardening genre conformity (v1.4.79)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 灵感质量低的根因：创意只有开局钩子没有长线发动机；玄幻作为真超凡题材引擎块为空（反套路压力全在现实向）；槽位池 10×10 全用户共享；玄幻标杆库只有 1 条固定。
+  - v1.4.79 四件套：①IDEAS_SYSTEM 自检⑦全书发动机（收集/攀登/经营/约战夺还/规则探索五选一钉进 logline，金手指须可反复用+升级路径，personality 须是性格武器）；②玄幻引擎块（反模板开局：禁退婚/老爷爷/废柴当众打脸/悬崖秘籍；金手指规则化；批内机制差异）；③玄幻槽位池 10→16（撤「秘境机缘」）；④标杆库玄幻 3 条+历史/穿越 1 条（EXAMPLE_BANK 已导出）。
+  - 跑题门禁收紧：玄幻金手指必须含修炼语汇（XUAN_CANON_RE 只测 blob 挡不住"挂玄幻皮的现代异能文"）；XUAN_TEMPLATE_RE 拦模板开局；多题材覆盖检查 checkCoverage + 带反馈补救轮 rescueRound（全灭或覆盖缺口时把违规原因追加进提示词自动重试一轮，生成收口为 runIdeaGen）。
+  - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（210 断言）。注意：历史家族现在有标杆，"无匹配家族不硬塞标杆"断言须用科幻等真正无标杆题材。
