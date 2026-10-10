@@ -1195,3 +1195,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - 跨批次去重 excludeBlock 增强：字段加 hook、上限 12→20。
   - 门禁正则禁带 g 标志；IDEAS_SYSTEM 须 <2400 字（加句式禁令后仍达标）。
   - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（236 断言）+ node --test server/test/scan_ai_patterns.test.js（13）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-10
+- Context: Discovered by Agent while用户实报只勾玄幻时整批创意开局同构、文笔有病句 (v1.4.82)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 实报样本：残丹追魂录 与 三年因果符 都是"亡故长辈留遗物/遗言 → 低阶少年凭感知/手绘能力收集或交付"同一骨架，且 hook 有病句（"嗅到亡父的控火手法"手法不可嗅、收集药材与线索混用）。
+  - 根因：前几轴只管"能力/身份/冲突"，管不到"故事为什么从这一刻开始"，缺开场驱动轴；软性"要差异化"规则弱模型会忽略。
+  - v1.4.82 三件套：①第四差异化轴 OPENING_DRIVES（7 型非遗志驱动：当场利害/意外卷入/野心求取/关系守护/契约交易/错位误会/立足求生），shuffle 按创意分配，遗志继承默认不派发；axisBlock 追加"严禁把亡故长辈遗物/遗言/托付当默认开场"；②开场驱动收敛闸（LEGACY_OPEN_RE 命中"临终/咽气/遗言/遗物/亡父/亡母/师父给塞留托"式开局，整批>1 剔重）；③IDEAS_SYSTEM 加"文笔底线"（禁名词堆叠/语义乱搭/病句，给反例）。
+  - 位置：OPENING_DRIVES/driveSlots 在 routes.js conflictSlots 之后；收敛闸在 gateIdeas 正向题材门禁之后。
+  - 验证：test_ideas_engine.mjs（242 断言）+ scan_ai_patterns.test.js（13）。
