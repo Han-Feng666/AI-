@@ -1942,10 +1942,12 @@ ${blocks.join('\n\n')}`;
     gfLabel = '核心优势类型';
   } else if (isFantasy) {
     GF_POOL = isXuanhuanGenre(genreList.join(' '))
-      ? ['灵根异变/双灵根', '残缺功法补全', '本命法宝宝物', '丹道天赋', '灵兽契约', '剑意顿悟', '阵法入门', '血脉神通觉醒', '秘境机缘', '体修肉身']
+      ? // 规则化金手指池（秘境机缘已撤：一次性机缘正是反模板开局要拦的形态）
+        ['灵根异变/双灵根', '残缺功法补全', '本命法宝宝物', '丹道天赋', '灵兽契约', '剑意顿悟', '阵法入门', '血脉神通觉醒', '体修肉身', '炼器改良', '灵植培育', '符箓手绘', '灵虫培育', '傀儡机关术', '音律攻伐', '梦中修行', '灵厨药膳', '驭兽驯养']
       : ['血脉体质觉醒', '古老传承记忆', '器物法宝', '特殊技能天赋', '预知信息优势', '契约召唤', '规则因果操控', '战斗本能武学', '灵兽伙伴', '阵法符箓造诣'];
     ID_POOL = isXuanhuanGenre(genreList.join(' '))
-      ? ['外门杂役弟子', '散修少年', '丹房药童', '灵田农户', '坊市学徒', '宗门旁系', '秘境遗孤', '猎户出身修士', '边荒散修', '内门外门交界弟子']
+      ? // 修仙生态职业池扩容：同一身份全批互不相同，池子越大跨批次雷同越少
+        ['外门杂役弟子', '散修少年', '丹房药童', '灵田农户', '坊市学徒', '宗门旁系', '秘境遗孤', '猎户出身修士', '边荒散修', '内门外门交界弟子', '灵植夫', '符纸铺学徒', '傀儡匠学徒', '灵虫饲主', '坊市鉴宝伙计', '钟楼守夜弟子']
       : ['底层草根', '落魄贵族后人', '隐世传人', '市井游民', '少年天才', '军方武力背景', '商贾之后', '工匠手艺人', '戴罪之身', '边军小卒'];
     gfLabel = '金手指类型';
   } else if (isYouth) {
@@ -2092,28 +2094,33 @@ ${axisBlock}
     const maxOut = Math.max(8192, Math.min(16384, ideaCount * 2200), Number(config.maxTokens) || 0);
     let full = '';
     let ideas = null;
-    // 生成+解析自动重试：模型偶发输出坏格式（前缀文字/半截 JSON/引号错配），
-    // 正则自愈+截断修复覆盖不了全部形态；直接重发一次比让用户手动点"重新生成"体验好
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      full = '';
+    // 单轮生成：流式/非流式两路统一收口（主循环与门禁补救轮共用）
+    const runIdeaGen = async (userText) => {
+      let out = '';
       if (config?.forceNonStreaming) {
         const r = await chat({ config, messages: [
           { role: 'system', content: IDEAS_SYSTEM },
-          { role: 'user', content: userPrompt }
+          { role: 'user', content: userText }
         ], maxTokens: maxOut, temperature: Number(config.temperature) || 0.9, timeout: 300000 });
-        full = r?.content || '';
+        out = r?.content || '';
       } else {
         await runLLMStream(config, [
           { role: 'system', content: IDEAS_SYSTEM },
-          { role: 'user', content: userPrompt }
+          { role: 'user', content: userText }
         ], {
           ctrl,
           task: 'planning',
           temperature: Number(config.temperature) || 0.9,
           maxTokens: maxOut,
-          onDelta: (d) => { full += d; send({ type: 'delta', content: d }); }
+          onDelta: (d) => { out += d; send({ type: 'delta', content: d }); }
         });
       }
+      return out;
+    };
+    // 生成+解析自动重试：模型偶发输出坏格式（前缀文字/半截 JSON/引号错配），
+    // 正则自愈+截断修复覆盖不了全部形态；直接重发一次比让用户手动点"重新生成"体验好
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      full = await runIdeaGen(userPrompt);
       send({ type: 'status', message: '创意构思完成，正在解析…' });
       ideas = extractArray(full);
       if (Array.isArray(ideas) && ideas.length) break;
@@ -2233,6 +2240,9 @@ ${axisBlock}
       // 刻符匠/侯府祭山/拾招忘记忆，全文无灵气无境界无宗门。
       if (isXuanhuanGenre(genreList.join(' '))) {
         const XUAN_GROTESQUE_RE = /把自己刻死|忘掉自己的一段记忆|把别人的伤|承接在自己身上|祭山|为太子分疾/;
+        // 模板开局门禁（v1.4.79）：退婚流/老爷爷/废柴当众觉醒打脸是十五年前的模板，
+        // 对标头部玄幻的反套路底线——引擎块先劝，门禁兜底剔除
+        const XUAN_TEMPLATE_RE = /退婚|退掉.{0,4}(婚|亲事)|老爷爷|戒指.{0,8}(老者|老人|残魂|前辈)|指环.{0,8}(老者|老人|残魂|前辈)|吊坠.{0,8}(老者|老人|残魂|前辈)|废柴.{0,10}(觉醒|崛起|逆袭)|当众.{0,6}打脸|当街.{0,6}打脸|悬崖.{0,8}(秘籍|奇遇|神功)/;
         list = list.filter((it) => {
           const text = [
             it?.protagonist?.golden_finger,
@@ -2246,9 +2256,21 @@ ${axisBlock}
             send({ type: 'status', message: `已剔除偏离玄幻修炼世界的创意「${it.title}」（全文无灵气/境界/宗门/功法），可点击重新生成补齐` });
             return false;
           }
+          // 金手指必须本身落在修炼体系内：blob 里有灵气但金手指是"读心/预知/系统"
+          // 等体系外语汇 = 挂玄幻皮的现代异能文，正是跑题主形态
+          const xuanGf = [it?.protagonist?.golden_finger, it?.protagonist2?.golden_finger].filter(Boolean).join('\n');
+          if (xuanGf && !XUAN_CANON_RE.test(xuanGf)) {
+            send({ type: 'status', message: `已剔除金手指脱离修炼体系的创意「${it.title}」（金手指无灵根/功法/法宝/丹道等修炼语汇），可点击重新生成补齐` });
+            return false;
+          }
           const gro = String(text).match(XUAN_GROTESQUE_RE);
           if (gro) {
             send({ type: 'status', message: `已剔除猎奇自残金手指的创意「${it.title}」（${gro[0]}），玄幻代价须是灵力反噬/走火入魔/境界反跌` });
+            return false;
+          }
+          const tpl = String(text).match(XUAN_TEMPLATE_RE);
+          if (tpl) {
+            send({ type: 'status', message: `已剔除模板开局的创意「${it.title}」（撞上「${tpl[0]}」这类十年前的套路），玄幻开篇必须靠金手指规则主动破局` });
             return false;
           }
           return true;
@@ -2371,14 +2393,47 @@ ${axisBlock}
       }
       return { ideas: list, hadCandidates: before > 0 };
     };
+
+    // 多题材覆盖检查：勾选多个题材时模型常整批挤进一个题材（跑题主形态之一），
+    // 每个勾选题材至少要有一个创意认领（genre 字符串互含即算认领）
+    const checkCoverage = (list) => {
+      if (genreList.length < 2) return [];
+      return genreList.filter((sel) => !list.some((it) => {
+        const g = String(it.genre || '');
+        return g.includes(sel) || sel.includes(g);
+      }));
+    };
+    // 带反馈补救轮：把门禁剔除原因/覆盖缺口追加进提示词再生成一次，
+    // 新批次过门禁才采用——把"请点击重新生成"变成自动补救
+    const rescueRound = async (feedback) => {
+      send({ type: 'status', message: '正在按违规反馈自动重试一轮…' });
+      const roundPrompt = `${userPrompt}\n\n【上一轮违规反馈——本轮必须修正】\n${feedback}`;
+      const roundFull = await runIdeaGen(roundPrompt);
+      const roundIdeas = extractArray(roundFull);
+      if (!Array.isArray(roundIdeas) || !roundIdeas.length) return null;
+      return gateIdeas(roundIdeas);
+    };
+
     if (Array.isArray(ideas)) {
       const gated = gateIdeas(ideas);
-      // 全部被门禁剔除时必须短路返回：掉进下方"解析失败→LLM修复"路径会把
-      // 刚被剔除的违规创意原样解析回来，门禁形同虚设
+      // 全部被门禁剔除时：先带反馈自动补一轮，仍全灭才短路报错。短路语义保留（实锤
+      // v1.4.56）：修复路径会把刚被剔除的违规创意原样解析回来，门禁形同虚设
       if (gated.hadCandidates && gated.ideas.length === 0) {
+        const rescued = await rescueRound('上一轮全部创意偏离所选题材或金手指载体跑偏，被题材门禁整批剔除。本轮必须严格贴合所选题材的核心设定与世界观生态，金手指按题材规则写。');
+        if (rescued && rescued.ideas.length) return end({ type: 'done', data: { ideas: rescued.ideas } });
         return end({ type: 'error', message: GATE_BLOCKED_MSG });
       }
-      if (gated.ideas.length) return end({ type: 'done', data: { ideas: gated.ideas } });
+      if (gated.ideas.length) {
+        const uncovered = checkCoverage(gated.ideas);
+        if (!uncovered.length) return end({ type: 'done', data: { ideas: gated.ideas } });
+        // 覆盖缺口：带反馈补一轮，新批次覆盖更全才采用；仍未补齐则原样返回并提示
+        const rescued = await rescueRound(`上一轮创意未覆盖勾选题材：${uncovered.join('、')}。本轮每个勾选题材至少出一个创意，内容必须贴合该题材的核心设定与生态，题材字段直接标注对应题材。`);
+        if (rescued && rescued.ideas.length && checkCoverage(rescued.ideas).length < uncovered.length) {
+          return end({ type: 'done', data: { ideas: rescued.ideas } });
+        }
+        send({ type: 'status', message: `提示：本次创意未覆盖勾选题材「${uncovered.join('、')}」，可点击重新生成补齐` });
+        return end({ type: 'done', data: { ideas: gated.ideas } });
+      }
       // hadCandidates=false 且无产出：全是残缺半成品，落入下方修复路径
     }
     send({ type: 'status', message: '创意解析失败，正在尝试自动修复…' });
