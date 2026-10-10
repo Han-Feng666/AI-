@@ -1174,3 +1174,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - v1.4.79 四件套：①IDEAS_SYSTEM 自检⑦全书发动机（收集/攀登/经营/约战夺还/规则探索五选一钉进 logline，金手指须可反复用+升级路径，personality 须是性格武器）；②玄幻引擎块（反模板开局：禁退婚/老爷爷/废柴当众打脸/悬崖秘籍；金手指规则化；批内机制差异）；③玄幻槽位池 10→16（撤「秘境机缘」）；④标杆库玄幻 3 条+历史/穿越 1 条（EXAMPLE_BANK 已导出）。
   - 跑题门禁收紧：玄幻金手指必须含修炼语汇（XUAN_CANON_RE 只测 blob 挡不住"挂玄幻皮的现代异能文"）；XUAN_TEMPLATE_RE 拦模板开局；多题材覆盖检查 checkCoverage + 带反馈补救轮 rescueRound（全灭或覆盖缺口时把违规原因追加进提示词自动重试一轮，生成收口为 runIdeaGen）。
   - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（210 断言）。注意：历史家族现在有标杆，"无匹配家族不硬塞标杆"断言须用科幻等真正无标杆题材。
+
+[Project Knowledge Summary]
+- Date: 2026-10-10
+- Context: Discovered by Agent while fixing campus-genre off-topic report: checked 校园言情, got "报社主编给校园女生写情书" (v1.4.80)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 校园跑题+变态的根因：校园题材只有零散约束（分轨/硬利害），身份无硬边界、恋爱无年龄边界。
+  - v1.4.80：buildYouthEngineBlock（身份锁学生/刚毕业年轻人、恋爱双方必须同龄、长线发动机五选一、反模板、青春质感）；身份双闸 YOUTH_ADULT_RE（黑名单：主编/经理/老师/班主任/校长/家长等）+ YOUTH_OK_RE 白名单（含都市青年池：主理人/摆摊/裸辞/副业/合租，防误伤）；YOUTH_CREEP_RE 拦成年人情感线（间隔类必须允许逗号——「报社主编，他的工作是……写情书」跨逗号命中）。
+  - 门禁位置：gateIdeas 内玄幻门禁之后、灵异时代锁之前；正则与引擎块都放 prompts.js 导出（与 IDEAS_*_RE 同模式），routes.js 只导入使用。
+  - 验证：NOVEL_DATA_DIR=/tmp/novel-test-data node /tmp/opencode/test_ideas_engine.mjs（224 断言）。
