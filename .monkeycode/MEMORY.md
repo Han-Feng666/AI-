@@ -1220,3 +1220,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - IDEAS_SYSTEM 2400 上限：加 story_engine 后曾到 2459，靠压缩 ⑦ 尾句/文笔底线反例/必满足行压回 2377。
   - 测试注意：玄幻标杆 3 条随机抽 2，断言"标杆块含断剑"会翻车，须断言 EXAMPLE_BANK 库级。
   - 验证：test_ideas_engine.mjs（252 断言）+ scan_ai_patterns.test.js（13）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-10
+- Context: Discovered by Agent while用户反馈换模型（deepseek→glm5.3）仍雷同无看点 (v1.4.84)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 关键结论：换模型无效说明问题在生成框架本身——四轴硬槽位让模型做"填表"，每创意=同一公式换词，反差感被槽位憋死，任何模型都产不出爆款。
+  - v1.4.84 改"先反差核后展开"：IDEAS_SYSTEM 加创意工作法（core_contrast=这个设定最反常识的一点，整批先想 6 个机制互异的反差核挑 3 个最强展开；槽位是骨架反差核是灵魂）；schema 加 core_contrast 字段（放 hook 前，先想核再写壳）；差异化加"批内 core_contrast 机制互不相同"；selling_point 事件化（能画面的场景，禁机制罗列）。
+  - 配套机器检查：gateIdeas 保留 core_contrast；批内查重签名加反差核前 20 字；ensureStoryEngine 一并检查 core_contrast（<8 字算缺）；formatIdeaAsConcept 把反差内核渲染进 concept（书名/题材后、梗概前）。
+  - IDEAS_SYSTEM 2400 上限靠逐段压缩达标（2399）：①②④⑤⑥⑦/工作法/标杆段/命名段/差异化/文笔底线/schema 说明全部瘦身；旧断言按新措辞对齐（副线去谜团→'副线严禁做成身份谜团'、标杆限域→'只学结构'、禁仿系统文→'不得写成系统文'、额外加→'不额外加'、文笔底线→'禁名词堆叠与病句'）。
+  - 验证：test_ideas_engine.mjs（261 断言）+ scan_ai_patterns.test.js（13）。
