@@ -2188,6 +2188,7 @@ ${axisBlock}
         genre: String(it.genre || ''),
         hook: String(it.hook || ''),
         logline: String(it.logline || ''),
+        core_contrast: String(it.core_contrast || ''),
         story_engine: (it.story_engine && typeof it.story_engine === 'object') ? it.story_engine : null,
         protagonist: it.protagonist || {},
         protagonist2: it.protagonist2 || null,
@@ -2497,11 +2498,13 @@ ${axisBlock}
         return true;
       });
 
-      // 批内去重：金手指 + 主角身份 + logline 前段 任一组合重复即剔除后者
+      // 批内去重：金手指 + 主角身份 + logline 前段 + 反差核前段 任一组合重复即剔除后者
       const sigs = new Set();
       list = list.filter((it) => {
-        const sig = [it.protagonist?.golden_finger || '', it.protagonist?.identity || '', String(it.logline || '').slice(0, 30)]
-          .join('｜');
+        const sig = [
+          it.protagonist?.golden_finger || '', it.protagonist?.identity || '',
+          String(it.logline || '').slice(0, 30), String(it.core_contrast || '').slice(0, 20)
+        ].join('｜');
         if (sigs.has(sig)) return false;
         sigs.add(sig);
         return true;
@@ -2540,13 +2543,14 @@ ${axisBlock}
     const storyEngineOk = (it) => {
       const se = it?.story_engine;
       if (!se || typeof se !== 'object') return false;
+      if (String(it?.core_contrast || '').trim().length < 8) return false;
       return SE_FIELDS.every((k) => String(se[k] || '').trim().length >= 8);
     };
     const engineGap = (list) => list.filter((it) => !storyEngineOk(it)).length;
     const ensureStoryEngine = async (list) => {
       if (!list.length || engineGap(list) === 0) return list;
-      send({ type: 'status', message: `本批有 ${engineGap(list)} 个创意缺少故事引擎（中心问题/对抗轴/赌注升阶/内在需求），正在自动补全…` });
-      const rescued = await rescueRound('上一轮创意缺少 story_engine 或写得不完整。请重新输出整批创意，为每个创意补全 story_engine 硬字段：central_question（全书要回答的"主角能否……"）、antagonist（具体的人或组织 + 其自身目标 + 为何无法被快速解决）、escalation（赌注如何从个人/局部升到势力/天下）、inner_need（主角内在缺失/执念与全书要完成的变化）。只是收集/交付/查案的任务式前提，必须补上持续对抗的对手与主角内在弧光。');
+      send({ type: 'status', message: `本批有 ${engineGap(list)} 个创意缺少故事引擎或反差内核，正在自动补全…` });
+      const rescued = await rescueRound('上一轮创意缺少 story_engine、core_contrast 或写得不完整。请重新输出整批创意，为每个创意补全：core_contrast（反差内核——这个设定最反常识的一点，机制必须一眼有反差感）与 story_engine 硬字段：central_question（全书要回答的"主角能否……"）、antagonist（具体的人或组织 + 其自身目标 + 为何无法被快速解决）、escalation（赌注如何从个人/局部升到势力/天下）、inner_need（主角内在缺失/执念与全书要完成的变化）。只是收集/交付/查案的任务式前提，必须补上持续对抗的对手与主角内在弧光。');
       if (rescued && rescued.ideas.length && engineGap(rescued.ideas) < engineGap(list)) return rescued.ideas;
       return list;
     };
