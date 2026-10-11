@@ -62,6 +62,7 @@ getGenreGuide, getGenreGuides, buildPlanGenreConformity,
   bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock,
   buildHorrorEraBlock, HORROR_ANCIENT_ERA_RE, HORROR_BODY_COUNTER_RE,
   buildYouthEngineBlock, YOUTH_ADULT_RE, YOUTH_OK_RE, YOUTH_CREEP_RE,
+  YOUTH_STUDENT_RE, YOUTH_OFFICE_RE,
   buildGenreSpineBlock,
   GENRE_CONTENT_TAGS,
   HIST_PATH_CATS,
@@ -2455,6 +2456,32 @@ ${axisBlock}
           }
           return true;
         });
+        // 学生身份主体门禁（v1.4.89）：勾了校园/青春（非纯"刚入社会"向）时，批内
+        // 在校学生主角须占 ≥2/3——实锤用户反馈"勾校园青春言情都市，主角都是在
+        // 工作的"。超出配额的职场主角剔除，保留先出现的学生身份创意
+        const hasCampusTag = genreList.some((g) => /校园|青春|高中|大学|初恋|学霸/.test(g));
+        if (hasCampusTag && list.length >= 2) {
+          const isStudent = (it) => {
+            const identity = String(it?.protagonist?.identity || '');
+            if (!identity) return true;
+            if (YOUTH_OFFICE_RE.test(identity)) return false;
+            return true;
+          };
+          const nonStudents = list.length - list.filter(isStudent).length;
+          const maxNonStudents = list.length - Math.max(1, Math.ceil((list.length * 2) / 3));
+          const excess = Math.max(0, nonStudents - maxNonStudents);
+          if (excess > 0) {
+            let removed = 0;
+            list = list.filter((it) => {
+              if (!isStudent(it) && removed < excess) {
+                removed += 1;
+                send({ type: 'status', message: `已剔除职场主角的创意「${it.title}」（勾选了校园/青春——主角须以在校学生为主体，上班族主角整批至多 1 条）` });
+                return false;
+              }
+              return true;
+            });
+          }
+        }
       }
 
       // 灵异时代锁（v1.4.71）：未勾古代向标签的现代灵异不得写成古代算命摊世界观；
@@ -2558,11 +2585,19 @@ ${axisBlock}
         return true;
       });
 
-      // 批内去重：金手指 + 主角身份 + logline 前段 + 反差核前段 任一组合重复即剔除后者
+      // 批内去重：金手指 + 主角身份 + logline 前段 + 反差核前段 任一组合重复即剔除后者。
+      // v1.4.89：现实向题材金手指按"命中 token 集合"归一（"观察力过人"与"观察习惯
+      // 惊人"归一为同一签名）——治"整批都是观察力"的换皮同构
+      const isFantasyBatch = hasTrueFantasyTag(genreList.join(' '));
       const sigs = new Set();
       list = list.filter((it) => {
+        const gfRaw = it.protagonist?.golden_finger || '';
+        const gfSig = isFantasyBatch
+          ? gfRaw
+          : (IDEAS_REALISTIC_TOKENS.filter((t) => String(gfRaw).includes(t)).sort().join(',')
+            || String(gfRaw).slice(0, 12));
         const sig = [
-          it.protagonist?.golden_finger || '', it.protagonist?.identity || '',
+          gfSig, it.protagonist?.identity || '',
           String(it.logline || '').slice(0, 30), String(it.core_contrast || '').slice(0, 20)
         ].join('｜');
         if (sigs.has(sig)) return false;
