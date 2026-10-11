@@ -57,10 +57,12 @@ getGenreGuide, getGenreGuides, buildPlanGenreConformity,
   detectIdeaCarrierDrift, hasTrueFantasyTag, buildIdeasEngineBlock,
   IDEAS_SUPERPOWER_RE, IDEAS_SYSTEM_LEAK_RE, IDEAS_TRANS_LEAK_RE,
   XUAN_MODERN_LEAK_RE, XUAN_NON_CULTIVATION_RE,
+  XUAN_SPINE_GROWTH_RE, XUAN_SPINE_TASK_RE,
   IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS,
   bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock,
   buildHorrorEraBlock, HORROR_ANCIENT_ERA_RE, HORROR_BODY_COUNTER_RE,
   buildYouthEngineBlock, YOUTH_ADULT_RE, YOUTH_OK_RE, YOUTH_CREEP_RE,
+  buildGenreSpineBlock,
   GENRE_CONTENT_TAGS,
   buildIdeaExamplesBlock
 } from './prompts.js';
@@ -2118,6 +2120,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
   const engineBlock = buildIdeasEngineBlock(genreList, { isSystem, hasTrans });
   const youthEngineBlock = buildYouthEngineBlock(genreList);
   const xuanhuanCanonBlock = buildXuanhuanCanonBlock(genreList);
+  const genreSpineBlock = buildGenreSpineBlock(genreList);
   const coverageBlock = buildGenreCoverageBlock(genreList, ideaCount, { isMaleChannel: channel === '男频' });
   const horrorEraBlock = buildHorrorEraBlock(genreList);
   const examplesBlock = buildIdeaExamplesBlock(genreList);
@@ -2129,7 +2132,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${trendBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${youthEngineBlock}${xuanhuanCanonBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${trendBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${youthEngineBlock}${xuanhuanCanonBlock}${genreSpineBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
@@ -2381,6 +2384,16 @@ ${axisBlock}
           if (wuxiaHit) {
             send({ type: 'status', message: `已剔除写成武侠江湖的创意「${it.title}」（出现「${wuxiaHit[0]}」——玄幻是修仙世界，不是无灵气的武林），可点击重新生成补齐` });
             return false;
+          }
+          // 登顶门禁（v1.4.87）：主线必须落在"修炼登顶之路"的上升线上——logline+
+          // central_question 无成长语汇、却全是"找回/守护/调查"任务语汇 = 主线缩成
+          // 单一任务戏，撑不起长篇（实锤用户反馈：玄幻不该是"调查一个东西找回一个东西"）
+          const spineText = [it?.logline, it?.story_engine?.central_question].filter(Boolean).join('\n');
+          if (spineText) {
+            if (!XUAN_SPINE_GROWTH_RE.test(spineText) && XUAN_SPINE_TASK_RE.test(spineText)) {
+              send({ type: 'status', message: `已剔除主线偏离登顶之路的创意「${it.title}」（主线是"找回/守护"任务戏——玄幻大盘读者要的是修炼登顶的上升线，任务只能当支线）` });
+              return false;
+            }
           }
           return true;
         });
