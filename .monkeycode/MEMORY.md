@@ -1253,3 +1253,47 @@ Entries discovered by the Agent during task execution should follow this format:
   - 玄幻引擎块同步加"主线推进方式"块（引擎块不受 IDEAS_SYSTEM 2400 限制，长约束优先放引擎块）。
   - 2400 字上限靠等量置换守住（2398）：schema 说明/工作法/差异化/⑤ 逐段压缩；"调查市场行情"现在命中词表是有意收紧，旧断言已对齐。
   - 验证：test_ideas_engine.mjs（276 断言）+ scan_ai_patterns.test.js（13）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-11
+- Context: Discovered by Agent while用户点破"灵感/方案不符合题材正常逻辑，撑不起小说"——玄幻在调查找物、穿越历史在守护全镇盐醋、校园除比赛就是无聊 (v1.4.87)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 病灶定性：反套路禁令多、题材主流骨架正向锚缺失，模型捡边角料骨架（任务戏/守成小事/比赛）当主线。v1.4.87 新增 buildGenreSpineBlock（prompts.js，按勾选题材家族注入）：玄幻=修炼登顶之路（境界刻度逐段升级，找回/守护只当支线）、穿越历史=崛起之路（封侯拜相/现代知识开创产业格局）、校园言情=恋爱本身（比赛只当场景）、都市=逆袭攀升、科幻=大命题；通用铁律"反套路只反开局模板，长线格局向大盘骨架看齐，严禁主线缩成找回某物/守护某地/打赢某场比赛"。
+  - "校园除了比赛就是无聊"根因：buildYouthEngineBlock 长线发动机五选一里"竞赛名次"排第一，模型全写比赛。修：勾言情时改为"一段关系的明确目标与期限"首选、感情线就是主线本身；纯校园保留五选一。
+  - 玄幻登顶门禁 XUAN_SPINE_GROWTH_RE/XUAN_SPINE_TASK_RE（prompts.js 导出、routes.js gateIdeas 玄幻段末尾使用）：logline+central_question 无成长语汇（登顶/巅峰/境界/变强/宗门大比…词表从宽防误伤）且命中任务语汇（找回/寻回/夺回/守护/追查/查清/查明/调查/寻访/寻找）= 主线任务戏即剔。
+  - git push -o merge_request.* 触发远端 HTTP 500（GitHub 不支持 push options）；纯 git push 正常，MR 选项改走平台界面。
+  - 验证：test_ideas_engine.mjs（290 断言）+ scan_ai_patterns.test.js（13）；纯后端 bump --no-build，补丁 update-1.4.87.patch.json。
+
+[Project Knowledge Summary]
+- Date: 2026-10-11
+- Context: Discovered by Agent while用户实报勾"历史 架空 穿越 系统"整批都是"市井小民到权臣"、勾 3 出 2 且一条跑题漏题材 (v1.4.88)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 骨架锚单路径是新的雷同源：v1.4.87 历史只写"封侯拜相"一条主流线，弱模型全收敛到"市井小民→权臣"。v1.4.88 改五路径（庙堂权谋/产业经商/军事征战/种田技术/文坛思想）+批内分散硬要求；玄幻同步加"登顶路径必须多样"。教训：给 LLM 正向锚时必须同时给"多条平行选项+批内分散禁令"，单锚必收敛。
+  - "漏了勾选的题材"根因①：GENRE_CONTENT_TAGS 原来只有科幻/西幻/历史三家族，"系统/穿越"勾了无人管；且校验按创意自认领 genre——模型漏写标签就漏网。修：补系统流（面板/签到/任务奖励/属性点…）+穿越（现代记忆/穿越者…）两家族，校验改按用户勾选题材驱动（notGenreRe 看勾选组合）。
+  - "勾 3 出 2 且有跑题"根因：数量补齐轮/覆盖补救轮/全灭补救轮的产物都没有重新过 gateIdeas——门禁外产出直接采用，跑题创意从补救路径溜进结果集。修：三处补救全部 gateIdeas 复检；数量补齐循环至多 2 轮，反馈语带路径分散要求。
+  - 历史批内崛起路径查重 HIST_PATH_CATS（prompts.js 导出五类特征词，routes.js gateIdeas 使用）：同主路径批内最多 1 条，超出剔除触发补齐。
+  - git push -o merge_request.* 对 GitHub 远端恒 500，只能纯 push（MR 走平台界面）。
+  - 验证：test_ideas_engine.mjs（304 断言）+ scan_ai_patterns.test.js（13）；纯后端 bump --no-build，补丁 update-1.4.88.patch.json。
+
+[Project Knowledge Summary]
+- Date: 2026-10-11
+- Context: Discovered by Agent while用户连续点破"金手指只该出现在玄幻/系统题材""主角全是观察力且都付出代价""勾校园主角都是在工作的" (v1.4.89)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - "全员观察力+付出代价"根因是三层机器强制叠加：schema 字段明令"写明代价或限制"+IDEAS_SYSTEM 限定 token 清单+gateIdeas 强制 golden_finger 命中 IDEAS_REALISTIC_TOKENS 否则剔——弱模型全收敛到清单最短路径"观察力"。教训：机器门禁的"必须命中清单"会把模型逼向清单里最容易写的词，扩清单+允许"无特殊优势"+归一化查重三管齐下才有效。
+  - v1.4.89 现实向去金手指化：IDEAS_SYSTEM 明令"未勾超凡题材时无金手指概念"，最大优势=现实特长/资源/处境或"无特殊优势"，"金手指"字样仅存超凡语境（①⑤⑦/schema/渲染层全改写）；现实向引擎块加"优势代价边界"（禁超自然代价）+"优势批内差异"；formatIdeaAsConcept 渲染"优势："。
+  - 校园学生主体门禁：YOUTH_STUDENT_RE/YOUTH_OFFICE_RE（prompts.js 导出），勾校园/青春时批内上班族主角至多 1 条（学生占比≥2/3）——YOUTH_OK_RE 的"实习/打工/摆摊"通道曾被整批滥用成职场主角。
+  - 批内查重升级：现实向 golden_finger 按"命中 token 集合排序拼接"归一签名，"观察力过人/观察习惯惊人"同签名被剔。
+  - IDEAS_SYSTEM 2400 字限：等量置换原则——加约束必须同步在别处压字数，改完必跑 node -e 检查 length<2400。
+  - 验证：test_ideas_engine.mjs（329 断言）+ scan_ai_patterns.test.js（13）；纯后端 bump --no-build，补丁 update-1.4.89.patch.json。
+
+[Project Knowledge Summary]
+- Date: 2026-10-11
+- Context: Discovered by Agent while正文去 AI 味：提示词已禁递进/对仗/顿悟旁白，扫描器未挂、质量门抓不到 (v1.4.90)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 漏拦三类：`scanProgressiveCouple`（不仅而且/既又/一方面/越是越是≥3）、`scanForcedAntithesis`（左右/前后/上下≥2）、`scanInsightAside`（顿悟/嘴上心里却/话音刚落 同类≥2）。挂入 `scanAiPatterns` + 质量门 `structureFixes`。
+  - `ANTI_AI_STYLE`/`POLISH_SYSTEM`/`AI_DETECT` 只加对应短正例，不堆 CHAPTER_SYSTEM。
+  - 验证：scan_ai_patterns.test.js（16）；纯后端 bump --no-build，补丁 update-1.4.90.patch.json。

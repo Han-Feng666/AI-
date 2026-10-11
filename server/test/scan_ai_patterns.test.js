@@ -116,5 +116,26 @@ test('白描正文不误报分镜/旁白/简历', () => {
 火膛里柴火噼啪响，锅边结了一圈白碱。他拿筷子戳了戳红薯，还没熟，又把盖子扣回去。`.repeat(3);
   const hits = scan(txt);
   const words = hits.map((h) => h.word);
-  assert.ok(!words.some((w) => /影视分镜腔|解释旁白|简历式介绍/.test(w)), `不应误报，实际: ${words.join('|')}`);
+  assert.ok(!words.some((w) => /影视分镜腔|解释旁白|简历式介绍|递进并列句式|刻意对仗|顿悟旁白腔/.test(w)), `不应误报，实际: ${words.join('|')}`);
+});
+
+test('递进并列句式被检出', () => {
+  const txt = PAD + '他不仅丢了工作，而且丢了住所。他既想留下，又想逃走。一方面要顾面子，一方面要顾肚子。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('递进并列句式')), `words=${words.join('|')}`);
+});
+
+test('刻意对仗被检出', () => {
+  const txt = PAD + '左手端着碗，右手握着筷。前脚刚迈出门，后脚还在门槛上。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('刻意对仗')), `words=${words.join('|')}`);
+});
+
+test('顿悟旁白腔被检出', () => {
+  const txt = PAD + '这一刻他明白了。他忽然意识到事情没那么简单。他嘴上答应着，心里却在盘算退路。表面上点了头，实际上一个字都不信。话音刚落，门开了。话音未落，人已经走了。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('顿悟旁白腔')), `words=${words.join('|')}`);
 });

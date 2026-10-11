@@ -21,6 +21,7 @@ import {
   scanPersonaDrift,
   scanDialogueOnTheNose, scanVagueDescription, scanDialogueTagOverload,
   scanCinematicNarration, scanExplainAside, scanResumeIntro,
+  scanProgressiveCouple, scanForcedAntithesis, scanInsightAside,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
 } from './lib.js';
@@ -5796,6 +5797,9 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         for (const h of scanCinematicNarration(full)) structureFixes.push(h.word);
         for (const h of scanExplainAside(full)) structureFixes.push(h.word);
         for (const h of scanResumeIntro(full)) structureFixes.push(h.word);
+        for (const h of scanProgressiveCouple(full)) structureFixes.push(h.word);
+        for (const h of scanForcedAntithesis(full)) structureFixes.push(h.word);
+        for (const h of scanInsightAside(full)) structureFixes.push(h.word);
 
         // 5a4) 主角名保护 + 开局模板检测（免费正则，模型无关）：
         //      主角名零出现（陈若辰被写成陈辰安类事故）→ 触发重生成；

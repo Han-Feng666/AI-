@@ -746,6 +746,9 @@ export function scanAiPatterns(text) {
   hits.push(...scanCinematicNarration(text));
   hits.push(...scanExplainAside(text));
   hits.push(...scanResumeIntro(text));
+  hits.push(...scanProgressiveCouple(text));
+  hits.push(...scanForcedAntithesis(text));
+  hits.push(...scanInsightAside(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -1980,6 +1983,76 @@ export function scanResumeIntro(text) {
     hits.push({
       word: `简历式介绍×${total}（出场即报年龄职业外貌清单。改成别人看见他时的一个反应，或他自己正在做的一件事）`,
       count: total,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 递进/并列句式：AI 用"不仅…而且""既…又""一方面…一方面""越是…越是"叠修辞层次
+export function scanProgressiveCouple(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const hits = [];
+  const count = (re) => (s.match(re) || []).length;
+  const budan = count(/不仅[^。！？\n]{1,24}(而且|并且|更是|更加)/g);
+  const jiyou = count(/既[^。！？\n]{1,12}[，,]?\s*又[^。！？\n]{1,12}/g);
+  const yifang = count(/一方面[^。！？\n]{1,16}[，,]?\s*(另)?一方面/g);
+  const yueyue = count(/越是[^。！？\n]{1,10}越是/g);
+  const total = budan + jiyou + yifang + yueyue;
+  if (total >= 3) {
+    const detail = [
+      budan ? `不仅而且×${budan}` : '',
+      jiyou ? `既又×${jiyou}` : '',
+      yifang ? `一方面×${yifang}` : '',
+      yueyue ? `越是越是×${yueyue}` : ''
+    ].filter(Boolean).join('/');
+    hits.push({
+      word: `递进并列句式×${total}（${detail}。直接陈述事实，不要叠修辞层次）`,
+      count: total,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 刻意对仗：AI 凑工整——"左手…右手""前脚…后脚""上有…下有"
+export function scanForcedAntithesis(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const hits = [];
+  const count = (re) => (s.match(re) || []).length;
+  const lr = count(/左(手|边|侧|脚|眼|脸|肩|臂|一个)[^。！？\n]{0,12}右(手|边|侧|脚|眼|脸|肩|臂|一个)/g);
+  const fb = count(/前(脚|一步|一刻|一秒|半晌|头)[^。！？\n]{0,12}后(脚|一步|一刻|一秒|半晌|头)/g);
+  const ud = count(/上(有|是|面|头|方)[^。！？\n]{0,8}下(有|是|面|头|方)/g);
+  const total = lr + fb + ud;
+  if (total >= 2) {
+    hits.push({
+      word: `刻意对仗×${total}（左手右手×${lr}/前脚后脚×${fb}/上下×${ud}。拆开写成自然语序，不要凑对仗）`,
+      count: total,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 伪深度感悟 + 心理旁白 + 话音刚落转场：叙述者跳出来解释或敲鼓点
+export function scanInsightAside(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const hits = [];
+  const count = (re) => (s.match(re) || []).length;
+  const insight = count(/(这一刻|那一刻|此刻)[^。！？\n]{0,8}(他|她)?(终于|忽然|突然)?(明白|意识|懂了)|他(忽然|突然|这才|终于)(明白了?|意识到|懂了|醒悟)/g);
+  const mouthHeart = count(/(嘴上|口上)[^。！？\n]{2,18}心里却|(表面上|表面)[^。！？\n]{2,16}(实际上|实则|其实)/g);
+  const voiceCut = count(/话音(刚落|未落)/g);
+  const detail = [];
+  if (insight >= 2) detail.push(`顿悟×${insight}`);
+  if (mouthHeart >= 2) detail.push(`心理旁白×${mouthHeart}`);
+  if (voiceCut >= 2) detail.push(`话音刚落×${voiceCut}`);
+  if (detail.length) {
+    hits.push({
+      word: `顿悟旁白腔（${detail.join('/')}。"这一刻他明白了""嘴上…心里却""话音刚落"删掉，换成动作或直接写下一段）`,
+      count: insight + mouthHeart + voiceCut,
       template: true
     });
   }
