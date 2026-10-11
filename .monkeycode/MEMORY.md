@@ -1242,3 +1242,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - 爬热门榜功能合规落地：直接爬第三方平台属未授权抓取（guardrail 禁），做"粘贴榜单"版——前端 InspirationGenerator.vue 加"市场风向参考（可选）"textarea（2000 字），随 /ideas 传 marketList；后端 trendBlock 只借题材方向与看点形态，严禁复用书名/人名/情节（"借风向，不借内容"）。服务端不做任何抓取。
   - 前端改动后 bump 须去掉 --no-build（build-and-patch 自带 vite build）；web/dist 与 release/*.patch.json 不入库。
   - 验证：test_ideas_engine.mjs（266 断言）+ scan_ai_patterns.test.js（13）+ npx vite build 通过。
+
+[Project Knowledge Summary]
+- Date: 2026-10-11
+- Context: Discovered by Agent while用户点破"无论什么题材都写成调查，调查的还是小事" (v1.4.86)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - "全题材都变调查戏"根因：①IDEAS_INVESTIGATION_RE 只有 6 个刑侦具象词（破案/验尸/追凶/连环杀手/命案现场/法医鉴定），"追查/查明/线索/谜团/真相"全放行；②LLM 偷懒路径——给主角一个谜团就有推进力，任何题材都会滑向调查框架。
+  - v1.4.86 三层修：①词表扩到调查/追查/查明/查清/排查/走访/打探/侦查/缉凶/断案/线索/谜团/真相/身世之谜/悬案/真凶/揭开秘密/水落石出（"查探经脉"类弱词不收防误伤）；②门禁两段判定：hook/logline 命中即剔，outline_H5 ≥2 章命中即剔（单章提及不剔）；③IDEAS_SYSTEM ④升级：主线从对抗夺还/竞技比拼/经营扩张/生存危机/关系拉扯/规则博弈/势力争锋/身份翻转里选，核心利害须大到影响主角根本命运或一方生态（治"调查小事"）。
+  - 玄幻引擎块同步加"主线推进方式"块（引擎块不受 IDEAS_SYSTEM 2400 限制，长约束优先放引擎块）。
+  - 2400 字上限靠等量置换守住（2398）：schema 说明/工作法/差异化/⑤ 逐段压缩；"调查市场行情"现在命中词表是有意收紧，旧断言已对齐。
+  - 验证：test_ideas_engine.mjs（276 断言）+ scan_ai_patterns.test.js（13）。
