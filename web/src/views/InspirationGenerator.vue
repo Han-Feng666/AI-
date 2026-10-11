@@ -20,6 +20,7 @@ const statusText = ref('');
 const ideas = ref([]);
 // 用户种子想法：给 AI 一个出发点（可空——空则纯按题材自由发挥）
 const seedIdea = ref('');
+const marketList = ref('');
 // 每批创意数量：2-6 个（数量越多单个创意细节越薄，默认 3 平衡质量与选择面）
 const ideaCount = ref(3);
 // 跨批次去重：累积所有已生成创意的签名（标题/梗概/金手指），下次生成时传给后端排除
@@ -77,6 +78,7 @@ async function generate() {
       styleIds: styleIds.value,
       count: ideaCount.value,
       seed: seedIdea.value.trim(),
+      marketList: marketList.value.trim(),
       excludeIdeas: historyIdeas.value
     }, {
       onStatus: (m) => { statusText.value = m; },
@@ -217,6 +219,16 @@ onMounted(loadStyleLibrary);
             maxlength="500"
             show-word-limit
             placeholder="想让故事围绕什么展开？一句话即可，如：'一个能听见物品最后一句话的旧货店老板'。留空则由 AI 自由发挥"
+          />
+        </el-form-item>
+        <el-form-item label="市场风向参考（可选）">
+          <el-input
+            v-model="marketList"
+            type="textarea"
+            :rows="3"
+            maxlength="2000"
+            show-word-limit
+            placeholder="从起点/番茄等平台热门榜复制书单粘贴到这里（每行一本），生成时参考当前热门题材方向与看点形态。仅本地参考，不会抓取平台数据，也不会抄袭任何书名情节"
           />
         </el-form-item>
         <el-form-item label="目标频道">

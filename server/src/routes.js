@@ -1899,7 +1899,15 @@ ${blocks.join('\n\n')}`;
   const presets = (Array.isArray(stylePresets) ? stylePresets : [])
     .map((s) => String(s).trim()).filter(Boolean);
   const presetBlock = presets.length
-    ? `\n\n【创作风格硬约束】用户勾选的风格：${presets.join('、')}。每个创意的基调、冲突形态、结局气质必须贴合这些风格，不得自行改写成别的风格。伤感/虐恋/悲剧=错过与撕裂，不要翻盘爽文；燃向=争胜翻盘；轻松日常=生活质感与错位，不要强行高潮。未勾选的风格不要往创意里塞。`
+    ? `\n\n【创作风格硬约束】用户勾选的风格：${presets.join('、')}。每个创意的基调、冲突形态、结局气质必须贴合这些风格，不得自行改写成别的风格。未勾选的风格不要往创意里塞。常见基调硬落点：快节奏爽文=开篇钩子内主角必须完成一次当众扬眉吐气或反杀（爽点前置，钩子里就能看见）；热血燃向=硬碰硬对抗强敌、燃点场面写具体动作；轻松日常=生活质感与错位，不要强行高潮；伤感/虐恋/悲剧=错过与撕裂，不要翻盘爽文；悬疑紧张=未兑现的利害步步紧逼。每个创意的 hook 必须一眼能看出勾选的基调。`
+    : '';
+
+  // 市场风向参考（v1.4.85）：用户从小说平台热门榜粘贴的书单。第三方平台数据
+  // 由用户自行复制粘贴，服务端不做任何抓取；提示词只借题材方向与看点形态，
+  // 严禁复用书名/人名/情节，防"同类型"滑向"抄袭"
+  const marketList = String((req.body || {}).marketList || '').trim().slice(0, 2000);
+  const trendBlock = marketList
+    ? `\n\n【市场风向参考（用户从平台热门榜粘贴）】\n${marketList}\n提炼这些热门作品的受众喜好、题材方向与看点形态，构思同类型中有竞争力的创意；严禁复用其中任何书名、人名、设定与情节——借风向，不借内容。`
     : '';
 
   // 随机差异化轴：为每个创意槽位分配不同的金手指类型 + 主角初始身份，
@@ -2121,7 +2129,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${youthEngineBlock}${xuanhuanCanonBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${trendBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${youthEngineBlock}${xuanhuanCanonBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}
 
 【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
 ${axisBlock}
@@ -2565,13 +2573,23 @@ ${axisBlock}
         return end({ type: 'error', message: GATE_BLOCKED_MSG });
       }
       if (gated.ideas.length) {
-        const finalIdeas = await ensureStoryEngine(gated.ideas);
+        // 数量补齐（v1.4.85）：门禁剔除后不足用户要求数量时带反馈再生成一轮，
+        // 新批数量更多才采用——勾 3 个只出 2 个是硬体验问题
+        let finalIdeas = gated.ideas;
+        if (finalIdeas.length < ideaCount) {
+          send({ type: 'status', message: `门禁剔除后仅剩 ${finalIdeas.length} 个创意，正在补齐到 ${ideaCount} 个…` });
+          const rescued = await rescueRound(`上一轮应输出 ${ideaCount} 个创意，部分因违规被剔除只剩 ${finalIdeas.length} 个。本轮必须完整输出 ${ideaCount} 个创意，每个都同时满足：贴合所选题材与风格基调、story_engine 与 core_contrast 全字段、无违规开局。宁可创意平庸一点也要数量足、字段全。`);
+          if (rescued && rescued.ideas.length > finalIdeas.length) {
+            finalIdeas = rescued.ideas;
+          }
+        }
+        finalIdeas = await ensureStoryEngine(finalIdeas);
         const uncovered = checkCoverage(finalIdeas);
         if (!uncovered.length) return end({ type: 'done', data: { ideas: finalIdeas } });
         // 覆盖缺口：带反馈补一轮，新批次覆盖更全才采用；仍未补齐则原样返回并提示
-        const rescued = await rescueRound(`上一轮创意未覆盖勾选题材：${uncovered.join('、')}。本轮每个勾选题材至少出一个创意，内容必须贴合该题材的核心设定与生态，题材字段直接标注对应题材。`);
-        if (rescued && rescued.ideas.length && checkCoverage(rescued.ideas).length < uncovered.length) {
-          return end({ type: 'done', data: { ideas: rescued.ideas } });
+        const coveredRescued = await rescueRound(`上一轮创意未覆盖勾选题材：${uncovered.join('、')}。本轮每个勾选题材至少出一个创意，内容必须贴合该题材的核心设定与生态，题材字段直接标注对应题材。`);
+        if (coveredRescued && coveredRescued.ideas.length && checkCoverage(coveredRescued.ideas).length < uncovered.length) {
+          return end({ type: 'done', data: { ideas: coveredRescued.ideas } });
         }
         send({ type: 'status', message: `提示：本次创意未覆盖勾选题材「${uncovered.join('、')}」，可点击重新生成补齐` });
         return end({ type: 'done', data: { ideas: finalIdeas } });
