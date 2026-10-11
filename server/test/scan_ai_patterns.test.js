@@ -116,7 +116,7 @@ test('白描正文不误报分镜/旁白/简历', () => {
 火膛里柴火噼啪响，锅边结了一圈白碱。他拿筷子戳了戳红薯，还没熟，又把盖子扣回去。`.repeat(3);
   const hits = scan(txt);
   const words = hits.map((h) => h.word);
-  assert.ok(!words.some((w) => /影视分镜腔|解释旁白|简历式介绍|递进并列句式|刻意对仗|顿悟旁白腔/.test(w)), `不应误报，实际: ${words.join('|')}`);
+  assert.ok(!words.some((w) => /影视分镜腔|解释旁白|简历式介绍|递进并列句式|刻意对仗|顿悟旁白腔|应付套话|精确数字癖|预判确认腔/.test(w)), `不应误报，实际: ${words.join('|')}`);
 });
 
 test('递进并列句式被检出', () => {
@@ -138,4 +138,25 @@ test('顿悟旁白腔被检出', () => {
   const hits = scan(txt);
   const words = hits.map((h) => h.word);
   assert.ok(words.some((w) => w.includes('顿悟旁白腔')), `words=${words.join('|')}`);
+});
+
+test('应付套话被检出', () => {
+  const txt = PAD + '他犹豫了一下，没多想。她试探性地伸手。他又犹豫了一下，下意识地退了半步，本能地攥紧拳头。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('应付套话')), `words=${words.join('|')}`);
+});
+
+test('精确数字癖被检出', () => {
+  const txt = PAD + '墙上的钟指向两点十三分。电量还剩百分之十七。刀尖离喉咙只剩三寸。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('精确数字癖')), `words=${words.join('|')}`);
+});
+
+test('预判确认腔被检出', () => {
+  const txt = PAD + '果然不出所料。果不其然，门开了。不知过了多久，天快亮了。也不知过了多久，茶凉了。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('预判确认腔')), `words=${words.join('|')}`);
 });

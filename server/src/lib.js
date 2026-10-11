@@ -749,6 +749,9 @@ export function scanAiPatterns(text) {
   hits.push(...scanProgressiveCouple(text));
   hits.push(...scanForcedAntithesis(text));
   hits.push(...scanInsightAside(text));
+  hits.push(...scanHedgeFiller(text));
+  hits.push(...scanClockPrecision(text));
+  hits.push(...scanPredictConfirm(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -2053,6 +2056,73 @@ export function scanInsightAside(text) {
     hits.push({
       word: `顿悟旁白腔（${detail.join('/')}。"这一刻他明白了""嘴上…心里却""话音刚落"删掉，换成动作或直接写下一段）`,
       count: insight + mouthHeart + voiceCut,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 应付式套话：动作前垫"没多想/犹豫了一下/试探性地/下意识地/本能地"，AI 用它假装有内心戏
+export function scanHedgeFiller(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const hits = [];
+  const count = (re) => (s.match(re) || []).length;
+  const items = [
+    { n: count(/没多想|没想太多|也没细想/g), label: '没多想' },
+    { n: count(/犹豫了一下|犹豫片刻/g), label: '犹豫了一下' },
+    { n: count(/试探性地/g), label: '试探性地' },
+    { n: count(/下意识地/g), label: '下意识地' },
+    { n: count(/本能地/g), label: '本能地' }
+  ];
+  const total = items.reduce((a, x) => a + x.n, 0);
+  const repeat = items.filter((x) => x.n >= 2);
+  if (total >= 4 || repeat.length) {
+    const detail = items.filter((x) => x.n).map((x) => `${x.label}×${x.n}`).join('/');
+    hits.push({
+      word: `应付套话×${total}（${detail}。每词全章最多 1 次，多的删掉直接写动作）`,
+      count: total,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 精确数字癖：时钟写到分钟、电量报百分比、尺寸用仪器口径
+export function scanClockPrecision(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const hits = [];
+  const clock = s.match(/[零〇一二三四五六七八九十两\d]{1,3}点[零〇一二三四五六七八九十\d]{1,3}分/g) || [];
+  const battery = s.match(/(电量|电池)[^。！？\n]{0,8}(\d+\s*%|百分之[零〇一二三四五六七八九十百\d]+)/g) || [];
+  const measure = s.match(/(肩高|身高|离[^。]{0,6}只剩|距离)[^。！？\n]{0,8}(一米|两米|三寸|五寸|\d+\s*(厘米|米))/g) || [];
+  const total = clock.length + battery.length + measure.length;
+  if (total >= 2) {
+    const sample = [...clock, ...battery, ...measure].slice(0, 3).join('、');
+    hits.push({
+      word: `精确数字癖×${total}（如"${sample}"。时间写到整点，尺寸用齐腰/一拳，不要报分钟和百分比）`,
+      count: total,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 预判确认 + 模糊时间："果然/不出所料"敲鼓点，"不知过了多久"偷懒跳时
+export function scanPredictConfirm(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const hits = [];
+  const count = (re) => (s.match(re) || []).length;
+  const predict = count(/果不其然|不出所料|果然如此|果然/g);
+  const fuzzy = count(/不知过了多久|不知过了多长时间|也不知过了多久/g);
+  const detail = [];
+  if (predict >= 2) detail.push(`果然腔×${predict}`);
+  if (fuzzy >= 2) detail.push(`不知过了多久×${fuzzy}`);
+  if (detail.length) {
+    hits.push({
+      word: `预判确认腔（${detail.join('/')}。"果然/不出所料"全章最多 1 处；"不知过了多久"改成具体动作带过时间）`,
+      count: predict + fuzzy,
       template: true
     });
   }

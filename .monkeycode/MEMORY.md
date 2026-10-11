@@ -1297,3 +1297,12 @@ Entries discovered by the Agent during task execution should follow this format:
   - 漏拦三类：`scanProgressiveCouple`（不仅而且/既又/一方面/越是越是≥3）、`scanForcedAntithesis`（左右/前后/上下≥2）、`scanInsightAside`（顿悟/嘴上心里却/话音刚落 同类≥2）。挂入 `scanAiPatterns` + 质量门 `structureFixes`。
   - `ANTI_AI_STYLE`/`POLISH_SYSTEM`/`AI_DETECT` 只加对应短正例，不堆 CHAPTER_SYSTEM。
   - 验证：scan_ai_patterns.test.js（16）；纯后端 bump --no-build，补丁 update-1.4.90.patch.json。
+
+[Project Knowledge Summary]
+- Date: 2026-10-11
+- Context: Discovered by Agent while正文去 AI 味：提示词已禁应付套话/精确时钟/果然腔，扫描器未挂 (v1.4.91)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 漏拦三类：`scanHedgeFiller`（没多想/犹豫了一下/试探性地/下意识地/本能地 合计≥4 或单词≥2）、`scanClockPrecision`（X点Y分/电量百分比/尺寸仪器口径≥2）、`scanPredictConfirm`（果然/不出所料 或 不知过了多久 同类≥2）。挂入 `scanAiPatterns` + 质量门 `structureFixes`。
+  - `ANTI_AI_STYLE` 已有红线，`POLISH_SYSTEM`/`AI_DETECT` 只加短正例。
+  - 验证：scan_ai_patterns.test.js（19）；纯后端 bump --no-build，补丁 update-1.4.91.patch.json。
