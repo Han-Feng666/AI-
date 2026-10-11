@@ -116,7 +116,7 @@ test('白描正文不误报分镜/旁白/简历', () => {
 火膛里柴火噼啪响，锅边结了一圈白碱。他拿筷子戳了戳红薯，还没熟，又把盖子扣回去。`.repeat(3);
   const hits = scan(txt);
   const words = hits.map((h) => h.word);
-  assert.ok(!words.some((w) => /影视分镜腔|解释旁白|简历式介绍|递进并列句式|刻意对仗|顿悟旁白腔|应付套话|精确数字癖|预判确认腔/.test(w)), `不应误报，实际: ${words.join('|')}`);
+  assert.ok(!words.some((w) => /影视分镜腔|解释旁白|简历式介绍|递进并列句式|刻意对仗|顿悟旁白腔|应付套话|精确数字癖|预判确认|段内反复用词|成语连用|幼稚叙述/.test(w)), `不应误报，实际: ${words.join('|')}`);
 });
 
 test('递进并列句式被检出', () => {
@@ -154,9 +154,39 @@ test('精确数字癖被检出', () => {
   assert.ok(words.some((w) => w.includes('精确数字癖')), `words=${words.join('|')}`);
 });
 
-test('预判确认腔被检出', () => {
-  const txt = PAD + '果然不出所料。果不其然，门开了。不知过了多久，天快亮了。也不知过了多久，茶凉了。';
+test('预判确认过密被检出', () => {
+  const txt = PAD + '果然不出所料。果不其然，门开了。不知过了多久，天快亮了。也不知过了多久，茶凉了。不知过了多长时间，鸡叫了。';
   const hits = scan(txt);
   const words = hits.map((h) => h.word);
-  assert.ok(words.some((w) => w.includes('预判确认腔')), `words=${words.join('|')}`);
+  assert.ok(words.some((w) => w.includes('预判确认过密')), `words=${words.join('|')}`);
+});
+
+test('段内反复用词被检出', () => {
+  const p1 = '梧桐叶子落在肩上，他又去捡那片梧桐叶，抬头看那棵梧桐，梧桐籽掉了一地，脚边还是梧桐。';
+  const p2 = '河面上起了水腥气，水腥气钻进鼻子，他又闻了闻那股水腥气，水腥气散不去。';
+  const txt = PAD + '\n\n' + p1 + '\n\n' + p2;
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('段内反复用词')), `words=${words.join('|')}`);
+});
+
+test('成语连用堆砌被检出', () => {
+  const txt = PAD + '夜色深沉、灯火阑珊、万籁俱寂。他心乱如麻、六神无主。场面翻天覆地、惊天动地。道路崎岖而又艰难万分。前途光明而又漫长无边。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('成语连用')), `words=${words.join('|')}`);
+});
+
+test('幼稚叙述被检出', () => {
+  const txt = PAD + '他是一个好人。她是一个坏人。大家都说他善良。人们都觉得她坏。因为天黑了所以他回家。因为下雨所以路滑。因为没钱所以饿着。这个故事告诉我们做人要诚实。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('幼稚叙述')), `words=${words.join('|')}`);
+});
+
+test('偶用果然犹豫不误报', () => {
+  const txt = PAD + '他犹豫了一下，推门进去。果然门没锁。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => /应付套话|预判确认/.test(w)), `偶用不应报，实际: ${words.join('|')}`);
 });

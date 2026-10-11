@@ -752,6 +752,9 @@ export function scanAiPatterns(text) {
   hits.push(...scanHedgeFiller(text));
   hits.push(...scanClockPrecision(text));
   hits.push(...scanPredictConfirm(text));
+  hits.push(...scanParagraphWordRepeat(text));
+  hits.push(...scanIdiomStack(text));
+  hits.push(...scanNaiveNarration(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -2076,11 +2079,11 @@ export function scanHedgeFiller(text) {
     { n: count(/本能地/g), label: '本能地' }
   ];
   const total = items.reduce((a, x) => a + x.n, 0);
-  const repeat = items.filter((x) => x.n >= 2);
-  if (total >= 4 || repeat.length) {
+  const repeat = items.filter((x) => x.n >= 3);
+  if (total >= 5 || repeat.length) {
     const detail = items.filter((x) => x.n).map((x) => `${x.label}×${x.n}`).join('/');
     hits.push({
-      word: `应付套话×${total}（${detail}。每词全章最多 1 次，多的删掉直接写动作）`,
+      word: `应付套话过密×${total}（${detail}。偶用正常，同一章密集复用才是机械感，删掉重复处直接写动作）`,
       count: total,
       template: true
     });
@@ -2117,16 +2120,87 @@ export function scanPredictConfirm(text) {
   const predict = count(/果不其然|不出所料|果然如此|果然/g);
   const fuzzy = count(/不知过了多久|不知过了多长时间|也不知过了多久/g);
   const detail = [];
-  if (predict >= 2) detail.push(`果然腔×${predict}`);
-  if (fuzzy >= 2) detail.push(`不知过了多久×${fuzzy}`);
+  if (predict >= 3) detail.push(`果然腔×${predict}`);
+  if (fuzzy >= 3) detail.push(`不知过了多久×${fuzzy}`);
   if (detail.length) {
     hits.push({
-      word: `预判确认腔（${detail.join('/')}。"果然/不出所料"全章最多 1 处；"不知过了多久"改成具体动作带过时间）`,
+      word: `预判确认过密（${detail.join('/')}。偶用正常，同章反复敲"果然/不知过了多久"才是鼓点腔，留一处其余改成具体动作）`,
       count: predict + fuzzy,
       template: true
     });
   }
   return hits;
+}
+
+// 段内反复用词：同一段反复甩同一个实词。偶用正常，一段里同一词 ≥3 次且多段如此才是机械感。
+export function scanParagraphWordRepeat(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const paras = s.split(/\n+/).map((p) => p.trim()).filter((p) => p.length >= 40);
+  const samples = [];
+  for (const p of paras) {
+    const local = new Map();
+    const compact = p.replace(/\s+/g, '');
+    for (let i = 0; i + 2 <= compact.length; i++) {
+      const g = compact.slice(i, i + 2);
+      if (NEARBY_STOPWORDS.has(g)) continue;
+      if (!/^[\u4e00-\u9fff]{2}$/.test(g)) continue;
+      local.set(g, (local.get(g) || 0) + 1);
+    }
+    let best = '';
+    let bestN = 0;
+    for (const [g, c] of local) {
+      if (c > bestN) { bestN = c; best = g; }
+    }
+    if (bestN >= 3) samples.push(`「${best}」×${bestN}`);
+  }
+  const heavy = samples.filter((x) => /×([4-9]|\d{2,})$/.test(x));
+  if (samples.length < 2 && !heavy.length) return [];
+  return [{
+    word: `段内反复用词（${samples.slice(0, 3).join('、')}。同一段反复甩同一个词是机械感，换成动作或近义，或删掉重复处）`,
+    count: samples.length,
+    template: true
+  }];
+}
+
+// 成语连用堆砌：四字块用顿号/而且串成垛。单用一个成语正常，连排才是词藻堆砌。
+export function scanIdiomStack(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const chain = s.match(/[\u4e00-\u9fff]{4}、[\u4e00-\u9fff]{4}(?:、[\u4e00-\u9fff]{4})+/g) || [];
+  const pair = s.match(/[\u4e00-\u9fff]{4}、[\u4e00-\u9fff]{4}/g) || [];
+  const conj = s.match(/[\u4e00-\u9fff]{4}(而又|并且)[\u4e00-\u9fff]{4}/g) || [];
+  if (!chain.length && pair.length < 3 && conj.length < 2) return [];
+  const sample = (chain[0] || pair[0] || conj[0] || '').slice(0, 24);
+  return [{
+    word: `成语连用堆砌×${chain.length + pair.length + conj.length}（如"${sample}"。四字成语单用正常，顿号连排是词藻垛，拆开留一个最贴场景的，其余改白描）`,
+    count: chain.length + pair.length + conj.length,
+    template: true
+  }];
+}
+
+// 幼稚叙述：贴好人坏人标签、童话收束、说教、因为所以密度过高。逻辑简单到像作文。
+export function scanNaiveNarration(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const count = (re) => (s.match(re) || []).length;
+  const label = count(/(他|她|这人|那人)是一个?(好人|坏人|善良的人|正直的人|温柔的人|冷酷的人)/g);
+  const fairy = count(/从此(过上了|过着)(幸福|快乐)|幸福(地|的)生活在一起/g);
+  const moral = count(/做人(要|应该|必须)|我们(要|应该)记住|这个故事告诉/g);
+  const cause = count(/因为[^。！？\n]{2,18}所以[^。！？\n]{2,18}/g);
+  const everyone = count(/(大家|人们)都(说|觉得|认为|知道)/g);
+  const detail = [];
+  if (label >= 2) detail.push(`贴标签×${label}`);
+  if (fairy >= 1) detail.push(`童话收束×${fairy}`);
+  if (moral >= 1) detail.push(`说教×${moral}`);
+  if (cause >= 3) detail.push(`因为所以×${cause}`);
+  if (everyone >= 2) detail.push(`大家都说×${everyone}`);
+  if (!detail.length) return [];
+  return [{
+    word: `幼稚叙述（${detail.join('/')}。人物用行为说话，不要贴好人坏人标签，不要童话收束和说教，因果用场面带出来）`,
+    count: label + fairy + moral + cause + everyone,
+    template: true
+  }];
 }
 
 // AI 特征标点硬扫描：省略号堆叠、叹号连用、波浪号、半角句号混入全角

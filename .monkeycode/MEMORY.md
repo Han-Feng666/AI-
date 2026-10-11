@@ -1306,3 +1306,20 @@ Entries discovered by the Agent during task execution should follow this format:
   - 漏拦三类：`scanHedgeFiller`（没多想/犹豫了一下/试探性地/下意识地/本能地 合计≥4 或单词≥2）、`scanClockPrecision`（X点Y分/电量百分比/尺寸仪器口径≥2）、`scanPredictConfirm`（果然/不出所料 或 不知过了多久 同类≥2）。挂入 `scanAiPatterns` + 质量门 `structureFixes`。
   - `ANTI_AI_STYLE` 已有红线，`POLISH_SYSTEM`/`AI_DETECT` 只加短正例。
   - 验证：scan_ai_patterns.test.js（19）；纯后端 bump --no-build，补丁 update-1.4.91.patch.json。
+
+[User Instruction Summary]
+- Date: 2026-10-11
+- Context: 用户纠正去 AI 味方向：禁词清单误伤真人写法
+- Instructions:
+  - 真人作者也会写「果然/犹豫/下意识」等，禁止拦截单个常见词。
+  - AI 特征是：没有逻辑或过于幼稚、一章/一段内重复多次使用同一个词、词藻堆砌过多。按密度和逻辑改扫描器，不堆禁词清单。
+
+[Project Knowledge Summary]
+- Date: 2026-10-11
+- Context: Discovered by Agent while按用户口径把去 AI 味从禁词改成密度/逻辑 (v1.4.92)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 阈值放宽：`scanHedgeFiller` 合计≥5 或单词≥3；`scanPredictConfirm` 同类≥3。偶用果然/犹豫不报。
+  - 新增密度扫描器：`scanParagraphWordRepeat`（同一段同一实词≥3 且多段如此）、`scanIdiomStack`（只认顿号连排四字，逗号白描不误伤）、`scanNaiveNarration`（贴标签/童话收束/说教/因为所以/大家都说）。
+  - `ANTI_AI_STYLE` 开篇改成「AI 味在密度和逻辑」。
+  - 验证：scan_ai_patterns.test.js（23）；纯后端 bump --no-build，补丁 update-1.4.92.patch.json。
