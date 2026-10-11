@@ -2310,9 +2310,16 @@ ${axisBlock}
             }
           }
           if (!allowsMystery) {
-            const invHit = String(text).match(IDEAS_INVESTIGATION_RE);
-            if (invHit) {
-              send({ type: 'status', message: `已剔除调查主线偏题的创意「${it.title}」（${invHit[0]}），未勾选悬疑/推理` });
+            // 调查主线检测（v1.4.86 扩词表+分权重的两段判定）：
+            // ① hook/logline 命中强调查词（追查/查明/线索/谜团/真相…）= 主线框架是调查戏，剔；
+            // ② outline_H5 有 ≥2 章命中 = 前五章都在追查，同样剔。
+            // 单章提及调查动作不剔（查探经脉/打听消息是正常剧情动作，防误伤）
+            const coreBlob = [it?.hook, it?.logline].filter(Boolean).join('\n');
+            const invHit = String(coreBlob).match(IDEAS_INVESTIGATION_RE);
+            const outlineHits = (Array.isArray(it?.outline_H5) ? it.outline_H5 : [])
+              .filter((c) => IDEAS_INVESTIGATION_RE.test(String(c || ''))).length;
+            if (invHit || outlineHits >= 2) {
+              send({ type: 'status', message: `已剔除调查主线偏题的创意「${it.title}」（${invHit ? `主线框架是「${invHit[0]}」` : `前五章有 ${outlineHits} 章在追查`}——未勾悬疑/推理，主线必须靠对抗/竞争/生存/关系冲突推进），可点击重新生成补齐` });
               return false;
             }
           }
