@@ -1231,3 +1231,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - 配套机器检查：gateIdeas 保留 core_contrast；批内查重签名加反差核前 20 字；ensureStoryEngine 一并检查 core_contrast（<8 字算缺）；formatIdeaAsConcept 把反差内核渲染进 concept（书名/题材后、梗概前）。
   - IDEAS_SYSTEM 2400 上限靠逐段压缩达标（2399）：①②④⑤⑥⑦/工作法/标杆段/命名段/差异化/文笔底线/schema 说明全部瘦身；旧断言按新措辞对齐（副线去谜团→'副线严禁做成身份谜团'、标杆限域→'只学结构'、禁仿系统文→'不得写成系统文'、额外加→'不额外加'、文笔底线→'禁名词堆叠与病句'）。
   - 验证：test_ideas_engine.mjs（261 断言）+ scan_ai_patterns.test.js（13）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-11
+- Context: Discovered by Agent while用户实报勾 3 出 2/风格基调对不上/要求爬热门榜 (v1.4.85)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - "勾 3 出 2/出 1"根因：rescueRound 只在全灭或覆盖缺口触发，门禁部分剔除后剩余数量不补。v1.4.85 加数量补齐轮（ensureStoryEngine 之前）：finalIdeas.length < ideaCount 时带反馈重生一轮，新批更多才采用。
+  - 风格基调对不上：presetBlock 原来只有一句泛约束。v1.4.85 写"常见基调硬落点"（快节奏爽文=开篇钩子内完成一次当众扬眉吐气/反杀、爽点前置；热血燃向=硬碰硬燃点写具体动作；伤感=错过撕裂；悬疑=未兑现利害），要求 hook 一眼见基调。
+  - 爬热门榜功能合规落地：直接爬第三方平台属未授权抓取（guardrail 禁），做"粘贴榜单"版——前端 InspirationGenerator.vue 加"市场风向参考（可选）"textarea（2000 字），随 /ideas 传 marketList；后端 trendBlock 只借题材方向与看点形态，严禁复用书名/人名/情节（"借风向，不借内容"）。服务端不做任何抓取。
+  - 前端改动后 bump 须去掉 --no-build（build-and-patch 自带 vite build）；web/dist 与 release/*.patch.json 不入库。
+  - 验证：test_ideas_engine.mjs（266 断言）+ scan_ai_patterns.test.js（13）+ npx vite build 通过。
