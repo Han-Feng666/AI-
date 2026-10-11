@@ -64,6 +64,7 @@ getGenreGuide, getGenreGuides, buildPlanGenreConformity,
   buildYouthEngineBlock, YOUTH_ADULT_RE, YOUTH_OK_RE, YOUTH_CREEP_RE,
   buildGenreSpineBlock,
   GENRE_CONTENT_TAGS,
+  HIST_PATH_CATS,
   buildIdeaExamplesBlock
 } from './prompts.js';
 import {
@@ -2224,22 +2225,53 @@ ${axisBlock}
         return false;
       });
 
-      // 正向题材内容门禁（v1.4.81）：genre 标签合规但正文没有该题材的核心内容，
-      // 属于"贴错标签式跑题"——科幻标签写成都市恋爱、西幻标签零魔法元素、
-      // 历史标签落在现代都市。按创意认领的题材家族校验正文内容特征
+      // 正向题材内容门禁（v1.4.81，v1.4.88 强化）：genre 标签合规但正文没有该题材
+      // 的核心内容，属于"贴错标签式跑题"。v1.4.88 前按创意自认领的 genre 校验——
+      // 模型漏写标签就漏网（实锤：勾"历史 架空 穿越 系统"，出的创意完全没体现
+      // 系统/穿越元素）。改为按用户勾选题材驱动：勾了该家族，每条正文都必须有
+      // 该家族核心内容
       for (const tag of GENRE_CONTENT_TAGS) {
+        const joinedGenres = genreList.join(' ');
+        if (!genreList.some((g) => tag.genreRe.test(g))) continue;
+        if (tag.notGenreRe && tag.notGenreRe.test(joinedGenres)) continue;
         list = list.filter((it) => {
-          if (!tag.genreRe.test(String(it.genre || ''))) return true;
-          if (tag.notGenreRe && tag.notGenreRe.test(String(it.genre || ''))) return true;
           const text = [
             it.title, it.hook, it.logline,
             it.protagonist?.golden_finger, it.protagonist?.identity,
             ...(Array.isArray(it.outline_H5) ? it.outline_H5 : [])
           ].filter(Boolean).join('\n');
           if (tag.contentRe.test(text)) return true;
-          send({ type: 'status', message: `已剔除贴错题材标签的创意「${it.title}」（标了「${tag.label}」但正文没有该题材的核心内容），可点击重新生成补齐` });
+          send({ type: 'status', message: `已剔除跑题的创意「${it.title}」（勾选了「${tag.label}」题材，但这条创意正文没有该题材的核心内容），可点击重新生成补齐` });
           return false;
         });
+      }
+
+      // 历史/穿越批内崛起路径查重（v1.4.88）：实锤用户反馈——勾"历史 架空 穿越
+      // 系统"，整批全是"从市井小民到权臣"。同主路径批内最多 1 条，超出剔除
+      // （补齐轮带反馈重生），强制路径分散
+      if ((hasTrans || /历史|架空|古代|王朝|种田|权谋/.test(genreList.join(' '))) && list.length >= 2) {
+        const catOf = list.map((it) => {
+          const spineText = [it.logline, it.story_engine?.central_question, it.protagonist?.golden_finger].filter(Boolean).join('\n');
+          for (const cat of HIST_PATH_CATS) {
+            if (cat.re.test(spineText)) return cat.label;
+          }
+          return '其他';
+        });
+        const catCount = {};
+        catOf.forEach((c) => { catCount[c] = (catCount[c] || 0) + 1; });
+        const [topLabel, topCount] = Object.entries(catCount).sort((a, b) => b[1] - a[1])[0];
+        if (topLabel !== '其他' && topCount > 1) {
+          let removed = 0;
+          const excess = topCount - 1;
+          list = list.filter((it, i) => {
+            if (catOf[i] === topLabel && removed < excess) {
+              removed += 1;
+              send({ type: 'status', message: `已剔除崛起路径重复的创意「${it.title}」（同批已有一条「${topLabel}」主线——历史/穿越大盘有庙堂/军功/商产/种田/文坛多条路径，整批一条线=雷同）` });
+              return false;
+            }
+            return true;
+          });
+        }
       }
 
       // 开场驱动收敛闸（v1.4.82）：整批都开在"亡故长辈留遗物/遗言→少年凭能力收集/交付"
@@ -2589,27 +2621,40 @@ ${axisBlock}
       // v1.4.56）：修复路径会把刚被剔除的违规创意原样解析回来，门禁形同虚设
       if (gated.hadCandidates && gated.ideas.length === 0) {
         const rescued = await rescueRound('上一轮全部创意偏离所选题材或金手指载体跑偏，被题材门禁整批剔除。本轮必须严格贴合所选题材的核心设定与世界观生态，金手指按题材规则写。');
-        if (rescued && rescued.ideas.length) return end({ type: 'done', data: { ideas: await ensureStoryEngine(rescued.ideas) } });
+        // v1.4.88：补救轮产物同样过门禁，防跑题创意从补救路径溜进结果
+        const gatedRescued = rescued ? gateIdeas(rescued.ideas) : { ideas: [] };
+        if (gatedRescued.ideas.length) return end({ type: 'done', data: { ideas: await ensureStoryEngine(gatedRescued.ideas) } });
         return end({ type: 'error', message: GATE_BLOCKED_MSG });
       }
       if (gated.ideas.length) {
         // 数量补齐（v1.4.85）：门禁剔除后不足用户要求数量时带反馈再生成一轮，
-        // 新批数量更多才采用——勾 3 个只出 2 个是硬体验问题
+        // 新批数量更多才采用——勾 3 个只出 2 个是硬体验问题。
+        // v1.4.88 修正：补齐轮产物必须重新过题材门禁——实锤用户反馈"勾历史穿越系统
+        // 出的创意有跑题的"，补齐轮是门禁外产出，跑题创意从这里溜进结果集
         let finalIdeas = gated.ideas;
-        if (finalIdeas.length < ideaCount) {
+        let backfillRounds = 0;
+        while (finalIdeas.length < ideaCount && backfillRounds < 2) {
+          backfillRounds += 1;
           send({ type: 'status', message: `门禁剔除后仅剩 ${finalIdeas.length} 个创意，正在补齐到 ${ideaCount} 个…` });
-          const rescued = await rescueRound(`上一轮应输出 ${ideaCount} 个创意，部分因违规被剔除只剩 ${finalIdeas.length} 个。本轮必须完整输出 ${ideaCount} 个创意，每个都同时满足：贴合所选题材与风格基调、story_engine 与 core_contrast 全字段、无违规开局。宁可创意平庸一点也要数量足、字段全。`);
-          if (rescued && rescued.ideas.length > finalIdeas.length) {
-            finalIdeas = rescued.ideas;
+          const rescued = await rescueRound(`上一轮应输出 ${ideaCount} 个创意，部分因违规被剔除只剩 ${finalIdeas.length} 个。本轮必须完整输出 ${ideaCount} 个创意，每个都同时满足：贴合所选题材与风格基调、story_engine 与 core_contrast 全字段、无违规开局；多个创意的崛起/登顶路径或看点机制必须彼此不同（历史/穿越分属庙堂/军功/商产/种田/文坛等不同路径），严禁整批一条线。宁可创意平庸一点也要数量足、字段全。`);
+          const gatedRescued = rescued ? gateIdeas(rescued.ideas) : { ideas: [] };
+          if (gatedRescued.ideas.length > finalIdeas.length) {
+            finalIdeas = gatedRescued.ideas;
+          } else {
+            break;
           }
+        }
+        if (finalIdeas.length < ideaCount) {
+          send({ type: 'status', message: `提示：多次补齐后仍只有 ${finalIdeas.length} 个创意达标，可点击重新生成` });
         }
         finalIdeas = await ensureStoryEngine(finalIdeas);
         const uncovered = checkCoverage(finalIdeas);
         if (!uncovered.length) return end({ type: 'done', data: { ideas: finalIdeas } });
-        // 覆盖缺口：带反馈补一轮，新批次覆盖更全才采用；仍未补齐则原样返回并提示
+        // 覆盖缺口：带反馈补一轮，新批次覆盖更全才采用；产物同样必须重新过题材门禁（v1.4.88）
         const coveredRescued = await rescueRound(`上一轮创意未覆盖勾选题材：${uncovered.join('、')}。本轮每个勾选题材至少出一个创意，内容必须贴合该题材的核心设定与生态，题材字段直接标注对应题材。`);
-        if (coveredRescued && coveredRescued.ideas.length && checkCoverage(coveredRescued.ideas).length < uncovered.length) {
-          return end({ type: 'done', data: { ideas: coveredRescued.ideas } });
+        const gatedCovered = coveredRescued ? gateIdeas(coveredRescued.ideas) : { ideas: [] };
+        if (gatedCovered.ideas.length && checkCoverage(gatedCovered.ideas).length < uncovered.length) {
+          return end({ type: 'done', data: { ideas: gatedCovered.ideas } });
         }
         send({ type: 'status', message: `提示：本次创意未覆盖勾选题材「${uncovered.join('、')}」，可点击重新生成补齐` });
         return end({ type: 'done', data: { ideas: finalIdeas } });
