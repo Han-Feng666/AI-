@@ -61,6 +61,7 @@ getGenreGuide, getGenreGuides, buildPlanGenreConformity,
   IDEAS_SUPERPOWER_RE, IDEAS_SYSTEM_LEAK_RE, IDEAS_TRANS_LEAK_RE,
   XUAN_MODERN_LEAK_RE, XUAN_NON_CULTIVATION_RE,
   XUAN_SPINE_GROWTH_RE, XUAN_SPINE_TASK_RE,
+  YOUTH_CONTEST_RE, ROMANCE_SPINE_RE,
   IDEAS_INVESTIGATION_RE, IDEAS_REALISTIC_TOKENS,
   bannedDefiningKeywords, buildXuanhuanCanonBlock, isXuanhuanGenre, XUAN_CANON_RE, buildGenreCoverageBlock,
   buildHorrorEraBlock, HORROR_ANCIENT_ERA_RE, HORROR_BODY_COUNTER_RE,
@@ -1935,6 +1936,7 @@ ${blocks.join('\n\n')}`;
   const isFantasy = genreList.some((g) => FANTASY_KEYWORDS.some((k) => g.includes(k)));
   const isSystem = genreList.some((g) => SYSTEM_KEYWORDS.some((k) => g.includes(k)));
   const isYouth = !isFantasy && genreList.some((g) => YOUTH_KEYWORDS.some((k) => g.includes(k)));
+  const isRomance = genreList.some((g) => /言情|恋爱|甜宠|初恋|暗恋|爱情/.test(g));
   // 穿越分支：勾穿越/重生但无系统无玄幻——金手指=现代知识/心智（现实型），
   // 身份必须是"穿越后自己谋生的处境"。曾因走现实池（现代身份槽位）把穿越挤掉，
   // 生成"跑十年腿的都市人回县城"这种根本没穿越的创意
@@ -1969,7 +1971,9 @@ ${blocks.join('\n\n')}`;
       : ['底层草根', '落魄贵族后人', '隐世传人', '市井游民', '少年天才', '军方武力背景', '商贾之后', '工匠手艺人', '戴罪之身', '边军小卒'];
     gfLabel = '金手指类型';
   } else if (isYouth) {
-    GF_POOL = ['被埋没的学业/艺术天赋', '读人细节的观察习惯（非超感）', '天生的社交感染力', '逆境反弹韧性', '可训练的细节观察力', '出众的表达与创作才华', '突出体能/竞技特长（训练所得）', '关键人脉（师长/发小）'];
+    GF_POOL = isRomance
+      ? ['被埋没的学业/艺术天赋', '读人细节的观察习惯（非超感）', '天生的社交感染力', '逆境反弹韧性', '出众的表达与创作才华', '把场面圆回来的嘴', '会照顾人的动手能力', '关键人脉（师长/发小）']
+      : ['被埋没的学业/艺术天赋', '读人细节的观察习惯（非超感）', '天生的社交感染力', '逆境反弹韧性', '可训练的细节观察力', '出众的表达与创作才华', '突出体能/竞技特长（训练所得）', '关键人脉（师长/发小）'];
     // 同时勾了都市：身份池混入校门外的年轻身份——纯学生池会把所有创意摁在校内
     // （实锤 v1.4.70：校园+青春+都市+言情 → 三条全是校内行政争议，都市归零）
     const urbanYouth = genreList.some((g) => /都市|职场/.test(g));
@@ -2001,7 +2005,6 @@ ${blocks.join('\n\n')}`;
   // 第三差异化轴：核心冲突机制（v1.4.81）。前两轴（金手指×身份）池子有限，
   // 跨批次仍会撞车；冲突轴让同一 GF×ID 组合也能长出不同故事，是雷同的结构性补丁。
   // 言情向用关系型冲突池（避免主冲突漂到外部事件）；其余用通用冲突池
-  const isRomance = genreList.some((g) => /言情|恋爱|甜宠|初恋|暗恋|爱情/.test(g));
   const CONFLICT_GENERAL = ['守约与背约（一个必须兑现的承诺或契约）', '身份冒充与被揭穿', '被公开的秘密', '期限逼迫（限期内完成或阻止一件事）', '旧案重启（多年前的恩怨翻起）', '同伴或师长的背叛', '规则漏洞（用体系允许的方式钻空子翻盘）', '守护与牺牲（为保某人某物必须付出代价）', '错认与错过', '稀缺资源的定价权争夺'];
   const CONFLICT_RELATIONAL = ['暗恋被当众拆穿', '重逢却认不出彼此', '身份或处境的悬殊隐瞒', '错过的时机制造遗憾', '双向心动但时机总错开', '旧情与现任的拉扯', '一场关于关系的公开对决', '替对方背下黑锅', '误会到和解的关口', '距离或异地的抉择'];
   const conflictPool = isRomance ? CONFLICT_RELATIONAL : CONFLICT_GENERAL;
@@ -2030,7 +2033,18 @@ ${blocks.join('\n\n')}`;
     '错位误会：开局被误认成某人、被扣上不属于自己的事或身份',
     '立足求生：开局困在最底层处境（欠债/被逐/断粮/重伤），为活下去干一件冒险的事'
   ];
-  const drivePool = hasTrueFantasyTag(genreList.join(' ')) ? OPENING_DRIVES_FANTASY : OPENING_DRIVES;
+  const OPENING_DRIVES_ROMANCE = [
+    '当场利害：开局撞进一场正在发生的关系冲突（暗恋被拆穿/被当众起哄成一对/旧情翻出），主角必须当场表态',
+    '意外卷入：开局因值日/同组/合租和某个不该靠近的人绑在一起，躲不开',
+    '主动靠近：主角主动去接近一个人（请教/道歉/还东西），开局即把关系推进一步',
+    '关系守护：开局为护住对方当众行动（挡闲话/顶替受罚/帮对方圆谎）',
+    '限期同盟：开局两人被期限绑成假搭档（演出/值日/竞赛只当场景），信任要在事故里长出来',
+    '错位误会：开局被误认成情侣或被扣上不属于这段关系的身份',
+    '错过边缘：开局差一步错过（转学/毕业/对方已有人），主角必须立刻做选择'
+  ];
+  const drivePool = hasTrueFantasyTag(genreList.join(' '))
+    ? OPENING_DRIVES_FANTASY
+    : (isRomance ? OPENING_DRIVES_ROMANCE : OPENING_DRIVES);
   const driveSlots = shuffle(drivePool).slice(0, ideaCount);
   const axisBlock = gfSlots.map((gf, i) => {
     const conflictNote = conflictSlots[i] ? `，核心冲突机制必须围绕「${conflictSlots[i]}」展开（金手指是破局工具，不是冲突本身）` : '';
@@ -2485,6 +2499,19 @@ ${axisBlock}
             });
           }
         }
+      }
+      // 言情竞赛主线门禁（v1.4.93）：不依赖校园分支——只勾「言情」时 isYouth 为假。
+      // logline+中心问题全是比赛/竞赛/保送、没有感情推进语汇 = 主线被竞赛抢走，剔
+      if (isRomance) {
+        list = list.filter((it) => {
+          const spineText = [it?.logline, it?.story_engine?.central_question].filter(Boolean).join('\n');
+          if (!spineText) return true;
+          if (YOUTH_CONTEST_RE.test(spineText) && !ROMANCE_SPINE_RE.test(spineText)) {
+            send({ type: 'status', message: `已剔除竞赛/保送当主线的创意「${it.title}」（勾选了言情——比赛/保送只能当感情线的场景，主线必须是这段恋爱本身）` });
+            return false;
+          }
+          return true;
+        });
       }
 
       // 灵异时代锁（v1.4.71）：未勾古代向标签的现代灵异不得写成古代算命摊世界观；

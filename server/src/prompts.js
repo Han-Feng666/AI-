@@ -1230,6 +1230,10 @@ export const XUAN_NON_CULTIVATION_RE = /内功|轻功|真气|内力|点穴|暗�
 // 任务语汇且无成长维度 = 主线缩成"找回/守护"任务戏，剔。词表从宽防误伤
 export const XUAN_SPINE_GROWTH_RE = /登顶|最强|至强|巅峰|境界|实力|变强|成长|崛起|攀升|站上|顶点|登临|问鼎|称霸|天下第一|无敌|主宰|成神|飞升|渡劫|大乘|化神|炼虚|合体|元婴|金丹|筑基|炼气|灵根|宗门大比|天骄|强者|高手|大宗师|破境|突破|斩杀|碾压|夺魁|登阶|升阶/;
 export const XUAN_SPINE_TASK_RE = /找回|寻回|夺回|守护|追查|查清|查明|调查|寻访|寻找/;
+// 校园言情主线门禁（v1.4.93）：用户实报勾校园言情整批「比赛/竞赛/夺回保送资格」。
+// 有感情语汇则比赛只当场景放行；logline+中心问题全是竞赛/保送、没有恋爱推进 = 剔
+export const YOUTH_CONTEST_RE = /竞赛|比赛|锦标赛|运动会|夺冠|夺魁|卫冕|保送|特招|冲线名额|冠军/;
+export const ROMANCE_SPINE_RE = /告白|暗恋|心动|恋爱|感情|在一起|错过|重逢|奔赴|双向|喜欢上|爱上|分手|复合|关系/;
 
 // 历史/穿越批内崛起路径查重（v1.4.88）：实锤用户反馈——勾"历史 架空 穿越 系统"，
 // 整批全是"从市井小民到权臣"一条线。骨架锚给了主流方向后，弱模型会全收敛到单
@@ -1905,6 +1909,19 @@ export function buildElevateSystem(styles, baseline, samples, presets, opts = {}
   return enforceSysBudget(sys);
 }
 
+// 内层字段对象：创意 JSON 的 story_engine / protagonist 本身能 parse，
+// 但不是调用方要的顶层结果。objRegex 若不跳过，会把内层当整段返回，
+// extractArray 判空 →「输出内容解析失败」（v1.4.93 实锤）
+const NESTED_ONLY_KEYS = new Set([
+  'central_question', 'antagonist', 'escalation', 'inner_need',
+  'name', 'identity', 'golden_finger', 'personality', 'relation'
+]);
+function isNestedOnlyObject(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  const keys = Object.keys(v);
+  return keys.length > 0 && keys.every((k) => NESTED_ONLY_KEYS.has(k));
+}
+
 export function extractJson(text) {
   if (!text) return null;
   let t = text.trim();
@@ -1912,9 +1929,10 @@ export function extractJson(text) {
   // 推理文本里的大括号/引号会干扰后续切片提取，必须先剥掉）
   t = t.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
   t = t.replace(/<think>[\s\S]*$/i, '').trim(); // 未闭合 think（输出截断在推理中）→ 无 JSON 可救
-  // 去除 markdown 代码围栏
+  // 去除 markdown 代码围栏（含未闭合 ```json：弱模型/截断只开围栏不关）
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fence) t = fence[1].trim();
+  else t = t.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
   // 去除注释（/* */ 和 //）
   t = t.replace(/\/\*[\s\S]*?\*\//g, '');
   // 规整常见非标准 JSON：控制字符、中文冒号、尾随逗号
@@ -2170,20 +2188,69 @@ export function extractJson(text) {
     }
   }
   // 多对象逐个提取：针对文本中有多个不连续 {…} 块（如前缀+对象+后缀）
+  // 跳过 story_engine/protagonist 这类内层字段，避免把嵌套对象当成整段 JSON
   const objRegex = /\{[^{}]*\}/g;
   let objMatch;
   while ((objMatch = objRegex.exec(t)) !== null) {
     const v = tryVariants(objMatch[0]);
-    if (v) return v;
+    if (!v) continue;
+    if (v && typeof v === 'object' && !Array.isArray(v) && isNestedOnlyObject(v)) continue;
+    return v;
   }
-  // 多数组逐个提取
+  // 多数组逐个提取。文本里还有 { 时，跳过字符串数组（selling_point/outline_H5），
+  // 那些是创意对象的内层字段，不是顶层结果
   const arrRegex = /\[[^\[\]]*\]/g;
   let arrMatch;
+  const textHasObject = t.includes('{');
   while ((arrMatch = arrRegex.exec(t)) !== null) {
     const v = tryVariants(arrMatch[0]);
-    if (v) return v;
+    if (!v) continue;
+    if (textHasObject && Array.isArray(v) && v.length && v.every((x) => x === null || typeof x !== 'object')) continue;
+    return v;
   }
   return null;
+}
+
+function looksLikeIdeaObject(o) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
+  return 'title' in o || 'hook' in o || 'logline' in o || 'protagonist' in o;
+}
+
+// 模型有时不包外层数组，连续输出多个创意对象（「创意1：{...} 创意2：{...}」）。
+// extractJson 只拿得到第一个，extractArray 判空就会整批解析失败。
+function collectAdjacentIdeaObjects(text) {
+  if (!text) return null;
+  const s = String(text);
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    const start = s.indexOf('{', i);
+    if (start < 0) break;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    let end = -1;
+    for (let j = start; j < s.length; j++) {
+      const ch = s[j];
+      if (inStr) {
+        if (esc) { esc = false; continue; }
+        if (ch === '\\') { esc = true; continue; }
+        if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') { inStr = true; continue; }
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) { end = j; break; }
+      }
+    }
+    if (end < 0) break;
+    const parsed = extractJson(s.slice(start, end + 1));
+    if (looksLikeIdeaObject(parsed) && !isNestedOnlyObject(parsed)) out.push(parsed);
+    i = end + 1;
+  }
+  return out.length ? out : null;
 }
 
 // 期待顶层数组的任务专用：json_object 模式（response_format）强制顶层对象，
@@ -2200,6 +2267,8 @@ export function extractArray(text) {
       if (k in v && Array.isArray(v[k])) return v[k];
     }
   }
+  const collected = collectAdjacentIdeaObjects(text);
+  if (collected && collected.length) return collected;
   return null;
 }
 
@@ -2934,7 +3003,7 @@ export const IDEAS_SYSTEM = `你是中文长篇小说创意总监，深谙当前
 ① 优势先服从题材：勾玄幻/仙侠/修真时金手指=体系内超凡能力，代价写反噬/入魔/境界反跌；未勾超凡题材时无金手指概念，最大优势写现实特长/资源/处境（信息差/手艺/人脉/口才/家世/平台）或"无特殊优势"，同批优势互不相同（严禁整批观察力），严禁超自然代价；仅勾系统时金手指=系统界面规则。
 ② 开局钩子必须是"只有这个故事才有"的具体事件。
 ③ 至少一个反派/配角有自利动机。
-④ 主线之外要有能独立推进的副线；未勾悬疑/推理时，主线与副线都严禁靠调查/追查/解谜/查明真相推进——悬念来自利害未兑现。主线从对抗夺还/竞技比拼/经营扩张/生存危机/关系拉扯/规则博弈/势力争锋/身份翻转里选。核心利害须大到影响主角根本命运或一方生态，小纠纷小谜团撑不起长篇。
+④ 主线之外要有能独立推进的副线；未勾悬疑/推理时，主线与副线都严禁靠调查/追查/解谜/查明真相推进——悬念来自利害未兑现。主线从对抗夺还/经营扩张/生存危机/关系拉扯/规则博弈/势力争锋/身份翻转里选，比赛只当事发场景。核心利害须大到影响主角根本命运，小纠纷小谜团撑不起长篇。
 ⑤ 最大优势在开篇钩子内兑现一次（超凡题材=金手指发动），主线冲突由它直接推动。
 ⑥ 因果链必须成立：X 现实导致 Y，硬凑则重想。
 ⑦ 故事引擎（要能撑起一部小说，不是一趟差事）：story_engine 四项写全——中心问题（全书要回答的"主角能否……"）；对抗轴（具体的人或组织，有自己的目标、持续阻挠主角、强到无法一两章解决）；赌注升阶（个人→势力→王朝/天下）；主角内在需求（缺什么、执念是什么、全书完成怎样的变化）。收集/交付/查案只是表层，缺对手与内在弧光的是差事不是小说。优势须能反复用且有升级空间；personality 须是能改剧情的性格武器（谨慎盘算/混不吝/苟住发育）。
@@ -3196,7 +3265,7 @@ export function buildYouthEngineBlock(genreList = []) {
     ? '- 主角身份主体：勾选校园/青春时，同一批创意至少 2/3 的主角是在校学生（高中/大学/复读/艺考/考研备考），"刚毕业一两年/实习/求职"通道整批至多 1 条，严禁整批都是上班族。舞台可以在校外（实习/夜市/合租/打工），身份必须是学生或应届生。'
     : '';
   const spineLine = hasRomance
-    ? '- 长线发动机：logline 必须钉死长线标的——首选"一段关系的明确目标与期限"（从陌生到告白/从互怼到双向奔赴/从错过到重逢），感情线的靠近、误会、确认、承诺就是主线本身；竞赛名次、升学名额、社团目标、毕业走向只能当感情线发生的场景与催化剂，严禁替代感情线当主线（运动会/比赛/锦标赛夺冠撑不起一部言情）。'
+    ? '- 长线发动机：logline 必须钉死长线标的——首选"一段关系的明确目标与期限"（从陌生到告白/从互怼到双向奔赴/从错过到重逢），感情线的靠近、误会、确认、承诺就是主线本身；竞赛名次、保送资格、升学名额、社团目标只能当感情线发生的场景，严禁替代感情线当主线（运动会/比赛/锦标赛夺冠、夺回保送资格撑不起一部言情）。'
     : '- 长线发动机：logline 必须钉死长线标的——一段关系的明确目标与期限、升学/艺考/保送名额、社团经营目标、毕业/留学走向、竞赛名次，五选一，且长线必须有成长与代价。只有日常碎片没有长线标的的创意视为未完成。';
   return `
 【校园青春引擎铁律——身份与恋爱线的硬边界】
@@ -3222,7 +3291,7 @@ export function buildGenreSpineBlock(genreList = []) {
     lines.push('- 历史/穿越/架空：主流骨架是"崛起之路"——底层起步、地位与事业一路攀升，最终改写自己的命运甚至时代格局。崛起路径必须多样，五条大盘路径：①庙堂权谋（科举入仕/军功封侯/夺嫡站队，权倾朝野）；②产业经商（用现代知识开创新产业——盐铁/漕运/印刷/医药/军备，富可敌国以财入政）；③军事征战（从军边关、以战功裂土封侯）；④种田技术（农技/工技/水利改良，从一村一县到一州）；⑤文坛思想（现代学识扬名、开宗立派、著书立说改变时代）。守护一物一地、经营小镇小事是桥段，撑不起主线。严禁整批都是"市井小民爬成权臣"一条线——多个创意必须分属不同路径。');
   }
   if (/校园|青春|纯爱|甜宠|暗恋|虐恋|初恋|言情|恋爱|爱情/.test(joined)) {
-    lines.push('- 校园青春言情：主流骨架是"这段恋爱本身"——双向奔赴的甜宠或错位撕裂的虐恋，写两个人如何靠近、误会、确认、承诺。比赛/社团/考试只是恋爱发生的场景，夺冠夺魁不能替代感情线当主线。');
+    lines.push('- 校园青春言情：主流骨架是"这段恋爱本身"——双向奔赴的甜宠或错位撕裂的虐恋，写两个人如何靠近、误会、确认、承诺。比赛/社团/考试/保送名额只是恋爱发生的场景，夺冠夺魁、夺回保送资格不能替代感情线当主线。批内须换感情线形态（暗恋被拆穿/契约假扮/错过重逢），严禁整批竞赛。');
   }
   if (/都市|职场|商战|豪门|重生/.test(joined)) {
     lines.push('- 都市：主流骨架是"逆袭/崛起"——职业成长、商战翻盘、身份跃迁，主线必须写地位或财富的攀升路径，小富即安、守成度日撑不起主线。');

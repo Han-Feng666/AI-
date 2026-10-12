@@ -1323,3 +1323,12 @@ Entries discovered by the Agent during task execution should follow this format:
   - 新增密度扫描器：`scanParagraphWordRepeat`（同一段同一实词≥3 且多段如此）、`scanIdiomStack`（只认顿号连排四字，逗号白描不误伤）、`scanNaiveNarration`（贴标签/童话收束/说教/因为所以/大家都说）。
   - `ANTI_AI_STYLE` 开篇改成「AI 味在密度和逻辑」。
   - 验证：scan_ai_patterns.test.js（23）；纯后端 bump --no-build，补丁 update-1.4.92.patch.json。
+
+[Project Knowledge Summary]
+- Date: 2026-10-12
+- Context: Discovered by Agent while修创意解析失败 + 校园言情滑向比赛/保送 (v1.4.93)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 「输出内容解析失败」根因：`extractJson` 的扁平 `{…}` 正则会先命中 `story_engine`/`protagonist` 内层；未闭合 ```json 围栏剥不掉；并列对象不包数组时 `extractArray` 拿不到列表。修：跳过内层字段对象、剥未闭合围栏、`collectAdjacentIdeaObjects` 捞回并列创意。
+  - 校园言情整批竞赛/保送：`IDEAS_SYSTEM` ④ 曾把「竞技比拼」当合法主线；青年优势池含「竞技特长」；开场驱动「争名额」；言情无机器门禁。修：比赛降为场景；言情校园去竞技特长；`OPENING_DRIVES_ROMANCE`；`YOUTH_CONTEST_RE` 命中且无 `ROMANCE_SPINE_RE` 才剔（竞赛当场景+感情线放行）。
+  - 验证：extract_json.test.js（7）+ test_ideas_engine.mjs（340）+ scan_ai_patterns.test.js（23）；纯后端 bump --no-build，补丁 update-1.4.93.patch.json。
