@@ -1332,3 +1332,19 @@ Entries discovered by the Agent during task execution should follow this format:
   - 「输出内容解析失败」根因：`extractJson` 的扁平 `{…}` 正则会先命中 `story_engine`/`protagonist` 内层；未闭合 ```json 围栏剥不掉；并列对象不包数组时 `extractArray` 拿不到列表。修：跳过内层字段对象、剥未闭合围栏、`collectAdjacentIdeaObjects` 捞回并列创意。
   - 校园言情整批竞赛/保送：`IDEAS_SYSTEM` ④ 曾把「竞技比拼」当合法主线；青年优势池含「竞技特长」；开场驱动「争名额」；言情无机器门禁。修：比赛降为场景；言情校园去竞技特长；`OPENING_DRIVES_ROMANCE`；`YOUTH_CONTEST_RE` 命中且无 `ROMANCE_SPINE_RE` 才剔（竞赛当场景+感情线放行）。
   - 验证：extract_json.test.js（7）+ test_ideas_engine.mjs（340）+ scan_ai_patterns.test.js（23）；纯后端 bump --no-build，补丁 update-1.4.93.patch.json。
+
+[User Instruction Summary]
+- Date: 2026-10-12
+- Context: 用户疑问——灵感雷同没看点是不是门禁条框太多；只按题材风格生成会不会更好
+- Instructions:
+  - 用户倾向减少前置约束、把创作空间还给模型。方向确认：砍生成前的"填表槽位"与禁令堆，保留题材骨架正向锚 + 生成后门禁。
+
+[Project Knowledge Summary]
+- Date: 2026-10-12
+- Context: Discovered by Agent while按用户口径给灵感生成去填表化 (v1.4.94)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 雷同根因：`axisBlock` 逐条硬钉死四轴（优势/身份/冲突/开场"必须严格采用对应槽位"）→ 每条创意=同一公式换词，反差核被槽位憋死（v1.4.84 已定性，v1.4.94 落地拆除）。
+  - 改法：四轴逐条强制 → "批内硬差异下限（四项至少三项彼此不同）+ 候选方向池自由取舍"；防雷同改由差异下限 + 生成后批次查重门（sigs）兜底。保留题材骨架锚与全部生成后门禁不动。
+  - 教训固化：正向锚给"多条平行候选"而非"逐条钉死"；约束该做防雷同下限，不该做创作上限。
+  - 验证：test_ideas_engine.mjs（348）+ extract_json.test.js（7）+ scan_ai_patterns.test.js（23）；纯后端 bump --no-build，补丁 update-1.4.94.patch.json。

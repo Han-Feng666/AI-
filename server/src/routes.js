@@ -2046,14 +2046,16 @@ ${blocks.join('\n\n')}`;
     ? OPENING_DRIVES_FANTASY
     : (isRomance ? OPENING_DRIVES_ROMANCE : OPENING_DRIVES);
   const driveSlots = shuffle(drivePool).slice(0, ideaCount);
-  const axisBlock = gfSlots.map((gf, i) => {
-    const conflictNote = conflictSlots[i] ? `，核心冲突机制必须围绕「${conflictSlots[i]}」展开（金手指是破局工具，不是冲突本身）` : '';
-    const driveNote = driveSlots[i] ? `，开场驱动形态必须是「${driveSlots[i]}」` : '';
-    if (needsFreeIdentity) {
-      return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}${conflictNote}${driveNote}，主角开局举目无亲、无人可靠（身穿异世，无原主遗留身份），开局身份不预设——身份与地位因契机或随故事发展获得（具体怎么起家由你自由构思，严禁开局处于给人打工受人使唤的状态，严禁把现代职业直译成古代同类营生——商人管军饷国库、刑警翻案、厨师开酒楼这种一一对应缺乏错位趣味，一律废稿）`;
-    }
-    return `创意${i + 1}：${gfLabel}必须属于「${gf}」${gfSlotNote}，主角初始身份必须是「${idSlots[i]}」${conflictNote}${driveNote}`;
-  }).join('\n') + '\n（每条创意的开场事件必须严格按上面分配的开场驱动来写；严禁把"亡故长辈留下遗物/遗言/托付"当作默认开场——未分配到该驱动的创意不得用亡故托付开局。）';
+  // 差异化执行块（v1.4.94）：v1.4.84~.93 的"四轴逐条硬钉死"把创意逼成填表——
+  // 每条创意=同一公式换词，反差核被槽位憋死（用户实报雷同、没看点）。改为
+  // "批内硬差异下限 + 候选方向自由取舍"：防雷同靠差异下限与生成后批次查重门，
+  // 把创作空间还给模型。候选池仍保留，只作为防收敛的参考，不再逐条强制。
+  const axisBlock = `本批 ${ideaCount} 个创意必须在「核心优势、主角身份、核心冲突、开场形态」四项里至少三项彼此不同，且每个创意的 core_contrast（反常识内核）机制互不相同；每条创意都要有一个"只有这个故事才有"的钩子，优先在候选方向之外自创更强的方案，不要为贴合候选而写平庸。
+候选核心优势方向（供分散参考，可改可换）：${gfSlots.join(' ／ ')}
+候选主角身份方向（供分散参考，可改可换）：${idSlots.join(' ／ ')}
+候选核心冲突机制（供分散参考）：${conflictSlots.join(' ／ ')}
+候选开场驱动形态（供分散参考）：${driveSlots.join(' ／ ')}${gfSlotNote}
+- 严禁把"亡故长辈留下遗物/遗言/托付"当作默认开场（未分配到此类驱动的创意不得用它开局）。${needsFreeIdentity ? '\n- 穿越题材专属底线：每条创意的主角都是身穿异世的穿越者，开局举目无亲、身份不预设、随契机逐步获得——严禁开局打工受使唤、严禁现代职业直译成古代营生。' : ''}`;
 
   // 男频/女频：目标读者频道，影响主角性别、爽点结构与情感线比重
   const channel = String((req.body || {}).channel || '').trim();
@@ -2153,7 +2155,7 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 
   const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${trendBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${youthEngineBlock}${xuanhuanCanonBlock}${genreSpineBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}
 
-【差异化强制分配（每个创意必须严格采用对应槽位的${gfLabel}与主角身份，不得互换或自行替换为同类）】
+【差异化执行（防雷同下限，不是创意上限——好创意优先于填满候选方向）】
 ${axisBlock}
 
 请一次构思 ${ideaCount} 个彼此完全不同的小说创意，输出 JSON 数组。`;
