@@ -755,6 +755,7 @@ export function scanAiPatterns(text) {
   hits.push(...scanParagraphWordRepeat(text));
   hits.push(...scanIdiomStack(text));
   hits.push(...scanNaiveNarration(text));
+  hits.push(...scanMicroActionRepeat(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -2199,6 +2200,38 @@ export function scanNaiveNarration(text) {
   return [{
     word: `幼稚叙述（${detail.join('/')}。人物用行为说话，不要贴好人坏人标签，不要童话收束和说教，因果用场面带出来）`,
     count: label + fairy + moral + cause + everyone,
+    template: true
+  }];
+}
+
+// 章级通用动作复读：AI 无意识把同一批"填空式微动作"撒满全章——
+// "笑了笑/点了点头/叹了口气/皱了皱眉/抿了抿嘴/挑了挑眉/耸了耸肩/摊了摊手/摇了摇头/抱臂"。
+// 单看每次都是正常写法，但同一个动作全章反复出现、或多个动作成批扎堆，就是机械填空（真人给角色绑场景动作，不会反复摆同一套）。
+// 按密度扫：单组全章 ≥6 次，或 ≥4 组各 ≥3 次 → 报。偶用不拦。
+export function scanMicroActionRepeat(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const count = (re) => (s.match(re) || []).length;
+  const groups = [
+    { name: '笑了笑', n: count(/笑了笑|笑了|微微一笑|露出[^。！？\n]{0,4}笑容|咧[^。！？\n]{0,3}笑/g) },
+    { name: '点了点头', n: count(/点了点头|点点头|点头|颔首/g) },
+    { name: '叹了口气', n: count(/叹了口气|叹口气|轻叹一声|长叹一声/g) },
+    { name: '皱了皱眉', n: count(/皱了皱眉|皱眉|蹙了?蹙?眉|拧起眉/g) },
+    { name: '抿了抿嘴', n: count(/抿了?抿?嘴|抿了?抿?唇|咬了?咬?唇|咬住嘴唇/g) },
+    { name: '挑了挑眉', n: count(/挑了挑?眉|挑眉|扬了?扬?眉|眉梢微挑/g) },
+    { name: '耸了耸肩', n: count(/耸了?耸?肩/g) },
+    { name: '摊了摊手', n: count(/摊了?摊?手|摊开双手/g) },
+    { name: '摇了摇头', n: count(/摇了?摇?头/g) },
+    { name: '抱臂', n: count(/抱臂|环抱双臂|双臂抱胸/g) }
+  ].filter((g) => g.n > 0).sort((a, b) => b.n - a.n);
+  const heavy = groups.filter((g) => g.n >= 6);
+  const mid = groups.filter((g) => g.n >= 3);
+  if (!heavy.length && mid.length < 4) return [];
+  const detail = mid.map((g) => `${g.name}×${g.n}`).join('、');
+  const total = groups.reduce((a, g) => a + g.n, 0);
+  return [{
+    word: `章级动作复读（${detail}。全章反复摆同一套填空式微动作是机械感，真人给角色绑具体场景动作——他正在做什么、手边有什么，让情绪从动作里出来，而不是每次都用"笑了笑/点了点头"打点。删掉重复处，或换成与当下场景有关的动作）`,
+    count: total,
     template: true
   }];
 }

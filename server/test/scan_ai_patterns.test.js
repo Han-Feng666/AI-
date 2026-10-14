@@ -190,3 +190,24 @@ test('偶用果然犹豫不误报', () => {
   const words = hits.map((h) => h.word);
   assert.ok(!words.some((w) => /应付套话|预判确认/.test(w)), `偶用不应报，实际: ${words.join('|')}`);
 });
+
+test('章级动作复读被检出', () => {
+  const txt = PAD + '他笑了笑。她也笑了笑。老人跟着笑了笑。孩子笑了笑。那人笑了笑。对方笑了笑。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('章级动作复读')), `words=${words.join('|')}`);
+});
+
+test('多个微动作成批扎堆被检出', () => {
+  const txt = PAD + '他点了点头，叹了口气，皱了皱眉，抿了抿嘴。她又点了点头，叹了口气，皱了皱眉，抿了抿嘴。那人点了点头，叹了口气，皱了皱眉，抿了抿嘴。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('章级动作复读')), `words=${words.join('|')}`);
+});
+
+test('偶用微动作不误报', () => {
+  const txt = PAD + '他笑了笑，点了点头，推门进去，又叹了口气，把外套挂好。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => w.includes('章级动作复读')), `偶用不应报，实际: ${words.join('|')}`);
+});

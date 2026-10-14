@@ -23,7 +23,7 @@ import {
   scanCinematicNarration, scanExplainAside, scanResumeIntro,
   scanProgressiveCouple, scanForcedAntithesis, scanInsightAside,
   scanHedgeFiller, scanClockPrecision, scanPredictConfirm,
-  scanParagraphWordRepeat, scanIdiomStack, scanNaiveNarration,
+  scanParagraphWordRepeat, scanIdiomStack, scanNaiveNarration, scanMicroActionRepeat,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
 } from './lib.js';
@@ -5837,6 +5837,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         for (const h of scanParagraphWordRepeat(full)) structureFixes.push(h.word);
         for (const h of scanIdiomStack(full)) structureFixes.push(h.word);
         for (const h of scanNaiveNarration(full)) structureFixes.push(h.word);
+        for (const h of scanMicroActionRepeat(full)) structureFixes.push(h.word);
 
         // 5a4) 主角名保护 + 开局模板检测（免费正则，模型无关）：
         //      主角名零出现（陈若辰被写成陈辰安类事故）→ 触发重生成；
