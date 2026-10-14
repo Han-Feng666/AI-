@@ -756,6 +756,10 @@ export function scanAiPatterns(text) {
   hits.push(...scanIdiomStack(text));
   hits.push(...scanNaiveNarration(text));
   hits.push(...scanMicroActionRepeat(text));
+  hits.push(...scanSimileEcho(text));
+  hits.push(...scanLaboredSimile(text));
+  hits.push(...scanNegationParallel(text));
+  hits.push(...scanDeParticleMisuse(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
   // 剥离对话段（对话短段是正常写法），只统计叙述段
   const allParas = text.split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
@@ -2232,6 +2236,125 @@ export function scanMicroActionRepeat(text) {
   return [{
     word: `章级动作复读（${detail}。全章反复摆同一套填空式微动作是机械感，真人给角色绑具体场景动作——他正在做什么、手边有什么，让情绪从动作里出来，而不是每次都用"笑了笑/点了点头"打点。删掉重复处，或换成与当下场景有关的动作）`,
     count: total,
+    template: true
+  }];
+}
+
+// 喻体复读：AI 想出一个好喻体后会在一章内反复用同一个载体——
+// "像砂纸刮锅底"后面又"干得像砂纸"。真人的喻体是新鲜的，很少复用同一载体。
+// 抽明喻标记后紧跟内容的 2 字核心（排除功能字），同一核心出现在 ≥2 处明喻即报。
+export function scanSimileEcho(text) {
+  const s = String(text || '');
+  if (s.length < 300) return [];
+  const FUNC = new Set('的了着过是在有和与把被给对从向于之其也都没不就还又才只很更最太挺真像似般样们个条根块片团张座座头双只呀吧呢啊吗哦嗯拿将'.split(''));
+  const re = /(?:好像|如同|好似|宛如|犹如|恰似|恍如|仿佛|像)([\u4e00-\u9fff]{2,10})/g;
+  const vehicles = [];
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const before = s.slice(Math.max(0, m.index - 1), m.index);
+    if (/[不非没别未]/.test(before)) continue;
+    vehicles.push({ tail: m[1], at: m.index });
+  }
+  if (vehicles.length < 2) return [];
+  const gramCount = new Map();
+  const gramWhere = new Map();
+  for (const v of vehicles) {
+    const compact = v.tail.replace(/[^\u4e00-\u9fff]/g, '');
+    const seen = new Set();
+    for (let i = 0; i + 2 <= compact.length; i++) {
+      const g = compact.slice(i, i + 2);
+      if (FUNC.has(g[0]) || FUNC.has(g[1])) continue;
+      if (seen.has(g)) continue;
+      seen.add(g);
+      gramCount.set(g, (gramCount.get(g) || 0) + 1);
+      if (!gramWhere.has(g)) gramWhere.set(g, []);
+      gramWhere.get(g).push(v);
+    }
+  }
+  const echoes = [...gramCount.entries()].filter(([, c]) => c >= 2).map(([g]) => g);
+  if (!echoes.length) return [];
+  const sample = echoes.slice(0, 3).map((g) => {
+    const v = gramWhere.get(g)[0];
+    return `"${s.slice(v.at, v.at + 14).replace(/\n/g, '').trim()}"`;
+  }).join('、');
+  return [{
+    word: `喻体复读（同一比喻载体全章反复出现：${echoes.map((g) => `「${g}」`).join('、')}，如 ${sample}）——真人用一个喻体是新鲜的，AI 想到一个好比喻后会在一章里反复用同一个载体。每个载体只保留最贴切的一处，其余换成白描或另一个真正不同的喻体`,
+    count: echoes.length,
+    template: true
+  }];
+}
+
+// 否定式短句排比复读：AI 爱把同一个否定谓语拆成连排短句反复敲鼓点——
+// "陈若辰没动。狼也没动。谁也没先动。" 特征是【短句 + 句末否定谓语 + 空间聚集】。
+// 只取短句（≤12 字）且以否定谓语收尾的句子，且 3 句需落在 180 字窗口内（同末字或同谓语）才报；
+// 全章分散出现的正常否定（"头也没抬"散在各段）不误伤。
+export function scanNegationParallel(text) {
+  const s = stripDialogue(String(text || ''));
+  if (s.length < 200) return [];
+  const NEG_STOP = new Set(['是', '能', '会', '知', '少', '同', '到', '过', '仅', '但', '再', '行', '够', '得', '管', '如', '只', '存', '应', '该', '要', '用', '愿', '错', '好', '差', '高', '低', '大', '小', '长', '短', '多', '远', '近', '冷', '热', '快', '慢', '早', '晚', '累', '饿', '渴', '忙', '闲', '难', '易', '真', '假', '对', '懂', '怕']);
+  // 按逗号/句读切成小分句，取"短分句 + 以否定谓语收尾"的分句
+  const segRe = /[^，,。！？；\n]+/g;
+  const found = [];
+  let sm;
+  while ((sm = segRe.exec(s)) !== null) {
+    const seg = sm[0].trim();
+    if (!seg || seg.length > 12) continue;
+    const mm = seg.match(/(?:也|都|谁|全|则|本人?)?(?:没|不|别|未)([\u4e00-\u9fff]{1,3})$/);
+    if (!mm) continue;
+    const pred = mm[1];
+    if (!pred || NEG_STOP.has(pred)) continue;
+    found.push({ pred, last: pred.slice(-1), at: sm.index, text: seg });
+  }
+  if (found.length < 3) return [];
+  const WINDOW = 180;
+  let hit = null;
+  for (let i = 0; i < found.length && !hit; i++) {
+    const cluster = found.filter((f) => f.at >= found[i].at && f.at - found[i].at <= WINDOW);
+    const byLast = new Map();
+    const byPred = new Map();
+    for (const f of cluster) {
+      byLast.set(f.last, (byLast.get(f.last) || 0) + 1);
+      byPred.set(f.pred, (byPred.get(f.pred) || 0) + 1);
+    }
+    for (const [k, n] of byLast) if (n >= 3) { hit = { label: `同以"${k}"收尾`, n, sample: cluster.map((f) => f.text) }; break; }
+    if (!hit) for (const [k, n] of byPred) if (n >= 3) { hit = { label: `"${k}"`, n, sample: cluster.map((f) => f.text) }; break; }
+  }
+  if (!hit) return [];
+  return [{
+    word: `否定式短句排比（${hit.n} 句连排短句${hit.label}，如"${hit.sample.slice(0, 3).join('""')}"）——把同一否定谓语拆成多个短句反复敲（"没动。也没动。谁也没先动"）是 AI 排比腔。真人只在关键处用一次否定收力，其余并成一句或换成具体动作`,
+    count: hit.n,
+    template: true
+  }];
+}
+
+// 造作喻体（工具/阻隔式明喻）：AI 偏爱把比喻建成"隔一层介质"的机械场景——
+// "像有人拿铁锤隔着棉被敲了一下""像隔着水听人说话""像用砂纸刮锅底"。
+// 真人偶尔会写，但"像+施事/工具+隔着/透过+介质+动作"这种复合构造密集出现就是 AI 凑比喻。
+// 高置信检索：① 像…隔着/透过…动作 ② 像…拿/用/抡…工具…动作。≥2 处才报。
+export function scanLaboredSimile(text) {
+  const s = String(text || '');
+  if (s.length < 300) return [];
+  const barrier = s.match(/(?:像|仿佛|如同|好似|宛如|犹如)[^。！？\n]{0,14}隔着[^。！？\n]{1,8}(?:敲|砸|打|闷|压|刮|磨|拉|割|戳|响|传|喊|叫)/g) || [];
+  const tool = s.match(/(?:像|仿佛|如同|好似|宛如|犹如)[^。！？\n]{0,6}(?:拿|用|抡|举|抄)[^。！？\n]{1,8}(?:敲|砸|打|刮|磨|拉|割|戳|扎|碾|锯)/g) || [];
+  const hits = [...new Set([...barrier, ...tool])];
+  if (hits.length < 2) return [];
+  return [{
+    word: `造作喻体×${hits.length}（如"${hits[0].slice(0, 18)}"）——"像有人拿X隔着Y敲/刮"这种隔介质+工具的复合明喻是 AI 凑比喻的模板。真人比喻短而准，不会每次都给喻体搭一套机械场景。保留最贴切的一处，其余改成直白的感官白描`,
+    count: hits.length,
+    template: true
+  }];
+}
+
+// 的地得误用（高置信形态）："X的像"几乎必然是"X得像"的错写（"干的像砂纸"应为"干得像砂纸"）。
+// 排除"他的像/她的像"（画像义）等代词情形，只抓其余 X的像。
+export function scanDeParticleMisuse(text) {
+  const s = String(text || '');
+  if (s.length < 200) return [];
+  const hits = (s.match(/[\u4e00-\u9fff]的像/g) || []).filter((h) => !/^[他她它你我的]的像$/.test(h));
+  if (!hits.length) return [];
+  return [{
+    word: `的地得误用×${hits.length}（如"${hits.slice(0, 3).join('、')}"——作补语该用"得"："干得像砂纸"，不是"干的像砂纸"）`,
+    count: hits.length,
     template: true
   }];
 }

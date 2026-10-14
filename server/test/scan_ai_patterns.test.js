@@ -116,7 +116,7 @@ test('白描正文不误报分镜/旁白/简历', () => {
 火膛里柴火噼啪响，锅边结了一圈白碱。他拿筷子戳了戳红薯，还没熟，又把盖子扣回去。`.repeat(3);
   const hits = scan(txt);
   const words = hits.map((h) => h.word);
-  assert.ok(!words.some((w) => /影视分镜腔|解释旁白|简历式介绍|递进并列句式|刻意对仗|顿悟旁白腔|应付套话|精确数字癖|预判确认|段内反复用词|成语连用|幼稚叙述/.test(w)), `不应误报，实际: ${words.join('|')}`);
+  assert.ok(!words.some((w) => /影视分镜腔|解释旁白|简历式介绍|递进并列句式|刻意对仗|顿悟旁白腔|应付套话|精确数字癖|预判确认|段内反复用词|成语连用|幼稚叙述|章级动作复读|喻体复读|造作喻体|否定式短句排比|的地得误用/.test(w)), `不应误报，实际: ${words.join('|')}`);
 });
 
 test('递进并列句式被检出', () => {
@@ -210,4 +210,59 @@ test('偶用微动作不误报', () => {
   const hits = scan(txt);
   const words = hits.map((h) => h.word);
   assert.ok(!words.some((w) => w.includes('章级动作复读')), `偶用不应报，实际: ${words.join('|')}`);
+});
+
+test('同一喻体复读被检出', () => {
+  const txt = PAD + '他嗓子干得像砂纸刮锅底。走了一会儿，喉咙又干得像砂纸，得回去把水喝了。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('喻体复读')), `words=${words.join('|')}`);
+});
+
+test('不同喻体不误报', () => {
+  const txt = PAD + '后脑勺一阵钝痛，像有人拿铁锤隔着棉被敲了一下。他嗓子干得像砂纸刮锅底。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => w.includes('喻体复读')), `不应误报，实际: ${words.join('|')}`);
+});
+
+test('否定式短句排比被检出', () => {
+  const txt = PAD + '陈若辰没动。狼也没动。一人一狼隔着七八步，谁也没先动。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('否定式短句排比')), `words=${words.join('|')}`);
+});
+
+test('偶用否定不误报', () => {
+  const txt = PAD + '他站在门口没动，想了一会儿，还是没说话。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => w.includes('否定式短句排比')), `不应误报，实际: ${words.join('|')}`);
+});
+
+test('造作喻体（工具/阻隔式）被检出', () => {
+  const txt = PAD + '后脑勺一阵钝痛，像有人拿铁锤隔着棉被敲了一下。远处的人声像隔着水面传来。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('造作喻体')), `words=${words.join('|')}`);
+});
+
+test('单个造作喻体不误报', () => {
+  const txt = PAD + '后脑勺一阵钝痛，像有人拿铁锤隔着棉被敲了一下。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => w.includes('造作喻体')), `不应误报，实际: ${words.join('|')}`);
+});
+
+test('的地得误用（的像）被检出', () => {
+  const txt = PAD + '他嗓子干的像砂纸刮锅底。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('的地得误用')), `words=${words.join('|')}`);
+});
+
+test('代词"他的像"不误报', () => {
+  const hits = scan(PAD + '墙上挂着他的像，落了灰。');
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => w.includes('的地得误用')), `不应误报，实际: ${words.join('|')}`);
 });
