@@ -1348,3 +1348,13 @@ Entries discovered by the Agent during task execution should follow this format:
   - 改法：四轴逐条强制 → "批内硬差异下限（四项至少三项彼此不同）+ 候选方向池自由取舍"；防雷同改由差异下限 + 生成后批次查重门（sigs）兜底。保留题材骨架锚与全部生成后门禁不动。
   - 教训固化：正向锚给"多条平行候选"而非"逐条钉死"；约束该做防雷同下限，不该做创作上限。
   - 验证：test_ideas_engine.mjs（348）+ extract_json.test.js（7）+ scan_ai_patterns.test.js（23）；纯后端 bump --no-build，补丁 update-1.4.94.patch.json。
+
+[Project Knowledge Summary]
+- Date: 2026-10-14
+- Context: Discovered by Agent while按用户口径补"一章内反复用同一词"扫描盲区 (v1.4.95)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 盲区：`scanNearbyRepeat`（300 字窗口）与 `scanParagraphWordRepeat`（段内）都抓不到"同一套填空式微动作撒满全章"（笑了笑/点了点头/叹了口气/皱眉/抿嘴/挑眉/耸肩/摊手/摇头/抱臂）。
+  - 改法：新增 `scanMicroActionRepeat`（lib.js，挂 scanAiPatterns + routes.js structureFixes），按章级密度拦：单组 ≥6 或 ≥4 组各 ≥3；<400 字跳过；偶用不拦，返回 `{word,count,template}`。
+  - 教训：去 AI 味继续走"扫描器 + 密度阈值"，不加禁词、不堆 CHAPTER_SYSTEM；阈值用同批扫描器一致的 400 字门槛。
+  - 验证：scan_ai_patterns.test.js（26）；纯后端 bump --no-build，补丁 update-1.4.95.patch.json（纯后端改动，前端未动）。
