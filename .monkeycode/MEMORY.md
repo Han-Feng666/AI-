@@ -1358,3 +1358,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - 改法：新增 `scanMicroActionRepeat`（lib.js，挂 scanAiPatterns + routes.js structureFixes），按章级密度拦：单组 ≥6 或 ≥4 组各 ≥3；<400 字跳过；偶用不拦，返回 `{word,count,template}`。
   - 教训：去 AI 味继续走"扫描器 + 密度阈值"，不加禁词、不堆 CHAPTER_SYSTEM；阈值用同批扫描器一致的 400 字门槛。
   - 验证：scan_ai_patterns.test.js（26）；纯后端 bump --no-build，补丁 update-1.4.95.patch.json（纯后端改动，前端未动）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-14
+- Context: Discovered by Agent while按用户实测样章（砂纸喻体/否定短句排比/的像）继续补去 AI 味盲区 (v1.4.96)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 用户实测 AI 特征：「像有人拿铁锤隔着棉被敲了一下」制造作喻体、「干得像砂纸」与「像砂纸刮锅底」同喻体复用、「没动。狼也没动。谁也没先动」否定短句排比、「干的像砂纸」的地得误用。
+  - 新增 4 扫描器（lib.js，均挂 scanAiPatterns + routes.js structureFixes）：`scanSimileEcho`（抽明喻后 2 字核心，同核心 ≥2 处喻体复读，停用功能字）、`scanLaboredSimile`（"像…隔着/透过…动作""像…拿/用…工具…动作"≥2 处造作喻体）、`scanNegationParallel`（切逗号分句，短分句 ≤12 字且以否定谓语收尾，3 句落在 180 字内同末字/同谓语才报）、`scanDeParticleMisuse`（"X的像"误用，排除代词"他的像/她的像"）。
+  - 关键坑：否定排比必须【短分句 + 窗口聚集】。按全章计数会把分散的"头也没抬"（重复段落）误判；改逗号分句 + 180 字窗口后解决。
+  - AI_DETECT_SYSTEM 同步补 64-68 类（章级动作复读/喻体复读/否定短句排比/的地得误用/造作喻体），与 lib.js 扫描器一一对应（现 68 类）。
+  - 去 AI 味链路不变：扫描器只进 structureFixes 定向润色，不堆 CHAPTER_SYSTEM、不加禁词。
+  - 验证：scan_ai_patterns.test.js（34）；纯后端 bump --no-build，补丁 update-1.4.96.patch.json（纯后端）。
