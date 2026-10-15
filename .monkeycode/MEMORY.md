@@ -1382,3 +1382,14 @@ Entries discovered by the Agent during task execution should follow this format:
   - 门限坑：PAD 测试常量仅 376 字，新扫描器门槛 400/600 会导致测试素材不足漏命中——测试输入须叠加到阈值以上；`scanSuddenAdverb` 门槛与其他扫描器统一到 400。
   - 用户清单中暂不可正则化的部分（保留人工/LLM 判定）：视角飘移、伏笔收不回、代价感弱、缺少无效剧情、作者执念缺失、剧情安全中庸——这些属结构/内核层，靠生成后 LLM 复核与 prompt 方向，不加正则。
   - 验证：scan_ai_patterns.test.js（40）；纯后端 bump --no-build，补丁 update-1.4.97.patch.json（纯后端）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-15
+- Context: Discovered by Agent while修复断网/额度用尽丢数据 + 灵感断线续跑 (v1.4.98)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 用户实报两处丢失：① /plan 生成前就 DELETE foreshadowings，中途失败（额度断/报错）旧伏笔已被清且新方案未应用=数据丢失；② /ideas 纯 SSE 无 Job 化，断线即 ctrl.abort() 产物不落盘。
+  - 修复模式（v1.4.98）：破坏性删除前先快照、catch 里 restoreForeshadows 原样恢复（保留旧数据+可重试）；/ideas 加 requestId（前端 localStorage 持久化）+ idea_runs 表落盘终态 + SSE detachOnClose（有 requestId 才解耦）+ GET /ideas/result/:requestId 轮询恢复。
+  - SSE 复用要点：startSSE 已支持 opts.detachOnClose；长任务解耦模式=断线不中止任务，用户显式停止仍走 /job/abort。/ideas 未 Job 化（无 tryCreateJob），只做了 requestId 落盘恢复。
+  - 新测试：server/test/idea_runs.test.js（5 断言，node --test 直跑）。前端构建产物必须随补丁：改了 .vue/.js 前端文件时 build-and-patch 不能带 --no-build。
+  - 验证：全量 109+5 通过（3 失败为环境缺 cheerio）；test_ideas_engine.mjs 348 绿；补丁 update-1.4.98.patch.json（含 web/dist）。
