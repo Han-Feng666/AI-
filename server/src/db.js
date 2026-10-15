@@ -208,6 +208,19 @@ CREATE TABLE IF NOT EXISTS plan_change_log (
 );
 CREATE INDEX IF NOT EXISTS idx_plan_change_log_novel ON plan_change_log(novel_id);
 
+-- 灵感生成运行记录（/ideas 断线续跑）：request_id 由前端生成并随请求提交，
+-- 生成结果在服务端落盘。断网/页面刷新后前端凭 request_id 轮询取回结果，
+-- 不再因连接中断丢失正在生成的整批创意。
+CREATE TABLE IF NOT EXISTS idea_runs (
+  request_id TEXT PRIMARY KEY,
+  status TEXT DEFAULT 'running',
+  ideas TEXT DEFAULT '',
+  error TEXT DEFAULT '',
+  params TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  updated_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS generation_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   novel_id INTEGER NOT NULL REFERENCES novels(id) ON DELETE CASCADE,

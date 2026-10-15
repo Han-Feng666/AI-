@@ -246,6 +246,8 @@ export const api = {
 
   // 灵感生成器：按题材+风格批量产出小说创意大纲
   generateIdeas: (data, handlers) => streamRequest('/ideas', data, handlers),
+  // 断线续跑：凭 requestId 查询灵感生成运行状态与结果
+  getIdeaRun: (requestId) => http.get(`/ideas/result/${encodeURIComponent(requestId)}`),
 
   // 设置
   getSettings: () => http.get('/settings'),

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import api from '../api';
@@ -32,6 +32,61 @@ const askAction = ref(null); // null | 'direct' | 'adjust'
 const adjustOpen = ref(false);
 const adjustForm = ref({ title: '', genre: '', logline: '', hook: '', concept: '', protagonistName: '', goldenFinger: '' });
 const adjustSaving = ref(false);
+
+// 断线续跑：本次生成的 requestId 持久化到 localStorage。
+// 生成中断网/刷新后重新进入页面，凭它向后端轮询取回结果，正在生成的整批创意不再丢失。
+const IDEA_RUN_KEY = 'idea_run_request_id';
+let activeRequestId = '';
+try { activeRequestId = localStorage.getItem(IDEA_RUN_KEY) || ''; } catch { activeRequestId = ''; }
+let recoveryTimer = null;
+
+function newRequestId() {
+  const id = `idea-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  try { localStorage.setItem(IDEA_RUN_KEY, id); } catch { /* ignore */ }
+  return id;
+}
+
+// 轮询取回断线前那次生成的结果：running 继续等，done/error/aborted 落回界面
+function pollIdeaRun(requestId) {
+  if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
+  api.getIdeaRun(requestId).then((run) => {
+    if (!run || run.status === 'running') {
+      recoveryTimer = setTimeout(() => pollIdeaRun(requestId), 4000);
+      return;
+    }
+    try { localStorage.removeItem(IDEA_RUN_KEY); } catch { /* ignore */ }
+    activeRequestId = '';
+    if (run.status === 'done' && Array.isArray(run.ideas) && run.ideas.length) {
+      applyIdeas(run.ideas);
+      statusText.value = '';
+      ElMessage.success('已恢复断线前生成的创意');
+    } else if (run.status === 'error') {
+      statusText.value = '';
+      ElMessage.error(run.error || '上次灵感生成失败，请重新生成');
+    } else if (run.status === 'aborted') {
+      statusText.value = '';
+      ElMessage.info('上次灵感生成已停止，可重新生成');
+    }
+    generating.value = false;
+  }).catch(() => {
+    // 404：记录已过期或从未生成，清掉本地标记即可
+    try { localStorage.removeItem(IDEA_RUN_KEY); } catch { /* ignore */ }
+    activeRequestId = '';
+    generating.value = false;
+  });
+}
+
+function applyIdeas(list) {
+  ideas.value = (list || []).map((it) => ({ ...it, expanded: false }));
+  // 累积本轮创意签名，供下一批生成时去重
+  for (const it of ideas.value) {
+    historyIdeas.value.push({
+      title: it.title || '',
+      logline: it.logline || '',
+      golden_finger: it.protagonist?.golden_finger || ''
+    });
+  }
+}
 
 const selectedIdea = computed(() => ideas.value.find((it) => it.id === selectedId.value) || null);
 
@@ -68,8 +123,9 @@ async function generate() {
   if (generating.value) return;
   generating.value = true;
   statusText.value = '';
-  ideas.value = [];
-  selectedId.value = null;
+  // 失败保留旧创意：生成失败/断线时旧结果仍在界面上，用户可直接重试
+  const requestId = newRequestId();
+  activeRequestId = requestId;
   try {
     const data = await api.generateIdeas({
       genres: genres.value,
@@ -79,23 +135,25 @@ async function generate() {
       count: ideaCount.value,
       seed: seedIdea.value.trim(),
       marketList: marketList.value.trim(),
-      excludeIdeas: historyIdeas.value
+      excludeIdeas: historyIdeas.value,
+      requestId
     }, {
       onStatus: (m) => { statusText.value = m; },
       onError: (m) => { if (m) ElMessage.error(m); }
     });
-    ideas.value = (data?.ideas || []).map((it) => ({ ...it, expanded: false }));
-    // 累积本轮创意签名，供下一批生成时去重
-    for (const it of ideas.value) {
-      historyIdeas.value.push({
-        title: it.title || '',
-        logline: it.logline || '',
-        golden_finger: it.protagonist?.golden_finger || ''
-      });
-    }
+    applyIdeas(data?.ideas || []);
     if (!ideas.value.length) ElMessage.info('本次没有生成到创意，请换个题材组合再试');
     statusText.value = '';
+    try { localStorage.removeItem(IDEA_RUN_KEY); } catch { /* ignore */ }
+    activeRequestId = '';
   } catch (e) {
+    // 连接中断（断网/刷新）：后端 detachOnClose 模式下任务继续跑，启动轮询取回结果
+    const isDisconnect = /网络请求失败|连接中断|请求超时/.test(e.message || '');
+    if (isDisconnect && activeRequestId) {
+      statusText.value = '连接中断，正在后台恢复本次生成结果…';
+      pollIdeaRun(activeRequestId);
+      return;
+    }
     ElMessage.error(e.message);
   } finally {
     generating.value = false;
@@ -196,7 +254,19 @@ async function buildNovelFromIdea(idea, concept) {
   }
 }
 
-onMounted(loadStyleLibrary);
+onMounted(() => {
+  loadStyleLibrary();
+  // 断线续跑：进入页面时若存在未完成的那次生成（localStorage 残留 requestId），轮询取回结果
+  if (activeRequestId) {
+    generating.value = true;
+    statusText.value = '正在恢复上次未完成的灵感生成…';
+    pollIdeaRun(activeRequestId);
+  }
+});
+
+onBeforeUnmount(() => {
+  if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
+});
 </script>
 
 <template>

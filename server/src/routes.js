@@ -85,6 +85,7 @@ import {
   acceptVersion as acceptVersionRow, appendChangeLog,
   saveDraft, getDraft, buildSnapshot
 } from './planVersions.js';
+import { startIdeaRun, finishIdeaRun, getIdeaRun, pruneIdeaRuns } from './ideaRuns.js';
 import { toolRegistry, getToolSchemas } from './tools.js';
 import { applyPatch, getCurrentVersion } from './updater.js';
 import { randomUUID } from 'node:crypto';
@@ -1862,7 +1863,21 @@ router.post('/ideas', async (req, res) => {
   if (!genreList.length) return res.status(400).json({ error: '请至少选择一个小说题材' });
   const ideaCount = Math.min(6, Math.max(2, Number(count) || 3));
 
-  const { ctrl, send, end } = startSSE(req, res);
+  // 断线续跑：requestId 由前端生成并提交。长任务与 SSE 连接解耦——连接中断（断网/刷新/休眠）
+  // 不再中止生成，产物写回 idea_runs，前端凭 requestId 轮询取回，避免正在生成的整批创意丢失。
+  const requestId = String((req.body || {}).requestId || '').trim().slice(0, 80);
+  if (requestId) {
+    try { pruneIdeaRuns(); } catch { /* 清理失败不阻塞 */ }
+    startIdeaRun(requestId, { genres: genreList, count: ideaCount, seed });
+  }
+  const { ctrl, send, end } = startSSE(req, res, { detachOnClose: !!requestId });
+  // 所有终态都先落盘再结束流：断线后前端才能从 /ideas/result/:requestId 取回结果
+  const finishIdea = (obj) => {
+    if (requestId) {
+      try { finishIdeaRun(requestId, obj); } catch { /* 落盘失败不阻塞 */ }
+    }
+    return end(obj);
+  };
   send({ type: 'status', message: `正在根据题材与风格构思 ${ideaCount} 个创意…` });
 
   const styles = getStyles(styleIds);
@@ -2692,8 +2707,8 @@ ${axisBlock}
         const rescued = await rescueRound('上一轮全部创意偏离所选题材或金手指载体跑偏，被题材门禁整批剔除。本轮必须严格贴合所选题材的核心设定与世界观生态，金手指按题材规则写。');
         // v1.4.88：补救轮产物同样过门禁，防跑题创意从补救路径溜进结果
         const gatedRescued = rescued ? gateIdeas(rescued.ideas) : { ideas: [] };
-        if (gatedRescued.ideas.length) return end({ type: 'done', data: { ideas: await ensureStoryEngine(gatedRescued.ideas) } });
-        return end({ type: 'error', message: GATE_BLOCKED_MSG });
+        if (gatedRescued.ideas.length) return finishIdea({ type: 'done', data: { ideas: await ensureStoryEngine(gatedRescued.ideas) } });
+        return finishIdea({ type: 'error', message: GATE_BLOCKED_MSG });
       }
       if (gated.ideas.length) {
         // 数量补齐（v1.4.85）：门禁剔除后不足用户要求数量时带反馈再生成一轮，
@@ -2718,15 +2733,15 @@ ${axisBlock}
         }
         finalIdeas = await ensureStoryEngine(finalIdeas);
         const uncovered = checkCoverage(finalIdeas);
-        if (!uncovered.length) return end({ type: 'done', data: { ideas: finalIdeas } });
+        if (!uncovered.length) return finishIdea({ type: 'done', data: { ideas: finalIdeas } });
         // 覆盖缺口：带反馈补一轮，新批次覆盖更全才采用；产物同样必须重新过题材门禁（v1.4.88）
         const coveredRescued = await rescueRound(`上一轮创意未覆盖勾选题材：${uncovered.join('、')}。本轮每个勾选题材至少出一个创意，内容必须贴合该题材的核心设定与生态，题材字段直接标注对应题材。`);
         const gatedCovered = coveredRescued ? gateIdeas(coveredRescued.ideas) : { ideas: [] };
         if (gatedCovered.ideas.length && checkCoverage(gatedCovered.ideas).length < uncovered.length) {
-          return end({ type: 'done', data: { ideas: gatedCovered.ideas } });
+          return finishIdea({ type: 'done', data: { ideas: gatedCovered.ideas } });
         }
         send({ type: 'status', message: `提示：本次创意未覆盖勾选题材「${uncovered.join('、')}」，可点击重新生成补齐` });
-        return end({ type: 'done', data: { ideas: finalIdeas } });
+        return finishIdea({ type: 'done', data: { ideas: finalIdeas } });
       }
       // hadCandidates=false 且无产出：全是残缺半成品，落入下方修复路径
     }
@@ -2766,10 +2781,10 @@ ${axisBlock}
         // 无字卷宗案例绕过题材/载体校验的漏出口（v1.4.56 修复）
         const gatedRepair = gateIdeas(ideas3);
         if (gatedRepair.hadCandidates && gatedRepair.ideas.length === 0) {
-          return end({ type: 'error', message: GATE_BLOCKED_MSG });
+          return finishIdea({ type: 'error', message: GATE_BLOCKED_MSG });
         }
         if (gatedRepair.ideas.length) {
-          return end({ type: 'done', data: { ideas: gatedRepair.ideas } });
+          return finishIdea({ type: 'done', data: { ideas: gatedRepair.ideas } });
         }
         // 修复产物全是残缺半成品 → 继续走下方失败提示
       }
@@ -2784,13 +2799,13 @@ ${axisBlock}
       fsMod.appendFileSync(logPath, `\n[${stamp}] len=${String(full || '').length}\nHEAD: ${String(full || '').slice(0, 800).replace(/\n/g, '\\n')}\nTAIL: ${String(full || '').slice(-400).replace(/\n/g, '\\n')}\n`);
     } catch { /* 日志失败不阻塞 */ }
 
-    return end({ type: 'error', message: '创意生成失败：模型返回内容无法解析，请重试。' });
+    return finishIdea({ type: 'error', message: '创意生成失败：模型返回内容无法解析，请重试。' });
   } catch (e) {
     if (e.name === 'AbortError' && ctrl.signal.aborted) {
-      return end({ type: 'aborted', message: '已取消' });
+      return finishIdea({ type: 'aborted', message: '已取消' });
     }
     console.error('ideas generate error:', e);
-    return end({ type: 'error', message: e.message || '创意生成失败' });
+    return finishIdea({ type: 'error', message: e.message || '创意生成失败' });
   }
 });
 
@@ -2964,6 +2979,21 @@ function seedWorldSettingsFromPlan(novelId, plan, novel) {
 }
 
 // 应用创作方案（生成或修订共用）：更新小说信息，重建角色/关系/章节规划
+// 恢复方案生成前快照的伏笔：方案生成中途失败时，生成前已清空的旧伏笔必须原样写回，
+// 避免"额度耗尽/断网/报错"把现有方案的伏笔数据永久抹掉。先清掉本次失败运行期间
+// （已有正文补建链路）写入的伏笔，再按快照重建（保留原 id/时间戳）。
+function restoreForeshadows(novelId, backup) {
+  if (!Array.isArray(backup) || !backup.length) return 0;
+  try {
+    db.prepare('DELETE FROM foreshadowings WHERE novel_id = ?').run(novelId);
+    const ins = db.prepare('INSERT INTO foreshadowings (id, novel_id, content, status, chapter_index, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)');
+    for (const f of backup) {
+      ins.run(f.id, novelId, f.content, f.status || 'open', f.chapter_index || 0, f.note || '', f.created_at || null, f.updated_at || null);
+    }
+    return backup.length;
+  } catch { return 0; }
+}
+
 async function applyPlan(novel, plan, opts = {}) {
   const words = opts.words || novel.chapter_word_count || 2000;
   const target = opts.target || novel.target_chapters || 20;
@@ -3221,6 +3251,9 @@ router.post('/novels/:id/plan', async (req, res) => {
 
   // 重新生成方案会重建全部章节/角色/关系，旧伏笔指向已失效，一并清空。
   // 必须在已有正文补建之前执行：补建会为已有章节写入新伏笔，放在后面会把它清掉。
+  // 先快照旧伏笔：生成中途失败（断网/额度耗尽/报错）时方案并未应用，必须把旧伏笔原样恢复，
+  // 否则"生成前就删"会把现有方案的伏笔永久抹掉（用户实报的创作方案数据丢失）。
+  const foreshadowBackup = db.prepare('SELECT * FROM foreshadowings WHERE novel_id = ?').all(novel.id);
   db.prepare('DELETE FROM foreshadowings WHERE novel_id = ?').run(novel.id);
 
   // 已有正文先落库（方案生成期间章节表会被 applyPlan 重建，靠 existingIndices 快照恢复）。
@@ -3257,9 +3290,6 @@ router.post('/novels/:id/plan', async (req, res) => {
     parts.push('既定事实铁律：已有正文中出场的人物、发生的事件、确立的设定为既定事实。方案中的人物表、世界观、势力、第2章起的分章概要必须从这些事实自然延展，严禁改写、忽略已有正文中已发生的事件，严禁引入与已有正文矛盾的人物或设定。第1章的概要必须直接采用上方"章节摘要"（实际内容概括），严禁另行规划第1章剧情。方案中的主角名必须使用已有正文中实际出现的称呼。');
     existingBlock = parts.join('\n\n');
   }
-
-  // 重新生成方案会重建全部章节/角色/关系，旧伏笔指向已失效，一并清空
-  db.prepare('DELETE FROM foreshadowings WHERE novel_id = ?').run(novel.id);
 
   const target = Math.max(1, Math.min(2000, Number(targetChapters) || novel.target_chapters || 20));
   const words = Number(chapterWordCount) || novel.chapter_word_count || 2000;
@@ -3852,6 +3882,9 @@ ${prevBlock || '（无，这是开头章节）'}
     runBeatsBackground();
     return;
   } catch (e) {
+    // 方案未应用（生成中途失败/用户中止）：把生成前清空的旧伏笔原样恢复，
+    // 保证"额度耗尽/断网/报错"不会毁掉现有方案的伏笔数据（保留旧数据 + 可重试）。
+    restoreForeshadows(novel.id, foreshadowBackup);
     const userAborted = e.name === 'AbortError' && ctrl.signal.aborted;
     if (userAborted) {
       updateJob(job.id, { status: 'aborted', error: e.message });
@@ -7950,6 +7983,16 @@ router.get('/novels/:id/job', (req, res) => {
 
 router.get('/jobs/active', (req, res) => {
   res.json({ jobs: listActiveJobs() });
+});
+
+// 灵感生成断线续跑：凭 requestId 查询运行结果。
+// 断网/刷新后前端重新进入页面时轮询此接口：
+//   running → 继续等待；done → 取回 ideas 恢复界面；error/aborted → 展示原因可重试；
+//   404 → 该 requestId 无记录（过期或从未生成）。
+router.get('/ideas/result/:requestId', (req, res) => {
+  const run = getIdeaRun(String(req.params.requestId || '').slice(0, 80));
+  if (!run) return res.status(404).json({ error: '没有找到该次灵感生成记录' });
+  res.json(run);
 });
 
 // 停止/清理任务：把该小说当前 running 的 job 标记为 aborted。

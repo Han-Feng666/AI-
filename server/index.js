@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import routes from './src/routes.js';
 import { ensureRoot } from './src/storage.js';
 import { clearZombieJobs } from './src/jobs.js';
+import { pruneIdeaRuns } from './src/ideaRuns.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,6 +51,7 @@ app.use((err, req, res, next) => {
 ensureRoot().then(() => {
   const cleaned = clearZombieJobs();
   if (cleaned) console.log(`[startup] 清理 ${cleaned} 个残留任务`);
+  pruneIdeaRuns();
   app.listen(PORT, () => {
     console.log(`Novel Studio server running at http://localhost:${PORT}`);
   });
