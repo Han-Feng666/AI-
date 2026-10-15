@@ -1370,3 +1370,15 @@ Entries discovered by the Agent during task execution should follow this format:
   - AI_DETECT_SYSTEM 同步补 64-68 类（章级动作复读/喻体复读/否定短句排比/的地得误用/造作喻体），与 lib.js 扫描器一一对应（现 68 类）。
   - 去 AI 味链路不变：扫描器只进 structureFixes 定向润色，不堆 CHAPTER_SYSTEM、不加禁词。
   - 验证：scan_ai_patterns.test.js（34）；纯后端 bump --no-build，补丁 update-1.4.96.patch.json（纯后端）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-14
+- Context: Discovered by Agent while按用户总结的 AI 味全景清单（文字/对话/人设/情节/设定/高阶）批量补可正则化盲区 (v1.4.97)
+- Category: Troubleshooting & Debugging
+- Instructions:
+  - 用户给的 AI 味清单里，可用于确定性正则扫描的核心缺口：老套比喻公共库、情绪台词模板句、身体感官模板、突发副词过载。
+  - 新增 4 扫描器（lib.js，挂 scanAiPatterns + routes.js structureFixes）：`scanClicheSimile`（老套比喻库：眼神像寒潭/时间如流水/命运像大网/心如刀割/如坠冰窟/笑容像春风/声音如天籁/泪如断线珍珠/眼睛像星星，命中合计 ≥2 处）、`scanStockDialogueLine`（引号内现成情绪台词"你可知你在说什么/与我无关/怎么会这样/这不科学/你疯了吗/别怪我没提醒你"等 ≥2 句）、`scanBodySensoryTemplate`（部位+一阵/一股+体感名词 ≥3 处）、`scanSuddenAdverb`（猛地/陡然/骤然/蓦地/忽地/冷不丁 ≥3 且 >3/千字）。
+  - 同步：AI_DETECT_SYSTEM 补 69-72 类（现 72 类）；ANTI_AI_STYLE 加 2 条短正例（比喻用自己的眼睛找、对话给每个角色自己的声音），仍走"短正例"不堆禁令。
+  - 门限坑：PAD 测试常量仅 376 字，新扫描器门槛 400/600 会导致测试素材不足漏命中——测试输入须叠加到阈值以上；`scanSuddenAdverb` 门槛与其他扫描器统一到 400。
+  - 用户清单中暂不可正则化的部分（保留人工/LLM 判定）：视角飘移、伏笔收不回、代价感弱、缺少无效剧情、作者执念缺失、剧情安全中庸——这些属结构/内核层，靠生成后 LLM 复核与 prompt 方向，不加正则。
+  - 验证：scan_ai_patterns.test.js（40）；纯后端 bump --no-build，补丁 update-1.4.97.patch.json（纯后端）。
