@@ -24,7 +24,8 @@ import {
   scanProgressiveCouple, scanForcedAntithesis, scanInsightAside,
   scanHedgeFiller, scanClockPrecision, scanPredictConfirm,
   scanParagraphWordRepeat, scanIdiomStack, scanNaiveNarration, scanMicroActionRepeat,
-  scanSimileEcho, scanLaboredSimile, scanNegationParallel, scanDeParticleMisuse,
+  scanSimileEcho, scanLaboredSimile, scanClicheSimile, scanStockDialogueLine,
+  scanBodySensoryTemplate, scanSuddenAdverb, scanNegationParallel, scanDeParticleMisuse,
   normalizeLLMConfig, estimateTokens,
   parseTxtChapters
 } from './lib.js';
@@ -5841,6 +5842,10 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
         for (const h of scanMicroActionRepeat(full)) structureFixes.push(h.word);
         for (const h of scanSimileEcho(full)) structureFixes.push(h.word);
         for (const h of scanLaboredSimile(full)) structureFixes.push(h.word);
+        for (const h of scanClicheSimile(full)) structureFixes.push(h.word);
+        for (const h of scanStockDialogueLine(full)) structureFixes.push(h.word);
+        for (const h of scanBodySensoryTemplate(full)) structureFixes.push(h.word);
+        for (const h of scanSuddenAdverb(full)) structureFixes.push(h.word);
         for (const h of scanNegationParallel(full)) structureFixes.push(h.word);
         for (const h of scanDeParticleMisuse(full)) structureFixes.push(h.word);
 

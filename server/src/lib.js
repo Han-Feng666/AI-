@@ -758,6 +758,10 @@ export function scanAiPatterns(text) {
   hits.push(...scanMicroActionRepeat(text));
   hits.push(...scanSimileEcho(text));
   hits.push(...scanLaboredSimile(text));
+  hits.push(...scanClicheSimile(text));
+  hits.push(...scanStockDialogueLine(text));
+  hits.push(...scanBodySensoryTemplate(text));
+  hits.push(...scanSuddenAdverb(text));
   hits.push(...scanNegationParallel(text));
   hits.push(...scanDeParticleMisuse(text));
   // 段落碎片化检测：一段文字超过 5 个段落且平均每段 < 50 字，判定为碎片化
@@ -2343,6 +2347,106 @@ export function scanLaboredSimile(text) {
     count: hits.length,
     template: true
   }];
+}
+
+// 老套比喻库：AI 的喻体总落在"公共高频款"上——眼神像寒潭、时间如流水、命运像大网、
+// 心如刀割、如坠冰窟、笑容像春风、声音如天籁、泪如断线珍珠。私人化、古怪但贴切的独创比喻
+// 才是真人手笔；撞上这个公共库 ≥2 处即报（单处可能真是恰当地用了老比喻）。
+const CLICHE_SIMILES = [
+  { re: /(?:眼神|目光|眸(?:子|光|色)|眼底)[^。！？\n]{0,6}(?:像|如|似|仿佛|宛如|如同)[^。！？\n]{0,4}(?:寒潭|深潭|潭水|一潭|刀子|利刃|利剑|鹰隼?|寒星)/g, label: '眼神像寒潭/刀子' },
+  { re: /(?:时间|光阴|岁月|时光)[^。！？\n]{0,4}(?:如同|犹如|好像|像|如|似)[^。！？\n]{0,6}(?:流水|白驹过隙|沙漏|手中沙|指间沙|指尖沙|一江春水)/g, label: '时间如流水' },
+  { re: /(?:命运|宿命)[^。！？\n]{0,4}(?:如同|犹如|好像|像|如|似)[^。！？\n]{0,6}(?:大网|巨网|一张网|网一样|齿轮|丝线|棋局|漩涡|巨手)/g, label: '命运像大网/齿轮' },
+  { re: /(?:心|内心|心房)[^。！？\n]{0,3}(?:如同|犹如|好像|像|如|似)[^。！？\n]{0,4}(?:刀割|刀绞|针扎|针刺|刀剜|冰窖|冰窟)/g, label: '心如刀割' },
+  { re: /如(?:坠|坐|芒刺)[^。！？\n]{0,6}(?:冰窟|冰窖|针毡|在背)/g, label: '如坠冰窟/如芒在背' },
+  { re: /(?:笑容|微笑|笑脸|嘴角)[^。！？\n]{0,3}(?:如同|犹如|好像|像|如|似)[^。！？\n]{0,6}(?:春风|暖阳|阳光|春日|花朵|花朵般)/g, label: '笑容像春风/暖阳' },
+  { re: /(?:声音|嗓音|语气)[^。！？\n]{0,3}(?:如同|犹如|好像|像|如|似)[^。！？\n]{0,6}(?:天籁|黄莺|清泉|泉水|山泉|春风|银铃)/g, label: '声音如天籁/清泉' },
+  { re: /(?:泪水|眼泪|泪珠)[^。！？\n]{0,3}(?:如同|犹如|好像|像|如|似)[^。！？\n]{0,8}(?:断线|珍珠|决堤|断了线的珠子|断了线的珍珠)/g, label: '泪如断线珍珠' },
+  { re: /(?:眼睛|眼前|眸子|双眸)[^。！？\n]{0,3}(?:像|如|似|仿佛)[^。！？\n]{0,6}(?:星星|星辰|星子|繁星|夜空)/g, label: '眼睛像星星' }
+];
+
+export function scanClicheSimile(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const found = [];
+  for (const p of CLICHE_SIMILES) {
+    const m = s.match(p.re) || [];
+    if (m.length) found.push({ label: p.label, sample: m[0].slice(0, 16), n: m.length });
+  }
+  const total = found.reduce((a, f) => a + f.n, 0);
+  if (total < 2) return [];
+  return [{
+    word: `老套比喻×${total}（${found.map((f) => `${f.label}"${f.sample}"`).join('、')}）——"眼神像寒潭""时间如流水""心如刀割"是全网高频通用款，AI 的喻体总落在公共库里。真人的比喻是私人化、古怪但贴切的独创款。把这些换个只属于这个人物/场景的比喻，或直接删掉改白描`,
+    count: total,
+    template: true
+  }];
+}
+
+// 情绪台词模板库：AI 生气/冷淡/震惊时的固定反应句——"你可知你在说什么""与我无关""怎么会这样"
+// "这不科学""你疯了吗""别怪我没提醒你"。真人台词有潜台词、有回避，不会撞这些现成句。
+// 只扫引号内对白，≥2 句才报。
+const STOCK_LINES = [
+  /你可知(?:道)?你在(?:说)?什么/, /与我无关|与你无关|跟你(有|没)关(系|系吗)/, /怎么会(?:这样|变成这样)/,
+  /这不(?:可能|科学|是真的)/, /你是不是?疯(?:了|了吧)|你疯了/, /住口|放肆|大胆/, /别怪我没(?:提醒|说过)|那就别怪我了/,
+  /你以为你是谁|你以为你算(?:什么|老几)/, /你不要?逼我|别逼我/, /我(?:发誓|保证|对天发誓)|我向你保证/,
+  /你想多了|你想多了吧/, /这就是?命|命该如此|认命吧/, /你别无选择|你没得选/
+];
+
+export function scanStockDialogueLine(text) {
+  const s = String(text || '');
+  if (s.length < 300) return [];
+  const dialogues = s.match(/[""''「『][^""''」』]{1,60}[""''」』]/g) || [];
+  if (!dialogues.length) return [];
+  const hits = [];
+  for (const d of dialogues) {
+    const inner = d.slice(1, -1);
+    for (const re of STOCK_LINES) {
+      const m = inner.match(re);
+      if (m) { hits.push(m[0]); break; }
+    }
+  }
+  const uniq = [...new Set(hits)];
+  if (uniq.length < 2) return [];
+  return [{
+    word: `情绪台词模板×${uniq.length}（如"${uniq.slice(0, 3).join('""')}"）——"你可知你在说什么""与我无关""怎么会这样"是现成句，换个角色也照样能用，说明人设没落地。真人台词有潜台词、有回避、有嘴硬，把这些翻译成这个角色此刻真正会说的话`,
+    count: uniq.length,
+    template: true
+  }];
+}
+
+// 身体感官模板：AI 把情绪/状态写成"部位 + 一阵/一股 + 体感名词"——"后脑勺一阵钝痛""胸口一阵发闷"
+// "太阳穴一阵刺痛""后背一阵发凉"。单处正常，全章 ≥3 处（或 ≥2 个不同部位各出现）就是模板化。
+const BODY_PARTS = '后脑勺|脑门|额头|太阳穴|眉心|鼻尖|喉咙|喉头|嗓子|心口|胸口|后背|后颈|脊背|脊梁|胃里|胃部|指尖|手心|手掌|四肢|膝盖|小腿|肩膀|头皮|耳根|脸颊|眼皮|眼睑';
+const SENSE_NOUNS = '钝痛|刺痛|绞痛|胀痛|酸痛|隐痛|抽痛|发闷|发紧|发沉|发凉|发冷|发麻|发烫|发热|发胀|抽搐|痉挛|酸胀|酥麻|钝响|嗡鸣|眩晕|一沉|一紧';
+
+export function scanBodySensoryTemplate(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const re = new RegExp(`(?:${BODY_PARTS})[^。！？\\n]{0,4}?(?:${SENSE_NOUNS})`, 'g');
+  const ms = s.match(re) || [];
+  if (ms.length < 3) return [];
+  const parts = [...new Set(ms.map((m) => (m.match(new RegExp(`^(${BODY_PARTS})`)) || [])[1]).filter(Boolean))];
+  return [{
+    word: `身体感官模板×${ms.length}（如"${ms.slice(0, 3).join('"、"')}"，涉及 ${parts.slice(0, 4).join('/')} 等部位）——"部位+一阵+体感"是 AI 的生理反应标准件，全章反复出现就是模板。真人把反应长在动作里（他正在做什么、手边有什么），而不是插入式报部位`,
+    count: ms.length,
+    template: true
+  }];
+}
+
+// 突发副词过载：AI 给每个转折动作都垫"猛地/陡然/骤然/蓦地"制造冲击，真人更克制。
+// 只统计强冲击型（不含常见的"忽然/突然"，那两个已由转折连词扫描覆盖），密度超限即报。
+export function scanSuddenAdverb(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const n = (s.match(/猛地|陡地|陡然|骤然|蓦地|忽地|倏地|冷不丁|冷不防/g) || []).length;
+  const perK = n / Math.max(1, s.length / 1000);
+  if (n >= 3 && perK > 3) {
+    return [{
+      word: `突发副词过载×${n}（${perK.toFixed(1)}/千字，"猛地/陡然/骤然/蓦地"给每个动作都垫冲击力）。真人只在真正需要时用一两次，其余靠动作本身的速度与力度带出，删掉这些副词`,
+      count: n,
+      template: true
+    }];
+  }
+  return [];
 }
 
 // 的地得误用（高置信形态）："X的像"几乎必然是"X得像"的错写（"干的像砂纸"应为"干得像砂纸"）。

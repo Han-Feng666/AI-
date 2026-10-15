@@ -254,6 +254,48 @@ test('单个造作喻体不误报', () => {
   assert.ok(!words.some((w) => w.includes('造作喻体')), `不应误报，实际: ${words.join('|')}`);
 });
 
+test('老套比喻被检出', () => {
+  const txt = PAD + '他的眼神像一泓寒潭，时间如流水般逝去，命运像一张大网罩下来，叫人喘不过气。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('老套比喻')), `words=${words.join('|')}`);
+});
+
+test('单个老套比喻不误报', () => {
+  const txt = PAD + '他的眼神像一泓寒潭，看过来，没说别的。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => w.includes('老套比喻')), `不应误报，实际: ${words.join('|')}`);
+});
+
+test('情绪台词模板被检出', () => {
+  const txt = PAD + '"你可知你在说什么？"他冷笑。"与我无关。"她转过身。"';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('情绪台词模板')), `words=${words.join('|')}`);
+});
+
+test('正常对话不误报台词模板', () => {
+  const txt = PAD + '"饭吃了没？"他问。"还没，等下吃。"她头也没抬。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => w.includes('情绪台词模板')), `不应误报，实际: ${words.join('|')}`);
+});
+
+test('身体感官模板被检出', () => {
+  const txt = PAD + '后脑勺一阵钝痛。他扶着墙，胸口一阵发闷，太阳穴一阵刺痛，腿都软了。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('身体感官模板')), `words=${words.join('|')}`);
+});
+
+test('突发副词过载被检出', () => {
+  const txt = PAD + '他猛地起身，手陡然一抖，脸骤然变色，心蓦地一沉，又忽地坐下。屋里的光线很暗，桌上还摆着昨夜没喝完的茶，杯子边上结了一圈茶渍，他盯着那圈渍看了很久，什么也没说，最后还是把杯子推到了一边。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('突发副词过载')), `words=${words.join('|')}`);
+});
+
 test('的地得误用（的像）被检出', () => {
   const txt = PAD + '他嗓子干的像砂纸刮锅底。';
   const hits = scan(txt);
