@@ -1393,3 +1393,19 @@ Entries discovered by the Agent during task execution should follow this format:
   - SSE 复用要点：startSSE 已支持 opts.detachOnClose；长任务解耦模式=断线不中止任务，用户显式停止仍走 /job/abort。/ideas 未 Job 化（无 tryCreateJob），只做了 requestId 落盘恢复。
   - 新测试：server/test/idea_runs.test.js（5 断言，node --test 直跑）。前端构建产物必须随补丁：改了 .vue/.js 前端文件时 build-and-patch 不能带 --no-build。
   - 验证：全量 109+5 通过（3 失败为环境缺 cheerio）；test_ideas_engine.mjs 348 绿；补丁 update-1.4.98.patch.json（含 web/dist）。
+
+[Project Knowledge Summary]
+- Date: 2026-10-15
+- Context: Discovered by Agent while修复千章级连载的上下文预算爆炸与剧情漂移隐性来源 (v1.4.99)
+- Category: Troubleshooting & Debugging / Build Methods
+- Instructions:
+  - 千章级连载防御（三文件，纯后端）：
+    1. memory.js `getActiveFacts(novelId, currentIdx, limit)`：limit 存在时按"最近优先"（chapter_index DESC）取，防止数千条事实全量加载挤爆内存与输入；无 limit 保持原按章升序（老调用不破坏）。`formatFactsBlock` limit=3000、`buildConstitution`/`checkPlotConsistency` limit=1500。
+    2. rag.js `storeChunks` 增量索引：仅"新章追加"（chapterIdx > 现存最大章）时复用已构建索引（appendChunkToIndex 自增 chunkCount + chapterOf 映射追加），重写已有章节才 invalidateIndex——避免每章生成全量重建 TF-IDF（O(N) 全表加载）。`getCachedIndex` 构建 chunkId→chapter_index 映射。
+    3. rag.js `retrieveRelevantCached(novelId, query, topK, beforeIndex)`：生成第 N 章时传 beforeIndex=N，只检索 chapter_index < N 的片段，杜绝 RAG 从"尚未发生的后续章节"取回内容（剧情漂移隐性来源）。routes.js 章节生成与 /rag-search 已切换。
+    4. routes.js `updateCharacterStates` 去掉 slice(0,20)：全书角色状态链全量保留（第 21 个角色起状态曾永久断裂——配角丢失是性格漂移来源）；注入端 charStateBlock 按需截总长（>60 人折叠、body>3000 字截断注明）。
+    5. routes.js `trimUserPromptToBudget(userPrompt, budget)` 整体预算封顶：各记忆块独立上限叠加仍可能超窗。优先剥离记忆/参考类大块（故事状态简报/前情阶段摘要/关键剧情事实/待回收伏笔/全书脉络时间线/参考范文/已导入同类小说/分层摘要树），保留创作铁律与本章信息（角色隔离/记忆铁律、本章信息、开篇铁律、关键衔接、上一章结尾、下一章预告、大纲时序纪律、灵感设定）；仍超限按字符硬切兜底。挂在章节生成 userPrompt 组装后、attemptPrompt 前，promptBudget = contextBudget*0.5。
+    6. routes.js 千章时间线：每 5 章一行的详细脉络只保留"最近 120 章 + 本章前后"，更早章节压成一行总量提示（引分层摘要树/剧情日志），"后续严禁提前写"约束仍覆盖全书。
+    7. routes.js `compressNovelContext`：先注入 `buildHierarchicalContext`（分层摘要树 L1-L5 覆盖全书）再注入章节明细，防止早期章节被 60000 字上限挤出压缩简报（后期生成彻底遗忘开篇设定的根因）；省略提示改口"已由分层摘要树兜底"。
+    8. memory.js `buildEnhancedMemoryBlock` 逾期伏笔字段名修复：`foreshadowings` 表列是 chapter_index/content（非 chapter_planted/description），原代码渲染"第undefined章埋下：undefined"。
+  - 验证：node --check 三文件全过；verify_rag_new.mjs 6 断言（索引复用/增量追加/重写失效/重建后 beforeIndex 仍过滤）；test_budget.mjs（低优先级块剥离、铁律保留）；全量 114/117 通过（3 失败为环境缺 cheerio）；补丁 update-1.4.99.patch.json（纯后端 --no-build）。
