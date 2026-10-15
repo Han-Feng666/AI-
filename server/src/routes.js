@@ -99,9 +99,10 @@ import {
   detectStyleDrift, saveTimelineEvent, formatTimelineSummary,
   saveCharacterVoice, getCharacterVoices, formatCharacterVoices,
   getConstitution, buildConstitution, checkPlotConsistency, checkMemoryConsistency,
-  upsertStoryLogEntry, removeStoryLogEntry, buildStoryLogBlock
+  upsertStoryLogEntry, removeStoryLogEntry, buildStoryLogBlock,
+  buildHierarchicalContext
 } from './memory.js';
-import { storeChunks, retrieveRelevant, formatRagBlock } from './rag.js';
+import { storeChunks, retrieveRelevantCached, formatRagBlock } from './rag.js';
 import {
   createCorpus, getCorpus, listCorpora, deleteCorpus,
   updateCorpusStatus, saveSamples, clearSamples, getSamples, getCorpusAnalysis,
@@ -136,7 +137,7 @@ import {
   triggerPendingTasks, enqueueAutoLearnTask
 } from './auto_learn.js';
 import { buildNovelKnowledgeGraph, buildKnowledgeGraph, formatKnowledgeGraphBlock } from './knowledge_graph.js';
-import { getRagCacheStatus, clearAllRagCache, retrieveRelevantCached } from './rag.js';
+import { getRagCacheStatus, clearAllRagCache } from './rag.js';
 import { installOllama, isOllamaInstalled, getInstallStatus, pullModel, getRecommendedModels, startOllamaService } from './ollama_installer.js';
 import { localGenerateChapterSmart, installTransformersModel, getTransformersStatus, getBuiltinModels } from './local_llm.js';
 import { generateName, generatePlaceName, generateTechniqueName, generateForceName, generateNames, normalizeGenre, getGenreTemplates, generatePersonalityDialog } from './genre_engine.js';
@@ -333,8 +334,11 @@ async function updateCharacterStates(config, novel, idx, full) {
   // 合并：上一章状态为底，本章变化覆盖同名角色
   const merged = [...prev.list.filter((p) => !changes.some((c) => c.name === p.name))];
   for (const c of changes) merged.push({ name: c.name, changes: String(c.changes) });
+  // 全书角色状态链不设数量上限：slice(0,20) 曾使第 21 个角色起的状态永久断裂
+  // （上一章快照被截断，后续章节只见前 20 人——配角状态丢失是角色性格漂移的隐性来源）。
+  // 合并已按角色名去重，全量保留即可；体积由 prompt 注入端（charStateBlock 截断）控制。
   db.prepare('INSERT OR REPLACE INTO character_states (novel_id, chapter_index, states) VALUES (?,?,?)')
-    .run(novel.id, idx, JSON.stringify(merged.slice(0, 20)));
+    .run(novel.id, idx, JSON.stringify(merged));
   return merged;
 }
 
@@ -957,6 +961,50 @@ function chunkWholeText(text) {
     chunks.push(text.slice(i, i + chunkSize));
   }
   return chunks;
+}
+
+// 用户提示词整体预算封顶（最后一道防线）：上下文各记忆块虽各有独立上限，
+// 但块数多时叠加起来仍可能整体超窗——尤其超长连载把压缩简报、阶段记忆、角色状态、
+// 脉络时间线全部拉满时。这里按 token 预算整体裁剪：优先剥离记忆/参考类大块，
+// 保留创作铁律与本章信息（裁剪只发生在真正超限时，正常书不受影响）。
+function trimUserPromptToBudget(userPrompt, budget) {
+  if (!budget || budget <= 0) return userPrompt;
+  if (estimateTokens(userPrompt) <= budget) return userPrompt;
+  // 高优先级块：即便超预算也保留（铁律与本章信息是生成质量的核心）
+  const KEEP = /^【(角色隔离铁律|角色记忆铁律|本章信息|开篇铁律|关键衔接要求|开篇范围硬约束|开局出场限制|上一章结尾|下一章预告|大纲时序纪律|灵感设定)/
+  // 低优先级块（优先剥离体积大且可被其他块兜底的记忆/参考块；保留角色与世界观等一致性锚点）
+  const DROP = /^【(故事状态简报|前情阶段摘要|本书已确立的关键剧情事实|待回收伏笔|全书脉络时间线|参考范文|已导入同类小说|分层摘要树|全书分层摘要树)/
+  const lines = userPrompt.split('\n');
+  const keepLines = [];
+  const dropLines = [];
+  let inBlock = false;
+  let blockHead = '';
+  for (const line of lines) {
+    if (/^【[^】]+】/.test(line)) {
+      blockHead = line;
+      inBlock = true;
+    }
+    if (inBlock) {
+      if (/^【[^】]+】/.test(line)) {
+        if (KEEP.test(line)) keepLines.push(line);
+        else if (DROP.test(line)) dropLines.push(line);
+        else keepLines.push(line); // 未知块默认保留
+      } else {
+        // 块内行：归属当前块
+        if (/^【(角色隔离铁律|角色记忆铁律|本章信息|开篇铁律|关键衔接要求|开篇范围硬约束|开局出场限制|上一章结尾|下一章预告|大纲时序纪律|灵感设定)/.test(blockHead)) keepLines.push(line);
+        else if (/^【(故事状态简报|前情阶段摘要|本书已确立的关键剧情事实|待回收伏笔|全书脉络时间线|参考范文|已导入同类小说|分层摘要树|全书分层摘要树)/.test(blockHead)) dropLines.push(line);
+        else keepLines.push(line);
+      }
+    } else {
+      keepLines.push(line);
+    }
+  }
+  let out = keepLines.join('\n');
+  if (estimateTokens(out) <= budget) return out;
+  // 仍超限（铁律与本章信息本身过大，多见于本章概要/上一章结尾超长）：按字符硬切兜底
+  const maxChars = Math.max(6000, Math.floor(budget * 4));
+  if (out.length > maxChars) out = out.slice(0, maxChars);
+  return out;
 }
 
 /** 安全截断文本，避免截断 UTF-8 多字节字符 */
@@ -4881,7 +4929,7 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
         ragQueryParts.push(existing.summary);
       }
       if (!ragQueryParts.length) ragQueryParts.push(title);
-      const ragChunks = retrieveRelevant(novel.id, ragQueryParts.join(' '), 4, idx);
+      const ragChunks = retrieveRelevantCached(novel.id, ragQueryParts.join(' '), 4, idx);
       ragBlock = formatRagBlock(ragChunks);
     } catch { /* RAG 检索失败不阻塞 */ }
 
@@ -5144,7 +5192,14 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
     {
       const st = getLatestCharacterStates(novel.id, idx);
       if (st.list.length) {
-        charStateBlock = `\n【角色当前状态（截至第${st.chapterIndex}章末，本章必须严格遵守，不得矛盾）】\n${st.list.map((s) => `- ${s.name}：${s.changes || ''}`).join('\n')}\n- 角色状态在本章只允许按剧情合理演变，不得无故消失（伤势/知情事项/关系不得无故清零）`;
+        // 注入端预算保护：状态链已全量保留（配角不再被 20 人截断丢弃），注入时按需截总长，
+        // 优先保留最新/重头信息——单行超长说明该角色变更多多行记录，角色超过 60 人时折叠次要项。
+        const shown = st.list.length > 60 ? st.list.slice(0, 60) : st.list;
+        let body = shown.map((s) => `- ${s.name}：${s.changes || ''}`).join('\n');
+        if (body.length > 3000) {
+          body = body.slice(0, 3000) + '\n（角色状态过多，本节截断展示，完整状态见记忆库）';
+        }
+        charStateBlock = `\n【角色当前状态（截至第${st.chapterIndex}章末，本章必须严格遵守，不得矛盾）】\n${body}${st.list.length > shown.length ? `\n（另有 ${st.list.length - shown.length} 个配角状态已折叠）` : ''}\n- 角色状态在本章只允许按剧情合理演变，不得无故消失（伤势/知情事项/关系不得无故清零）`;
       }
     }
 
@@ -5154,8 +5209,18 @@ router.post('/novels/:id/chapters/generate', async (req, res) => {
       if (allChs.length > 2) {
         const pos = allChs.findIndex((c) => c.chapter_index === idx);
         const lines = [];
+        // 千章级连载的上下文预算防御：每 5 章一行的详细脉络只保留"最近 120 章 + 本章前后"，
+        // 更早的章节压成一行总量提示（防止几十 KB 时间线挤爆提示词）。反漂移信号不变——
+        // 「后续，严禁提前写」的关键约束仍覆盖全书，只是更早前情改引分层摘要/剧情日志。
+        const detailEnd = Math.max(pos > 0 ? idx : 0, allChs[allChs.length - 1].chapter_index - 120);
+        const detailStart = detailEnd - 120 * 5;
+        const coarseSkipped = allChs.filter((c) => c.chapter_index < detailStart);
+        if (coarseSkipped.length) {
+          lines.push(`第1-${coarseSkipped[coarseSkipped.length - 1].chapter_index}章（前情，早期脉络从略——以【分层摘要树】【剧情日志】为准，本章及后续严禁复刻或提前写这些早期剧情）`);
+        }
         for (let i = 0; i < allChs.length; i += 5) {
           const seg = allChs.slice(i, i + 5);
+          if (seg[0].chapter_index < detailStart) continue;
           const segNo = `${seg[0].chapter_index}-${seg[seg.length - 1].chapter_index}`;
           const before = pos >= 0 && seg[seg.length - 1].chapter_index < idx;
           const after = pos >= 0 && seg[0].chapter_index > idx;
@@ -5233,6 +5298,10 @@ ${existing?.hook ? `- 本章结尾钩子：${existing.hook}（全章情节要水
 
  请开始创作本章正文。`;
 
+    // 整体预算封顶：各记忆块叠加超窗时，剥离低优先级块保住铁律与本章信息
+    const promptBudget = Math.floor(contextBudget(config) * 0.5);
+    const userPromptFinal = trimUserPromptToBudget(userPrompt, promptBudget);
+
     send({ type: 'status', message: '上下文准备完成，正在生成正文…' });
     send({ type: 'progress', progress: 20, message: `正在生成第 ${idx} 章正文…` });
     checkMemoryPressure(); // 生成前检查内存
@@ -5275,7 +5344,7 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
       // 生成资源观测：本轮生成累积了多少轮、触发原因分布
       const genTrack = { rounds: 0, reasons: { length: 0, early_stop: 0, done: 0 } };
       const genStartAt = Date.now();
-      const attemptPrompt = isRegen ? userPrompt + '\n\n' + buildRegenFeedback(lastProblems) : userPrompt;
+      const attemptPrompt = isRegen ? userPromptFinal + '\n\n' + buildRegenFeedback(lastProblems) : userPromptFinal;
       // 若上一版因"照抄参考作品/英文泄漏"被拒，重生成时剔除知识库样本原文（只保留分析），避免模型再次照抄
       let regenSysOpts = chapterSysOpts;
       if (isRegen && lastProblems.some((p) => /照抄|参考作品|英文话术|内部指令|跑飞/.test(String(p.desc)))) {
@@ -6732,7 +6801,7 @@ router.post('/novels/:id/rag-search', (req, res) => {
   if (!novel) return res.status(404).json({ error: '小说不存在' });
   const { query, topK } = req.body || {};
   if (!query) return res.status(400).json({ error: '缺少 query' });
-  const chunks = retrieveRelevant(novel.id, query, Number(topK) || 5);
+  const chunks = retrieveRelevantCached(novel.id, query, Number(topK) || 5);
   res.json(chunks);
 });
 
@@ -7204,12 +7273,19 @@ async function compressNovelContext(novel, config, { send, ctrl } = {}) {
   if (send) send({ type: 'status', message: `正在压缩 ${chapters.length} 章内容…` });
   let input = '';
   let omitted = 0;
+  // 早期剧情保留（千章级修复）：章节数大时逐章输入必然把最早章节挤出 60000 字上限，
+  // 早期剧情从压缩简报永久消失 → 后期生成完全遗忘开篇设定。先注入分层摘要树（早期章节的
+  // 浓缩记忆，L1-L5 覆盖全书），再注入章节明细；压缩器因此始终有"全书骨架"视野。
+  try {
+    const hier = buildHierarchicalContext(novel.id, chapters.length + 1);
+    if (hier) input += `【全书分层摘要树（早期章节浓缩，压缩时须优先保留这些长期设定的因果脉络）】\n${hier}\n\n`;
+  } catch { /* 分层摘要失败不阻塞 */ }
   for (const c of chapters) {
     const line = `第${c.chapter_index}章 ${c.title}：${c.summary || c.content.slice(0, 300)}`;
     if (input.length + line.length > 60000) { omitted++; continue; }
     input += line + '\n';
   }
-  if (omitted) input += `\n……（另有 ${omitted} 章因篇幅省略，请基于已有信息保持剧情连贯）`;
+  if (omitted) input += `\n……（另有 ${omitted} 章因篇幅省略，已由上方分层摘要树兜底保持早期剧情连续）`;
   let full = '';
   await runLLMStream(config, [
     { role: 'system', content: COMPRESS_SYSTEM },

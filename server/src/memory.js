@@ -100,7 +100,9 @@ export function buildHierarchicalContext(novelId, currentIdx) {
 
 // 压缩 level N：取 level N-1 的摘要合并成 level N
 export async function compressSummaryLevel(novelId, level, config) {
-  const SIZE = level === 1 ? 5 : level === 2 ? 25 : level === 3 ? 100 : 400;
+  // level-5（2000 章级）覆盖 1000 章，与 level-4（400 章）区分开——原实现 SIZE 恒为 400，
+  // level-5 与 level-4 同粒度，2000 章档位实际不压缩（探索确认的无效设计）
+  const SIZE = level === 1 ? 5 : level === 2 ? 25 : level === 3 ? 100 : level === 4 ? 400 : 1000;
   const prevLevel = level - 1;
   const maxCh = db.prepare('SELECT MAX(end_chapter) m FROM chapter_summaries WHERE novel_id = ? AND level = ?').get(novelId, prevLevel)?.m || 0;
   if (!maxCh) return;
@@ -151,11 +153,16 @@ export async function compressSummariesIfNeeded(novelId, currentIdx, config) {
 
 // ---------- P1-1: 结构化事实库 ----------
 
-export function getActiveFacts(novelId, currentIdx = null) {
-  if (currentIdx !== null) {
-    return db.prepare(`SELECT * FROM novel_facts WHERE novel_id = ? AND superseded_by IS NULL AND chapter_index < ? ORDER BY chapter_index`).all(novelId, currentIdx);
-  }
-  return db.prepare(`SELECT * FROM novel_facts WHERE novel_id = ? AND superseded_by IS NULL ORDER BY chapter_index`).all(novelId);
+export function getActiveFacts(novelId, currentIdx = null, limit = null) {
+  const where = currentIdx !== null
+    ? 'WHERE novel_id = ? AND superseded_by IS NULL AND chapter_index < ?'
+    : 'WHERE novel_id = ? AND superseded_by IS NULL';
+  const args = currentIdx !== null ? [novelId, currentIdx] : [novelId];
+  // 千章级连载防御：数千条事实全量加载会挤爆内存与输入。limit 存在时按最近优先取，
+  // 保证"最新确立的事实"最可能被保留（越新越相关）；无 limit 保持原按章升序（老调用不破坏）。
+  const order = limit ? ' ORDER BY chapter_index DESC LIMIT ?' : ' ORDER BY chapter_index';
+  if (limit) args.push(limit);
+  return db.prepare(`SELECT * FROM novel_facts ${where} ${order}`).all(...args);
 }
 
 export function saveFact(novelId, fact, chapterIdx) {
@@ -195,7 +202,7 @@ export function checkFactConflicts(novelId, newFacts, chapterIdx) {
 // 截断策略：角色事实（character）优先 → 其余按组内最新章号降序（越近确立越可能与当章相关）
 // → 超预算省略并注明规模，防模型误以为"没有更多设定"；首组无条件保留，保证事实块永不为空。
 export function formatFactsBlock(novelId, currentIdx = null, budget = 4200) {
-  const facts = getActiveFacts(novelId, currentIdx);
+  const facts = getActiveFacts(novelId, currentIdx, 3000);
   if (!facts.length) return '';
   const grouped = new Map();
   for (const f of facts) {
@@ -364,7 +371,7 @@ export function buildEnhancedMemoryBlock(novelId, currentIdx) {
   // P2-1: 过期待回收伏笔
   const overdue = getOverdueForeshadowings(novelId, currentIdx);
   if (overdue.length) {
-    const lines = overdue.map((f) => `- 第${f.chapter_planted}章埋下：${f.description}（预期第${f.expected_recall_chapter}章回收，已逾期！）`);
+    const lines = overdue.map((f) => `- 第${f.chapter_index}章埋下：${f.content}（预期第${f.expected_recall_chapter}章回收，已逾期！）`);
     parts.push(`【逾期伏笔警告（这些伏笔已超过预期回收章节，本章应优先回收！）】\n${lines.join('\n')}`);
   }
 
@@ -426,7 +433,7 @@ export async function buildConstitution(novelId, config) {
   const novel = db.prepare('SELECT * FROM novels WHERE id = ?').get(novelId);
   if (!novel) return '';
   const characters = db.prepare('SELECT name, role_type, personality, background, description FROM characters WHERE novel_id = ?').all(novelId);
-  const facts = getActiveFacts(novelId);
+  const facts = getActiveFacts(novelId, null, 1500);
   const keyMoments = db.prepare('SELECT content FROM novel_key_moments WHERE novel_id = ? ORDER BY id DESC LIMIT 30').all(novelId);
   const foreshadowings = db.prepare("SELECT content, chapter_index, status FROM foreshadowings WHERE novel_id = ? AND status = 'open'").all(novelId);
   const voices = getCharacterVoices(novelId);
@@ -465,7 +472,7 @@ export async function buildConstitution(novelId, config) {
 export async function checkPlotConsistency(novelId, chapterIdx, chapterText, config) {
   const novel = db.prepare('SELECT title, genre, world_view, outline FROM novels WHERE id = ?').get(novelId);
   if (!novel) return { issues: [], overall_consistency: 'consistent' };
-  const facts = getActiveFacts(novelId);
+  const facts = getActiveFacts(novelId, null, 1500);
   const keyMoments = db.prepare('SELECT content FROM novel_key_moments WHERE novel_id = ? ORDER BY id DESC LIMIT 20').all(novelId);
   const voices = getCharacterVoices(novelId);
   const characters = db.prepare('SELECT name, personality, role_type FROM characters WHERE novel_id = ?').all(novelId);

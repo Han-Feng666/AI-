@@ -99,12 +99,12 @@ export function chunkChapter(novelId, chapterIdx, content) {
 
 // 存储章节 chunks 到 DB
 export function storeChunks(novelId, chapterIdx, content) {
+  const existingMax = db.prepare('SELECT MAX(chapter_index) m FROM chapter_chunks WHERE novel_id = ?').get(novelId)?.m || 0;
   // 先删旧 chunks
   db.prepare('DELETE FROM chapter_chunks WHERE novel_id = ? AND chapter_index = ?').run(novelId, chapterIdx);
-  // 失效缓存（章节被修改）
-  invalidateIndex(novelId);
   const chunks = chunkChapter(novelId, chapterIdx, content);
   const ins = db.prepare('INSERT INTO chapter_chunks (novel_id, chapter_index, chunk_index, text, keywords) VALUES (?,?,?,?,?)');
+  const newIds = [];
   // 提取关键词（高频 2-gram）
   for (const c of chunks) {
     const tokens = tokenize(c.text);
@@ -113,7 +113,22 @@ export function storeChunks(novelId, chapterIdx, content) {
       if (t.length === 2) freq.set(t, (freq.get(t) || 0) + 1);
     }
     const keywords = [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map((e) => e[0]).join(' ');
-    ins.run(c.novel_id, c.chapter_index, c.chunk_index, c.text, keywords);
+    const info = ins.run(c.novel_id, c.chapter_index, c.chunk_index, c.text, keywords);
+    newIds.push(Number(info.lastInsertRowid));
+  }
+  // 增量维护缓存索引：仅"新章追加"时复用已构建的索引（appendChunkToIndex 自增 chunkCount），
+  // 重写已有章节（替换正文）时才对缓存失效——避免每章生成都全量重建 TF-IDF（O(N) 全表加载）。
+  if (chapterIdx > existingMax && newIds.length) {
+    const cached = _indexCache.get(novelId);
+    if (cached?.index && cached?.chapterOf) {
+      newIds.forEach((id, i) => {
+        appendChunkToIndex(novelId, id, chunks[i].text);
+        cached.chapterOf.set(id, chapterIdx);
+      });
+      cached.lastUpdate = Date.now();
+    }
+  } else {
+    invalidateIndex(novelId);
   }
   return chunks.length;
 }
@@ -194,16 +209,21 @@ export function getCachedIndex(novelId) {
   }
 
   // 重新构建索引
-  const chunks = db.prepare('SELECT id, text, keywords FROM chapter_chunks WHERE novel_id = ? ORDER BY chapter_index, chunk_index').all(novelId);
+  const chunks = db.prepare('SELECT id, chapter_index, text, keywords FROM chapter_chunks WHERE novel_id = ? ORDER BY chapter_index, chunk_index').all(novelId);
   if (!chunks.length) {
-    _indexCache.set(novelId, { index: null, chunkCount: 0, lastUpdate: Date.now() });
+    _indexCache.set(novelId, { index: null, chunkCount: 0, chapterOf: new Map(), lastUpdate: Date.now() });
     return null;
   }
 
   const docs = chunks.map((r) => ({ id: r.id, text: r.text + ' ' + (r.keywords || '') }));
   const index = buildTfIdf(docs);
 
-  _indexCache.set(novelId, { index, chunkCount, lastUpdate: Date.now() });
+  // chunkId -> chapter_index 映射：检索时按 beforeIndex 过滤，保证生成第 N 章只用 <N 章的片段，
+  // 避免 RAG 从"尚未发生的后续章节"取回内容（剧情漂移的隐性来源之一）
+  const chapterOf = new Map();
+  for (const r of chunks) chapterOf.set(r.id, r.chapter_index);
+
+  _indexCache.set(novelId, { index, chunkCount, chapterOf, lastUpdate: Date.now() });
   return index;
 }
 
@@ -267,10 +287,19 @@ export function invalidateIndex(novelId) {
 
 /**
  * 使用缓存的索引进行检索（性能优化版）
+ * @param {number} beforeIndex 只检索 chapter_index < beforeIndex 的片段（生成第 N 章时传 N）
  */
-export function retrieveRelevantCached(novelId, query, topK = 5) {
+export function retrieveRelevantCached(novelId, query, topK = 5, beforeIndex = null) {
   const index = getCachedIndex(novelId);
   if (!index || !query) return [];
+  const cached = _indexCache.get(novelId);
+
+  let vectors = index.vectors;
+  // 按章节过滤：生成第 N 章时只用 chapter_index < N 的片段
+  if (beforeIndex !== null && cached?.chapterOf) {
+    vectors = index.vectors.filter((v) => (cached.chapterOf.get(v.id) || 0) < beforeIndex);
+    if (!vectors.length) return [];
+  }
 
   // 构建 query 向量
   const qTokens = tokenize(query);
@@ -291,7 +320,7 @@ export function retrieveRelevantCached(novelId, query, topK = 5) {
   }
 
   // 计算相似度并排序
-  const scored = index.vectors.map((v) => ({
+  const scored = vectors.map((v) => ({
     id: v.id,
     score: cosineSim(qVec, v.vec)
   }));
