@@ -308,3 +308,76 @@ test('代词"他的像"不误报', () => {
   const words = hits.map((h) => h.word);
   assert.ok(!words.some((w) => w.includes('的地得误用')), `不应误报，实际: ${words.join('|')}`);
 });
+
+// ===== 感知顺序/意象绑定 新检测器（2026-10 正文质量优化）=====
+const OPEN_PAD = '他沿着河边走，路灯把影子拉得老长，风从河面上过来，带着水腥气。摊主在收凳子，收音机里放着评书。';
+// 新检测器有长度门槛（300/400 字），正反用例都准备足量重复文本，确保断言真实而非被门槛空返
+const longBuild = (pad, seed, padRepeats = 3, seedRepeats = 4) => pad.repeat(padRepeats) + seed.repeat(seedRepeats);
+
+test('感官清单平铺被检出（多感官一次性并列）', () => {
+  const seed = '他睁开眼，后脑勺胀痛得厉害，碎石头硌着后背，鼻端嗅到腐叶的气味，后背一片湿冷，耳朵里还嗡嗡的，他挣扎着想坐起来，头皮一阵发麻，嘴里一股血腥味，眼前黑一阵白一阵，听什么都是嗡的。';
+  const txt = longBuild(OPEN_PAD, seed);
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('感官清单平铺')), `words=${words.join('|')}`);
+});
+
+test('感官有主次的白描不误报', () => {
+  const seed = '他醒来先摸到一片湿，才想起自己倒在沟里。腰上一阵钝痛，他撑着土沿爬了半步，风里有股烧柴的烟味。他没敢动，先听了一会儿动静，再慢慢睁开眼。';
+  const txt = longBuild(OPEN_PAD, seed);
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => w.includes('感官清单平铺')), `不应误报，实际: ${words.join('|')}`);
+});
+
+test('观察流水线被检出（逐项交代信息）', () => {
+  const seed = '他低头看了看手，满手是血。他抬头看了看四周，一片荒林。他伸手摸了摸后脑，有个口子。他低头看了一眼衣服，是古人的袍子。他这才意识到自己穿越了。他愣在原地，脑子转不过来。';
+  const txt = longBuild(OPEN_PAD, seed);
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('观察流水线')), `words=${words.join('|')}`);
+});
+
+test('零散观察不误报流水线', () => {
+  const seed = '他醒了，喉头干得像砂纸。他扶着墙站起来，看了一眼窗外的天，还黑着。他把水壶里的水喝了一口，想起昨晚的事，摇了摇头，披上外套出门。';
+  const txt = longBuild(OPEN_PAD, seed);
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => w.includes('观察流水线')), `不应误报，实际: ${words.join('|')}`);
+});
+
+test('氛围套词复用被检出（冷浸浸/惨白/黑黢黢）', () => {
+  const seed = '月色惨白，冷浸浸的光洒下来，黑黢黢的树影压着人。远处的兽吼一声接一声。荒林里静得吓人，月光像泼了一层水银。';
+  const txt = longBuild(OPEN_PAD, seed);
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('氛围套词复用') || w.includes('荒野开局素材包')), `words=${words.join('|')}`);
+});
+
+test('偶用氛围词不误报', () => {
+  // 只出现一次"惨白"与一次"冷浸浸"（真正的偶用），用无氛围词的白描填充长度，验证不触发密度阈值
+  const fill = '他把窗台的花浇了一遍，又弯腰捡起掉在地上的拖鞋，放进鞋柜。灶上的粥咕嘟着，他拿勺子搅了搅，盛了一碗，端到桌边坐下，慢慢喝起来。';
+  const txt = longBuild(OPEN_PAD, fill, 3, 3) + '屋外月色惨白，他看了一眼，把窗帘拉上了。夜风冷浸浸的，他从柜子里扯出一件旧棉袄披上，继续翻手里的账本。';
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => w.includes('氛围套词复用') || w.includes('荒野开局素材包')), `不应误报，实际: ${words.join('|')}`);
+});
+
+test('荒野素材包组合被检出（紫月/荒林/水银月光/兽吼）', () => {
+  const seed = '头顶一轮紫月，身下是荒林，银辉泼了满地。远处兽吼断断续续，冷浸浸的风钻进领口。他后脊一阵发麻，连呼吸都压低了。';
+  const txt = longBuild(OPEN_PAD, seed);
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(words.some((w) => w.includes('荒野开局素材包') || w.includes('氛围套词复用')), `words=${words.join('|')}`);
+});
+
+test('新检测器对干净白描文本整体零误报', () => {
+  const cleanSeed = `老周把车支在路边，用袖子擦了擦车座。巷子里飘着谁家炖肉的香味，他咽了口唾沫，推车进了院。
+媳妇在剥豆角，头也没抬。他脱了外套挂好，坐下端起凉茶喝了一大口。茶是中午剩的，有点馊，他还是喝完了。
+王婶从巷口挑着两桶水回来，桶里晃着傍晚的云。他帮着把水倒进缸里，缸底的水花翻起来，又慢慢沉下去。
+火膛里柴火噼啪响，锅边结了一圈白碱。他拿筷子戳了戳红薯，还没熟，又把盖子扣回去。`;
+  const txt = longBuild(OPEN_PAD, cleanSeed, 2, 3);
+  const hits = scan(txt);
+  const words = hits.map((h) => h.word);
+  assert.ok(!words.some((w) => /感官清单平铺|观察流水线|氛围套词复用|荒野开局素材包/.test(w)), `不应误报，实际: ${words.join('|')}`);
+});

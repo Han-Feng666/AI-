@@ -735,6 +735,9 @@ export function scanAiPatterns(text) {
   hits.push(...scanSimileOveruse(text));
   hits.push(...scanFrozenGaze(text));
   hits.push(...scanDialogueEllipsis(text));
+  hits.push(...scanClicheMoodWords(text));
+  hits.push(...scanSensoryList(text));
+  hits.push(...scanObservationPipeline(text));
   hits.push(...scanQuantifierStack(text));
   hits.push(...scanNearbyRepeat(text));
   hits.push(...scanClauseMonotony(text));
@@ -2409,6 +2412,116 @@ export function scanStockDialogueLine(text) {
   return [{
     word: `情绪台词模板×${uniq.length}（如"${uniq.slice(0, 3).join('""')}"）——"你可知你在说什么""与我无关""怎么会这样"是现成句，换个角色也照样能用，说明人设没落地。真人台词有潜台词、有回避、有嘴硬，把这些翻译成这个角色此刻真正会说的话`,
     count: uniq.length,
+    template: true
+  }];
+}
+
+// 高频网文套词检测：AI 训练库里高频复用的"氛围词"（冷浸浸/惨白/黑黢黢/死寂/水银似的月光等）。
+// 单个出现一次正常（真人也偶尔用），但同一章复用 3 处以上或同一意象反复垫场即 AI 味。
+// 只对这些"固定氛围搭配"计数，避免误伤普通词。
+const CLICHE_MOOD_WORDS = [
+  '冷浸浸', '惨白', '黑黢黢', '白森森', '阴恻恻', '死寂', '死气沉沉',
+  '水银', '泼了一地', '泼洒', '倾泻而下', '如银', '银辉', '惨白的光',
+  '兽吼', '狼嚎', '荒林', '密林深处', '林间沙沙', '风声鹤唳'
+];
+// 氛围词组合场景：穿越/异界/荒野开局打包出现（紫月+荒林+水银月光+兽吼 一次凑齐 3 种即素材包）
+const WILD_OPENING_PACK = ['紫月', '荒林', '水银', '兽吼', '狼嚎', '瘴气', '枯枝'];
+
+export function scanClicheMoodWords(text) {
+  const s = String(text || '');
+  if (s.length < 300) return [];
+  const hits = [];
+  const count = (w) => (s.match(new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+  const found = CLICHE_MOOD_WORDS
+    .map((w) => ({ w, n: count(w) }))
+    .filter((x) => x.n > 0);
+  const total = found.reduce((a, x) => a + x.n, 0);
+  // 同一氛围词复用 3 处以上（"冷浸浸"反复出现）或氛围词总量 5 处以上
+  const heavy = found.filter((x) => x.n >= 3);
+  if (heavy.length || total >= 5) {
+    const sample = found.sort((a, b) => b.n - a.n).slice(0, 4).map((x) => `${x.w}×${x.n}`).join('、');
+    hits.push({
+      word: `氛围套词复用(${sample}${total >= 5 ? `，共 ${total} 处` : ''})——"冷浸浸/惨白/黑黢黢/水银似的月光"是 AI 训练库里高频复用的固定意象，缺少独特质感。真人用一两次营造氛围，反复垫场就是素材包`,
+      count: total,
+      template: true
+    });
+  }
+  // 穿越/荒野开局素材包：一次凑齐 3 种以上荒野意象
+  const packed = WILD_OPENING_PACK.filter((w) => count(w) > 0);
+  if (packed.length >= 3 && s.length < 2500) {
+    hits.push({
+      word: `荒野开局素材包(${packed.join('、')})——紫月/荒林/水银月光/兽吼是穿越开篇固定素材包，意象打包直接套用，没有和主角当下的恐惧、疼痛绑定`,
+      count: packed.length,
+      template: true
+    });
+  }
+  return hits;
+}
+
+// 感官清单平铺检测：AI 一次性并列抛出多种感官（"后脑勺胀痛、碎石硌着后背、腐叶的气味、后背湿冷"）。
+// 真人刚苏醒/惊变时只会先抓住 1-2 种最强烈的感受，其余慢慢浮现，不会填表式罗列全部感知。
+// 检测：同一句/相邻 40 字内挤入 ≥3 种不同感官通道（触觉/痛觉/嗅觉/听觉/视觉）。
+export function scanSensoryList(text) {
+  const s = String(text || '');
+  if (s.length < 300) return [];
+  const channels = [
+    { name: '痛觉/触觉', re: /(?:胀痛|钝痛|刺痛|酸痛|发麻|发凉|发冷|发烫|发热|硌|湿|冷|凉|灼|麻|痒|痛|僵硬|酸软|沉重|晕眩)/ },
+    { name: '嗅觉', re: /(?:气味|味|腥|臭|香|腐|霉|土腥|血腥|焦糊|甜腻|酸腐|冲鼻|呛)/ },
+    { name: '听觉', re: /(?:声音|声响|吼|嚎|叫|鸣|响|嗡|沙沙|簌簌|呼啸|咕噜|扑通|心跳)/ },
+    { name: '视觉', re: /(?:看见|看到|入眼|映入|月光|火光|黑|白|亮|暗|模糊|清晰|苍|惨)/ }
+  ];
+  const hits = [];
+  // 按分句处理（。！？换行切分），检查每句内挤入的感官通道数
+  const sentences = s.split(/[。！？\n！]/).filter((x) => x.trim().length >= 6);
+  for (const sent of sentences) {
+    const present = channels.filter((c) => c.re.test(sent));
+    if (present.length >= 3) {
+      hits.push({ sent, channels: present.map((c) => c.name) });
+    }
+  }
+  // 再检查"相邻 40 字窗口"内挤入 ≥3 通道（跨句并列：顿号/逗号连着并列）
+  for (let i = 0; i + 40 <= s.length; i++) {
+    const win = s.slice(i, i + 40);
+    const present = channels.filter((c) => c.re.test(win));
+    if (present.length >= 3) {
+      const sentStart = win.lastIndexOf('。', 40) < 0 ? 0 : win.lastIndexOf('。', 40);
+      const sentEnd = win.indexOf('。', 0);
+      if (sentEnd > 0 && sentEnd - sentStart < 35 && sentEnd - sentStart > 5) {
+        const sent = win.slice(0, sentEnd + 1);
+        if (!hits.some((h) => h.sent === sent)) hits.push({ sent, channels: present.map((c) => c.name) });
+      }
+    }
+  }
+  if (hits.length >= 2) {
+    const sample = hits.slice(0, 3).map((h) => `「${h.sent.slice(0, 30)}」(${h.channels.join('/')})`).join('；');
+    return [{
+      word: `感官清单平铺×${hits.length}处（${sample}）——多种感官一次性并列抛出、权重均等，像填表不像人。真人刚苏醒/惊变时只先抓住 1-2 种最强感受，其余慢慢浮现，要有先后主次`,
+      count: hits.length,
+      template: true
+    }];
+  }
+  return [];
+}
+
+// 观察流水线检测：AI 逐项输出设定信息（醒来→感受→看环境→摸伤→回忆→看衣服），
+// 每个环节都"完成一件事"再进下一件，没有停顿、迟疑、情绪打断。
+// 检测：连续 3 个以上"他(她/我) + 观察/感受动词"开头的短句流水账。
+export function scanObservationPipeline(text) {
+  const s = String(text || '');
+  if (s.length < 400) return [];
+  const re = /(?:他|她|我)(?:低头|抬头|四下|环顾|伸手|抬手|摸了摸|看了看|看了一眼|愣愣|怔怔)(?:看到|看见|瞧见|发现|摸到|碰到|意识到|想起|感觉|觉得|感到|看了看|看了一眼|摸|摸了摸|碰到|碰到什么)/g;
+  const ms = s.match(re) || [];
+  if (ms.length < 3) return [];
+  // 这些观察动作必须相对密集（350 字内出现 3 次），稀疏的零散观察不算
+  const positions = [...s.matchAll(re)].map((m) => m.index);
+  let dense = false;
+  for (let i = 0; i + 2 < positions.length; i++) {
+    if (positions[i + 2] - positions[i] < 350) { dense = true; break; }
+  }
+  if (!dense) return [];
+  return [{
+    word: `观察流水线×${ms.length}处（${ms.slice(0, 3).map((m) => `"${m}"`).join('、')}等）——"醒来→感受→看环境→摸伤口→回忆→看衣服"逐项交代设定，像完成任务没有停顿。真人的观察是乱的、被情绪打断的，只会抓住最不对劲的那个点`,
+    count: ms.length,
     template: true
   }];
 }

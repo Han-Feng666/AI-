@@ -136,7 +136,10 @@ import {
   startAutoLearn, stopAutoLearn, getAutoLearnStatus,
   triggerPendingTasks, enqueueAutoLearnTask
 } from './auto_learn.js';
-import { buildNovelKnowledgeGraph, buildKnowledgeGraph, formatKnowledgeGraphBlock } from './knowledge_graph.js';
+import { detectWriteIntent } from './writeIntent.js';
+import {
+  buildNovelKnowledgeGraph, buildKnowledgeGraph, formatKnowledgeGraphBlock
+} from './knowledge_graph.js';
 import { getRagCacheStatus, clearAllRagCache } from './rag.js';
 import { installOllama, isOllamaInstalled, getInstallStatus, pullModel, getRecommendedModels, startOllamaService } from './ollama_installer.js';
 import { localGenerateChapterSmart, installTransformersModel, getTransformersStatus, getBuiltinModels } from './local_llm.js';
@@ -6295,6 +6298,20 @@ ${specificIssues ? `\n具体问题句：\n${specificIssues}` : ''}
             wqScore = wq?.overall?.score ?? null;
             wqIssues = (wq?.overall?.weaknesses || []).slice(0, 2).join('、');
             if (wqScore != null) wqWeak[0] = wqIssues;
+            // 逐维度扫描，把评分 <7 的维度（含感知主次/情绪外化/细节筛选等新维度）转成润色指令，
+            // 让文笔门评出的短板真正进到润色轮里被修复，而不是只停留在状态消息
+            const wqDimHints = [];
+            for (const key of ['fluency', 'vocabulary', 'sentence', 'description', 'dialogue', 'emotion', 'scene', 'pace', 'selection']) {
+              const d = wq?.[key];
+              if (d && typeof d.score === 'number' && d.score < 7) {
+                const s = (d.suggestions || []).slice(0, 1)[0];
+                const kMap = { fluency: '文笔流畅', vocabulary: '词汇', sentence: '句式节奏', description: '描写生动性（感知主次）', dialogue: '对话', emotion: '情感外化', scene: '场景构建（意象绑定）', pace: '段落节奏', selection: '细节筛选' };
+                wqDimHints.push(`【${kMap[key] || key} ${d.score}/10】${s || ''}`);
+              }
+            }
+            if (wqDimHints.length) {
+              structureFixes.push(`文笔评分短板（按此定向润色，逐条落实）：\n${wqDimHints.slice(0, 4).join('\n')}`);
+            }
           } catch { /* 评分失败，按需润色处理 */ }
 
           // 解析失败或分数缺失 → 视为需润色；分数存在且 ≥6 → 达标
@@ -8414,8 +8431,25 @@ ${toolGuide}
 2. 沟通风格如真人作家总管，简洁自然，不堆术语。
 3. 涉及【当前打开的小说】时，直接根据上面的 ID 与信息回答或调用工具，不要反问"是哪本书"。只有作者明确提到"另一本/别的书"且你知道书名但不确定 ID 时，才调用 get_novel_progress 确认。
 4. 当作者说"查一下""搜一下"或涉及你不确定的事实/资料时，优先调 web_search 联网搜索。
-5. 当作者说"修改方案/改大纲/触发修订/生成下一章/修改第N章"等涉及写操作时，必须调用对应工具（update_outline / request_revise / request_generate_chapter / request_revise_chapter），不要只口头回复"好的我来改"却不调工具——不调工具前端无法弹出授权条，操作不会执行。
+5. 当作者说"修改方案/改大纲/触发修订/生成下一章/修改第N章"等涉及写操作时，必须调用对应工具（update_outline / request_revise / request_generate_chapter / request_revise_chapter），不要只口头回复"好的我来改"却不调工具——不调工具前端无法弹出授权条，操作不会执行。此时回复里应同时带上简短说明（"我将调用 XX 修改……，请确认授权"）并立即发起工具调用。
 6. 参考长期记忆条目，但若记忆与新事实冲突，以新事实为准。`;
+}
+
+// 从根因上看，模型"口头上同意修改/请求授权"但没发 tool_calls，是授权条不弹出的主因。
+// 此函数在检测到写意图却无工具调用时，追加一条强约束指令让模型重新输出工具调用。
+async function retryToolCallForWriteIntent({ config, messages, tools, content, replyContent }) {
+  const msg = [
+    { role: 'system', content: '你刚才用文字回复了作者，但没有发起任何工具调用。作者明确表达的是需要落地执行写操作（不是咨询）。你必须现在发起一次工具调用（原生 tool_calls 或 <invoke> XML 均可），让系统能弹出授权请求给作者确认。回复可以很简短，重点是发起工具调用。' },
+    ...messages.filter((m) => m.role !== 'system'),
+    { role: 'user', content: `注意！！上一步你忘了调工具。作者说的是「${String(content).slice(0, 120)}」。请立即调用对应的写类工具（如 update_outline / update_character / request_revise / request_generate_chapter / request_revise_chapter / introduce_shared_character），包含必要参数。` }
+  ];
+  const r = await chat({
+    config, task: 'chat', messages: msg, tools, toolChoice: 'auto', maxTokens: Math.max(2048, Number(config.maxTokens) || 4096)
+  }).catch(() => null);
+  if (r && Array.isArray(r.toolCalls) && r.toolCalls.length) {
+    return { toolCalls: r.toolCalls, reply: String(r.content || '').trim() || replyContent };
+  }
+  return null;
 }
 
 router.post('/manager/chat', async (req, res) => {
@@ -8486,13 +8520,22 @@ router.post('/manager/chat', async (req, res) => {
       return res.json({ reply: `出错：${r1.error}`, toolCalls: [] });
     }
 
+    // 写操作兜底：作者明确要改大纲/改角色/生成章节等，但模型只回了文字没发 tool_calls，
+    // 追加强约束指令再问一次，让授权条能正常弹出（否则作者永远等不到授权确认）。
+    let usedToolCalls = Array.isArray(r1.toolCalls) ? r1.toolCalls : [];
+    let replyContent = r1.content;
+    if (!usedToolCalls.length && detectWriteIntent(content)) {
+      const retry = await retryToolCallForWriteIntent({ config, messages, tools, content, replyContent });
+      if (retry) { usedToolCalls = retry.toolCalls; replyContent = retry.reply; }
+    }
+
     let pending = [];
-    if (Array.isArray(r1.toolCalls) && r1.toolCalls.length) {
+    if (usedToolCalls.length) {
       db.prepare('INSERT INTO manager_messages (novel_id, role, content, tool_name, tool_args, tool_call_id) VALUES (?,?,?,?,?,?)')
-        .run(novelId, 'assistant', '', 'tool_request', JSON.stringify(r1.toolCalls.map((c) => c.name)), r1.toolCalls[0].id);
+        .run(novelId, 'assistant', '', 'tool_request', JSON.stringify(usedToolCalls.map((c) => c.name)), usedToolCalls[0].id);
 
       const executedResults = [];
-      for (const tc of r1.toolCalls) {
+      for (const tc of usedToolCalls) {
         const reg = toolRegistry[tc.name];
         if (!reg) { pending.push({ tool_call_id: tc.id, name: tc.name, args: tc.args, error: '未知工具' }); continue; }
         let parsed = {};
@@ -8517,7 +8560,7 @@ router.post('/manager/chat', async (req, res) => {
       }
 
       if (pending.length) {
-        return res.json({ reply: r1.content || '需要你授权以下操作后我才能继续：', pendingToolCalls: pending });
+        return res.json({ reply: replyContent || '需要你授权以下操作后我才能继续：', pendingToolCalls: pending });
       }
       const history2 = db.prepare('SELECT role, content, tool_name, tool_call_id FROM manager_messages WHERE (novel_id = ? OR novel_id IS NULL) ORDER BY id DESC LIMIT 24').all(novelId);
       const cleanHistory2 = history2.reverse().filter((m) => {
@@ -8540,10 +8583,10 @@ router.post('/manager/chat', async (req, res) => {
       const r2 = await chat({ config, task: 'chat', messages: msgs2, maxTokens: Math.max(1024, Number(config.maxTokens) || 2048) }).catch((e) => ({ content: '', error: e.message }));
       const reply = String(r2.content || '').trim() || '操作已执行';
       db.prepare('INSERT INTO manager_messages (novel_id, role, content) VALUES (?, ?, ?)').run(novelId, 'assistant', reply);
-      return res.json({ reply, toolCalls: r1.toolCalls });
+      return res.json({ reply, toolCalls: usedToolCalls });
     }
 
-    const reply = String(r1.content || '').trim() || '(总管未响应)';
+    const reply = String(replyContent || '').trim() || '(总管未响应)';
     db.prepare('INSERT INTO manager_messages (novel_id, role, content) VALUES (?, ?, ?)').run(novelId, 'assistant', reply);
     res.json({ reply, toolCalls: [] });
   } catch (e) {
