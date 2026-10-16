@@ -248,6 +248,8 @@ export const api = {
   generateIdeas: (data, handlers) => streamRequest('/ideas', data, handlers),
   // 断线续跑：凭 requestId 查询灵感生成运行状态与结果
   getIdeaRun: (requestId) => http.get(`/ideas/result/${encodeURIComponent(requestId)}`),
+  // 定制面板：AI 按题材/风格为「主角信息/剧情走向」字段生成候选建议
+  getIdeaSuggestions: (data) => http.post('/ideas/suggestions', data),
 
   // 设置
   getSettings: () => http.get('/settings'),

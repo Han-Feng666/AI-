@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, reactive, onMounted, onBeforeUnmount } from 'vue';
 import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import api from '../api';
@@ -32,6 +32,98 @@ const askAction = ref(null); // null | 'direct' | 'adjust'
 const adjustOpen = ref(false);
 const adjustForm = ref({ title: '', genre: '', logline: '', hook: '', concept: '', protagonistName: '', goldenFinger: '' });
 const adjustSaving = ref(false);
+
+// 「定制主角与剧情」面板（v1.4.100）：AI 按题材/风格为各字段生成候选，用户可采纳或自定义，
+// 值作为硬约束注入 /ideas 批量生成，治"主角信息错乱/剧情雷同/结果不符预期"
+const lockedFields = reactive({
+  protagonistName: '',
+  protagonistIdentity: '',
+  protagonistPersonality: '',
+  goldenFinger: '',
+  plotDirection: '',
+  coreConflict: '',
+  openingForm: ''
+});
+const suggestions = reactive({
+  protagonistName: [], protagonistIdentity: [], protagonistPersonality: [],
+  goldenFinger: [], plotDirection: [], coreConflict: [], openingForm: []
+});
+const suggestLoading = ref(false);
+const suggestReady = ref(false);
+const LOCK_FIELD_DEFS = [
+  { key: 'protagonistName', label: '主角姓名', placeholder: '如：林晚（可留空由 AI 定）' },
+  { key: 'protagonistIdentity', label: '主角身份', placeholder: '如：外门杂役弟子' },
+  { key: 'protagonistPersonality', label: '主角性格', placeholder: '如：谨慎盘算、苟住发育' },
+  { key: 'goldenFinger', label: '金手指 / 最大优势', placeholder: '如：残缺功法补全' },
+  { key: 'plotDirection', label: '主线剧情走向', placeholder: '如：宗门大比登顶之路' },
+  { key: 'coreConflict', label: '核心冲突', placeholder: '如：守约与背约' },
+  { key: 'openingForm', label: '开局形态', placeholder: '如：当场利害、意外卷入' }
+];
+const lockedCount = computed(() => LOCK_FIELD_DEFS.filter((f) => String(lockedFields[f.key] || '').trim()).length);
+const anyLocked = computed(() => lockedCount.value > 0);
+
+// 生成候选建议：一次调用产出 7 个字段的候选；失败保留现有内容，不阻塞批量生成
+async function fetchSuggestions() {
+  if (suggestLoading.value) return;
+  if (!genres.value.length) return ElMessage.warning('请先选择至少一个小说题材，AI 才能按题材生成建议');
+  suggestLoading.value = true;
+  try {
+    const data = await api.getIdeaSuggestions({
+      genres: genres.value,
+      channel: channel.value,
+      stylePresets: stylePresets.value,
+      styleIds: styleIds.value,
+      marketList: marketList.value.trim()
+    });
+    const s = data?.suggestions || {};
+    let filled = 0;
+    for (const f of LOCK_FIELD_DEFS) {
+      const cands = Array.isArray(s[f.key]) ? s[f.key].filter((x) => String(x || '').trim()) : [];
+      suggestions[f.key] = cands.slice(0, 4);
+      if (cands.length) filled += 1;
+    }
+    suggestReady.value = filled > 0;
+    if (filled) ElMessage.success('已生成候选建议，点击选项即可采纳，也可自行输入');
+    else ElMessage.warning('AI 未能生成建议，请稍后重试或直接自行输入');
+  } catch (e) {
+    ElMessage.error(e.message || '生成建议失败，请稍后重试');
+  } finally {
+    suggestLoading.value = false;
+  }
+}
+
+function applySuggestion(key, val) {
+  lockedFields[key] = String(val || '').trim();
+}
+function clearLockedField(key) { lockedFields[key] = ''; }
+function clearAllLocked() {
+  for (const f of LOCK_FIELD_DEFS) lockedFields[f.key] = '';
+}
+const lockedKeys = computed(() => new Set(LOCK_FIELD_DEFS.filter((f) => String(lockedFields[f.key] || '').trim()).map((f) => f.key)));
+
+// 卡片上展示该创意遵循了哪些锁定字段（用于确认硬约束已生效）
+function honoredLocks(it = {}) {
+  const p = it.protagonist || {};
+  const out = [];
+  const lName = String(lockedFields.protagonistName || '').trim();
+  if (lName && (String(p.name || '').includes(lName) || lName.includes(String(p.name || '')))) out.push('主角名');
+  const lGf = String(lockedFields.goldenFinger || '').trim();
+  if (lGf && (String(p.golden_finger || '').includes(lGf) || lGf.includes(String(p.golden_finger || '')))) out.push('金手指');
+  const lId = String(lockedFields.protagonistIdentity || '').trim();
+  if (lId && (String(p.identity || '').includes(lId) || lId.includes(String(p.identity || '')))) out.push('身份');
+  const lPs = String(lockedFields.protagonistPersonality || '').trim();
+  if (lPs && (String(p.personality || '').includes(lPs) || lPs.includes(String(p.personality || '')))) out.push('性格');
+  const lPlot = String(lockedFields.plotDirection || '').trim();
+  const plotText = [it.logline, ...(Array.isArray(it.outline_H5) ? it.outline_H5 : [])].filter(Boolean).join('\n');
+  if (lPlot && (plotText.includes(lPlot) || lPlot.includes(String(it.logline || '')))) out.push('剧情走向');
+  const lConf = String(lockedFields.coreConflict || '').trim();
+  const confText = [it.logline, it.hook, it.core_contrast].filter(Boolean).join('\n');
+  if (lConf && (confText.includes(lConf) || lConf.includes(String(it.logline || '')))) out.push('核心冲突');
+  const lOpen = String(lockedFields.openingForm || '').trim();
+  const openText = [it.hook, it.logline].filter(Boolean).join('\n');
+  if (lOpen && (openText.includes(lOpen) || lOpen.includes(String(it.hook || '')))) out.push('开局形态');
+  return out;
+}
 
 // 断线续跑：本次生成的 requestId 持久化到 localStorage。
 // 生成中断网/刷新后重新进入页面，凭它向后端轮询取回结果，正在生成的整批创意不再丢失。
@@ -136,6 +228,7 @@ async function generate() {
       seed: seedIdea.value.trim(),
       marketList: marketList.value.trim(),
       excludeIdeas: historyIdeas.value,
+      lockedFields: lockedFields,
       requestId
     }, {
       onStatus: (m) => { statusText.value = m; },
@@ -185,8 +278,8 @@ function chooseAdjust() {
     logline: it.logline || '',
     hook: it.hook || '',
     concept: formatIdeaAsConcept(it),
-    protagonistName: it.protagonist?.name || '',
-    goldenFinger: it.protagonist?.golden_finger || ''
+    protagonistName: String(lockedFields.protagonistName || '').trim() || it.protagonist?.name || '',
+    goldenFinger: String(lockedFields.goldenFinger || '').trim() || it.protagonist?.golden_finger || ''
   };
   cancelAsk();
   adjustOpen.value = true;
@@ -213,7 +306,7 @@ async function confirmAdjust() {
       outline_H5: orig.outline_H5,
       potential_risk: orig.potential_risk
     };
-    const concept = adjustForm.value.concept.trim() || formatIdeaAsConcept(idea);
+    const concept = (adjustForm.value.concept.trim() || formatIdeaAsConcept(idea)) + lockedConceptSuffix(idea);
     adjustOpen.value = false;
     await buildNovelFromIdea(idea, concept);
   } catch (e) {
@@ -226,13 +319,32 @@ async function confirmAdjust() {
 async function createFromIdea(id) {
   const it = ideas.value.find((x) => x.id === id);
   if (!it) return;
-  await buildNovelFromIdea(it, formatIdeaAsConcept(it));
+  await buildNovelFromIdea(it, formatIdeaAsConcept(it) + lockedConceptSuffix(it));
+}
+
+// 定制锁定字段并入 concept：让方案层在生成世界/大纲/角色时尊重这些硬约束
+function lockedConceptSuffix(idea = {}) {
+  const lines = [];
+  const lockedName = String(lockedFields.protagonistName || '').trim();
+  if (lockedName && String(idea.protagonist?.name || '') !== lockedName) {
+    lines.push(`主角名锁定为：${lockedName}`);
+  }
+  for (const key of ['protagonistIdentity', 'protagonistPersonality', 'goldenFinger', 'plotDirection', 'coreConflict', 'openingForm']) {
+    const val = String(lockedFields[key] || '').trim();
+    if (!val) continue;
+    const label = LOCK_FIELD_DEFS.find((f) => f.key === key)?.label || key;
+    lines.push(`${label}：${val}`);
+  }
+  return lines.length ? `\n\n【用户定制的硬约束】\n${lines.join('\n')}` : '';
 }
 
 async function buildNovelFromIdea(idea, concept) {
   if (creating.value) return;
   creating.value = true;
   try {
+    // 定制锁定的主角名优先于创意卡片自产名——避免锁定后被卡片名覆盖导致信息错乱
+    const lockedName = String(lockedFields.protagonistName || '').trim();
+    const finalName = lockedName || idea.protagonist?.name || '';
     const novel = await api.createNovel({
       title: idea.title,
       genre: idea.genre || genres.value[0] || '玄幻',
@@ -240,7 +352,7 @@ async function buildNovelFromIdea(idea, concept) {
       checkedGenres: [...genres.value],
       concept: concept || formatIdeaAsConcept(idea),
       idea,
-      protagonistName: idea.protagonist?.name || '',
+      protagonistName: finalName,
       chapterWordCount: 2000,
       targetChapters: 20,
       stylePresets: stylePresets.value,
@@ -336,6 +448,45 @@ onBeforeUnmount(() => {
             >{{ s.name }}</span>
           </div>
         </el-form-item>
+        <el-form-item label="定制主角与剧情（可选）">
+          <div class="locked-panel">
+            <div class="locked-panel-head">
+              <span class="locked-panel-title">先定下主角与剧情，AI 就照这个思路出创意；不填则完全自由发挥</span>
+              <el-button size="small" text :loading="suggestLoading" @click="fetchSuggestions">
+                <el-icon style="margin-right: 4px"><MagicStick /></el-icon>
+                {{ suggestReady ? '换一批建议' : 'AI 帮我生成建议' }}
+              </el-button>
+              <el-button v-if="anyLocked" size="small" text type="danger" @click="clearAllLocked" :disabled="suggestLoading">
+                清空全部锁定（{{ lockedCount }}）
+              </el-button>
+            </div>
+            <div class="locked-fields">
+              <div v-for="f in LOCK_FIELD_DEFS" :key="f.key" class="locked-field" :class="{ locked: lockedKeys.has(f.key) }">
+                <div class="lf-label">
+                  <span>{{ f.label }}</span>
+                  <span v-if="lockedKeys.has(f.key)" class="lf-lock-tag">已锁定</span>
+                  <el-button v-if="lockedKeys.has(f.key)" size="small" text type="danger" class="lf-clear" @click="clearLockedField(f.key)">清除</el-button>
+                </div>
+                <div v-if="suggestions[f.key]?.length" class="lf-suggest">
+                  <span
+                    v-for="(s, i) in suggestions[f.key]"
+                    :key="i"
+                    class="suggest-tag"
+                    :class="{ chosen: lockedFields[f.key] === s }"
+                    @click="applySuggestion(f.key, s)"
+                  >{{ s }}</span>
+                </div>
+                <el-input
+                  v-model="lockedFields[f.key]"
+                  :placeholder="f.placeholder"
+                  clearable
+                  :maxlength="120"
+                  :disabled="generating"
+                />
+              </div>
+            </div>
+          </div>
+        </el-form-item>
          <el-form-item>
            <div class="gen-actions">
              <el-button type="primary" size="large" :loading="generating" @click="generate">
@@ -386,6 +537,9 @@ onBeforeUnmount(() => {
         <div v-if="it.protagonist && (it.protagonist.identity || it.protagonist.golden_finger)" class="idea-meta">
           <span v-if="it.protagonist.identity">{{ it.protagonist.identity }}</span>
           <span v-if="it.protagonist.golden_finger">金手指：{{ it.protagonist.golden_finger }}</span>
+        </div>
+        <div v-if="honoredLocks(it).length" class="honored-locks">
+          <span class="honored-lock-tag" v-for="h in honoredLocks(it)" :key="h">遵循锁定：{{ h }}</span>
         </div>
         <el-button
           text type="primary" size="small"
@@ -733,5 +887,102 @@ onBeforeUnmount(() => {
 .idea-progress-text {
   font-size: 13px;
   color: #6b7280;
+}
+.locked-panel {
+  width: 100%;
+  background: #fafbff;
+  border: 1px solid #eef0f6;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.locked-panel-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.locked-panel-title {
+  font-size: 13px;
+  color: #6b7280;
+  flex: 1;
+  min-width: 220px;
+}
+.locked-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.locked-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid #eef0f6;
+  border-radius: 8px;
+  background: #fff;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.locked-field.locked {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.12);
+}
+.lf-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+}
+.lf-lock-tag {
+  font-size: 11px;
+  color: #6366f1;
+  background: rgba(99, 102, 241, 0.1);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.lf-clear {
+  margin-left: auto;
+  padding: 0 4px;
+  height: 20px;
+}
+.lf-suggest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.suggest-tag {
+  padding: 3px 10px;
+  border: 1px solid #dbe1f5;
+  border-radius: 14px;
+  font-size: 12px;
+  color: #4b5563;
+  cursor: pointer;
+  background: #f7f8ff;
+  transition: all 0.15s;
+}
+.suggest-tag:hover {
+  border-color: #6366f1;
+  color: #6366f1;
+}
+.suggest-tag.chosen {
+  border-color: #6366f1;
+  background: #6366f1;
+  color: #fff;
+}
+.honored-locks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.honored-lock-tag {
+  font-size: 11px;
+  color: #059669;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: 4px;
+  padding: 1px 6px;
 }
 </style>

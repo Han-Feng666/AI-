@@ -55,7 +55,7 @@ import {
   CHAPTER_BEAT_SYSTEM, PLAN_BEATS_SYSTEM, WRITING_QUALITY_SYSTEM, WRITING_ELEVATE_SYSTEM, AUTO_SUMMARY_SYSTEM, STORY_READABILITY_SYSTEM, STYLE_LEARN_APPLY_SYSTEM, NAMEGEN_SYSTEM,
   ARC_PLAN_SYSTEM, WORLD_EXPAND_SYSTEM, EMOTION_CURVE_SYSTEM,
   ADAPTATION_PLAN_SYSTEM, ADAPTATION_CHAPTER_SYSTEM, LYRICS_TO_NOVEL_SYSTEM,
-  IDEAS_SYSTEM,
+  IDEAS_SYSTEM, IDEAS_SUGGESTIONS_SYSTEM,
   buildNovelContext, buildChapterSystem, buildPolishSystem,
   buildPolishWithIssues, buildPlotFixSystem, buildElevateSystem, extractJson, extractArray, buildReviseSystem,
 getGenreGuide, getGenreGuides, buildPlanGenreConformity,
@@ -1918,6 +1918,32 @@ router.post('/ideas', async (req, res) => {
     try { pruneIdeaRuns(); } catch { /* 清理失败不阻塞 */ }
     startIdeaRun(requestId, { genres: genreList, count: ideaCount, seed });
   }
+
+  // 主角与剧情定制硬约束（v1.4.100）：用户在前置面板锁定/填写的值。
+  // 只保留非空字段；全空时与旧版完全一致（零回归）。
+  const locked = (req.body && typeof req.body.lockedFields === 'object' && req.body.lockedFields)
+    ? req.body.lockedFields
+    : {};
+  const LOCKED_FIELD_DEFS = [
+    ['protagonistName', '主角姓名'],
+    ['protagonistIdentity', '主角身份'],
+    ['protagonistPersonality', '主角性格'],
+    ['goldenFinger', '金手指/最大优势'],
+    ['plotDirection', '主线剧情走向'],
+    ['coreConflict', '核心冲突'],
+    ['openingForm', '开局形态']
+  ];
+  const lockedEntries = LOCKED_FIELD_DEFS
+    .map(([key, label]) => ({ key, label, val: String(locked[key] || '').trim().slice(0, 120) }))
+    .filter((e) => e.val);
+  // 硬约束块：置于题材贴合块之后、差异化轴之前，锁定字段优先级最高。
+  // 同时让差异化执行块知道哪些维度被锁定，避免模型在锁定维度硬凑差异
+  const lockedBlock = lockedEntries.length
+    ? `\n\n【主角与剧情硬约束（用户已锁定，优先级最高，必须严格采用）】
+${lockedEntries.map((e) => `- ${e.label}必须为：${e.val}（严禁自行替换或改名，只可在此基础上展开细节）`).join('\n')}
+- 未被锁定的维度仍须满足批内差异化下限（见下方差异化执行）；已锁定维度不再参与差异化比对。`
+    : '';
+
   const { ctrl, send, end } = startSSE(req, res, { detachOnClose: !!requestId });
   // 所有终态都先落盘再结束流：断线后前端才能从 /ideas/result/:requestId 取回结果
   const finishIdea = (obj) => {
@@ -2218,9 +2244,9 @@ ${isSystem && !isFantasy ? `\n- 用户勾选了"${genreList.filter((g) => SYSTEM
 注意：用户想法是种子而非枷锁——围绕它做 3 个不同角度的展开（如不同主角立场/不同金手指载体/不同世界切入），仍须满足彼此差异化铁律。`
     : '';
 
-  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${trendBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${youthEngineBlock}${xuanhuanCanonBlock}${genreSpineBlock}${horrorEraBlock}${coverageBlock}${seedBlock}${examplesBlock}
+  const userPrompt = `用户选择的题材：${genreList.join('、')}${dualBlock}${channelBlock}${styleBlock}${knowledgeBlock}${presetBlock}${trendBlock}${excludeBlock}${genreConformityBlock}${transmigrationBlock}${engineBlock}${youthEngineBlock}${xuanhuanCanonBlock}${genreSpineBlock}${horrorEraBlock}${coverageBlock}${lockedBlock}${seedBlock}${examplesBlock}
 
-【差异化执行（防雷同下限，不是创意上限——好创意优先于填满候选方向）】
+【差异化执行（防雷同下限，不是创意上限——好创意优先于填满候选方向；已锁定的维度按硬约束执行，其余维度仍须彼此不同）】
 ${axisBlock}
 
 请一次构思 ${ideaCount} 个彼此完全不同的小说创意，输出 JSON 数组。`;
@@ -2682,6 +2708,37 @@ ${axisBlock}
         return true;
       });
 
+      // 主角/剧情定制硬约束机器校验（v1.4.100）：用户锁定的字段必须被严格采用。
+      // prompt 层失守时兜底剔除并触发补救轮；已锁定维度不再参与批内差异化比对。
+      const lockVal = (k) => lockedEntries.find((e) => e.key === k)?.val || '';
+      const lockName = lockVal('protagonistName');
+      const lockGolden = lockVal('goldenFinger');
+      const lockIdentity = lockVal('protagonistIdentity');
+      const lockPersona = lockVal('protagonistPersonality');
+      const lockPlot = lockVal('plotDirection');
+      const lockConflict = lockVal('coreConflict');
+      const lockOpening = lockVal('openingForm');
+      if (lockedEntries.length) {
+        const beforeLock = list.length;
+        list = list.filter((it) => {
+          const p = it.protagonist && typeof it.protagonist === 'object' ? it.protagonist : {};
+          const nameOk = !lockName || (String(p.name || '').includes(lockName) || lockName.includes(String(p.name || '')));
+          const gfOk = !lockGolden || (String(p.golden_finger || '').includes(lockGolden) || lockGolden.includes(String(p.golden_finger || '')));
+          const idOk = !lockIdentity || (String(p.identity || '').includes(lockIdentity) || lockIdentity.includes(String(p.identity || '')));
+          const personaOk = !lockPersona || (String(p.personality || '').includes(lockPersona) || lockPersona.includes(String(p.personality || '')));
+          const plotOk = !lockPlot || ([it.logline, it.outline_H5?.join('\n')].filter(Boolean).join('\n').includes(lockPlot) || lockPlot.includes(String(it.logline || '')));
+          const conflictOk = !lockConflict || ([it.logline, it.hook, it.core_contrast].filter(Boolean).join('\n').includes(lockConflict) || lockConflict.includes(String(it.logline || '')));
+          const openingOk = !lockOpening || ([it.hook, it.logline].filter(Boolean).join('\n').includes(lockOpening) || lockOpening.includes(String(it.hook || '')));
+          if (nameOk && gfOk && idOk && personaOk && plotOk && conflictOk && openingOk) return true;
+          const which = [nameOk ? '' : '主角名', gfOk ? '' : '金手指', idOk ? '' : '身份', personaOk ? '' : '性格', plotOk ? '' : '剧情走向', conflictOk ? '' : '核心冲突', openingOk ? '' : '开局形态'].filter(Boolean).join('/');
+          send({ type: 'status', message: `已剔除未遵循你锁定设定的创意「${it.title}」（未满足：${which}），正在自动重试补齐` });
+          return false;
+        });
+        if (beforeLock > list.length) {
+          send({ type: 'status', message: `剔除 ${beforeLock - list.length} 个未遵循锁定设定的创意，保留 ${list.length} 个` });
+        }
+      }
+
       // 批内去重：金手指 + 主角身份 + logline 前段 + 反差核前段 任一组合重复即剔除后者。
       // v1.4.89：现实向题材金手指按"命中 token 集合"归一（"观察力过人"与"观察习惯
       // 惊人"归一为同一签名）——治"整批都是观察力"的换皮同构
@@ -2854,6 +2911,67 @@ ${axisBlock}
     }
     console.error('ideas generate error:', e);
     return finishIdea({ type: 'error', message: e.message || '创意生成失败' });
+  }
+});
+
+// 灵感「填入信息」定制面板的候选建议（v1.4.100）：AI 按题材/风格为
+// 主角信息与剧情走向字段批量产出候选，用户可采纳或自定义，作为后续
+// /ideas 批量创意的硬约束锚点。与 /ideas 不同：一次调用、非流式、不写库，
+// 失败只返回空对象，不阻塞用户后续操作。
+router.post('/ideas/suggestions', async (req, res) => {
+  const { genres = [], stylePresets = [], styleIds = [] } = req.body || {};
+  const genreList = (Array.isArray(genres) ? genres : []).map((g) => String(g).trim()).filter(Boolean);
+  if (!genreList.length) return res.status(400).json({ error: '请至少选择一个小说题材' });
+  const { config, error } = requireLLM();
+  if (error) return res.status(400).json({ error: error.message });
+
+  const presets = (Array.isArray(stylePresets) ? stylePresets : []).map((s) => String(s).trim()).filter(Boolean);
+  const styles = getStyles(styleIds);
+  const styleLines = styles.map((s) => `- 《${s.name}》：${s.analysis || ''}`).join('\n');
+  const channel = String((req.body || {}).channel || '').trim();
+  const marketList = String((req.body || {}).marketList || '').trim().slice(0, 2000);
+
+  const userText = `用户选择的题材：${genreList.join('、')}${channel ? `\n目标频道：${channel}` : ''}${presets.length ? `\n期望风格基调：${presets.join('、')}` : ''}${styleLines ? `\n风格库作者文风：\n${styleLines}` : ''}${marketList ? `\n市场风向参考（借方向不借内容）：${marketList}` : ''}
+
+请为 7 个字段各给出 3-4 个候选值，输出 JSON 对象。`;
+
+  try {
+    const r = await chat({
+      config,
+      messages: [
+        { role: 'system', content: IDEAS_SUGGESTIONS_SYSTEM },
+        { role: 'user', content: userText }
+      ],
+      maxTokens: 4096,
+      temperature: Number(config.temperature) || 0.9,
+      timeout: 120000,
+      task: 'planning'
+    });
+    const out = String(r?.content || '').trim();
+    if (!out) return res.json({ suggestions: {} });
+    let parsed = null;
+    try { parsed = extractJson(out); } catch { parsed = null; }
+    if (!parsed || typeof parsed !== 'object') {
+      // extractJson 失败时尝试 extractArray 拿对象数组里第一个对象
+      try {
+        const arr = extractArray(out);
+        parsed = arr && arr.length ? arr[0] : null;
+      } catch { parsed = null; }
+    }
+    if (!parsed || typeof parsed !== 'object') return res.json({ suggestions: {} });
+    const KEYS = ['protagonistName', 'protagonistIdentity', 'protagonistPersonality', 'goldenFinger', 'plotDirection', 'coreConflict', 'openingForm'];
+    const suggestions = {};
+    for (const k of KEYS) {
+      const v = parsed[k];
+      if (Array.isArray(v)) {
+        suggestions[k] = v.map((x) => String(x).trim()).filter((x) => x && x.length <= 80).slice(0, 4);
+      } else if (typeof v === 'string' && String(v).trim()) {
+        suggestions[k] = [String(v).trim().slice(0, 80)];
+      }
+    }
+    res.json({ suggestions });
+  } catch (e) {
+    res.json({ suggestions: {} });
   }
 });
 
